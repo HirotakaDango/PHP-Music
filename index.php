@@ -499,7 +499,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.3');
+define('APP_VERSION', '10.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1393,24 +1393,82 @@ HTACCESS;
 
         $info = $getID3->analyze($filePath);
 
+        // Deep Tag Map Resolution across ID3v2, Vorbis, QuickTime, RIFF & Matroska
+        $tagMaps = [
+          'Track Title'   => ['title', 'track_title', 'song_title', 'nam'],
+          'Artist'        => ['artist', 'author', 'ART'],
+          'Album Artist'  => ['album_artist', 'albumartist', 'band', 'aART'],
+          'Album'         => ['album', 'alb'],
+          'Track #'       => ['track_number', 'tracknumber', 'track', 'trkn'],
+          'Disc #'        => ['disc_number', 'discnumber', 'disc', 'disk'],
+          'Year'          => ['year', 'date', 'creation_date', 'recording_time', 'day'],
+          'Genre'         => ['genre', 'gen'],
+          'Composer'      => ['composer', 'writer', 'wrt'],
+          'Publisher'     => ['publisher', 'label', 'organization', 'pub'],
+          'Copyright'     => ['copyright', 'cprt', 'cpy'],
+          'BPM'           => ['bpm', 'tempo'],
+          'Comment'       => ['comment', 'description', 'cmt', 'des'],
+        ];
+
+        $allComments = [];
         if (!empty($info['comments'])) {
-          if (!empty($info['comments']['title'][0])) $meta['tags']['Track Title'] = trim($info['comments']['title'][0]);
-          if (!empty($info['comments']['artist'][0])) $meta['tags']['Artist'] = trim($info['comments']['artist'][0]);
-          if (!empty($info['comments']['album'][0])) $meta['tags']['Album'] = trim($info['comments']['album'][0]);
-          if (!empty($info['comments']['year'][0])) $meta['tags']['Year'] = trim($info['comments']['year'][0]);
-          if (!empty($info['comments']['genre'][0])) $meta['tags']['Genre'] = trim($info['comments']['genre'][0]);
+          $allComments[] = $info['comments'];
+        }
+        if (!empty($info['tags'])) {
+          foreach ($info['tags'] as $fmtTags) {
+            if (is_array($fmtTags)) $allComments[] = $fmtTags;
+          }
+        }
+
+        foreach ($tagMaps as $label => $keys) {
+          foreach ($allComments as $commentGroup) {
+            foreach ($keys as $k) {
+              if (!empty($commentGroup[$k])) {
+                $val = is_array($commentGroup[$k]) ? $commentGroup[$k][0] : $commentGroup[$k];
+                if (is_string($val) && trim($val) !== '') {
+                  $meta['tags'][$label] = trim($val);
+                  break 2;
+                }
+              }
+            }
+          }
         }
 
         if (!empty($info['playtime_seconds'])) {
           $meta['tags']['Duration'] = formatDuration($info['playtime_seconds']);
         }
 
+        // Video Stream Metadata
         if (!empty($info['video']['resolution_x']) && !empty($info['video']['resolution_y'])) {
           $meta['tags']['Resolution'] = $info['video']['resolution_x'] . ' × ' . $info['video']['resolution_y'] . ' px';
         }
+        if (!empty($info['video']['codec']) || !empty($info['video']['dataformat'])) {
+          $meta['tags']['Video Codec'] = strtoupper($info['video']['codec'] ?? $info['video']['dataformat']);
+        }
+        if (!empty($info['video']['frame_rate'])) {
+          $meta['tags']['Frame Rate'] = round($info['video']['frame_rate'], 2) . ' fps';
+        }
+        if (!empty($info['video']['bitrate'])) {
+          $meta['tags']['Video Bitrate'] = round($info['video']['bitrate'] / 1000) . ' kbps';
+        }
 
+        // Audio Stream Metadata
+        if (!empty($info['audio']['codec']) || !empty($info['audio']['dataformat'])) {
+          $meta['tags']['Audio Codec'] = strtoupper($info['audio']['codec'] ?? $info['audio']['dataformat']);
+        }
+        if (!empty($info['audio']['bitrate'])) {
+          $brMode = !empty($info['audio']['bitrate_mode']) ? ' (' . strtoupper($info['audio']['bitrate_mode']) . ')' : '';
+          $meta['tags']['Audio Bitrate'] = round($info['audio']['bitrate'] / 1000) . ' kbps' . $brMode;
+        }
+        if (!empty($info['audio']['channels'])) {
+          $ch = (int)$info['audio']['channels'];
+          $meta['tags']['Channels'] = ($ch === 2) ? 'Stereo (2 ch)' : (($ch === 1) ? 'Mono (1 ch)' : "{$ch} Channels");
+        }
         if (!empty($info['audio']['sample_rate'])) {
           $meta['tags']['Sample Rate'] = number_format($info['audio']['sample_rate']) . ' Hz';
+        }
+        if (!empty($info['audio']['bits_per_sample'])) {
+          $meta['tags']['Bit Depth'] = $info['audio']['bits_per_sample'] . '-bit';
         }
 
         $coverData = null;
@@ -1750,12 +1808,13 @@ HTACCESS;
     header('Content-Type: ' . $mime);
     header('Accept-Ranges: bytes');
     header('Content-Length: ' . sprintf('%.0f', $length));
+    header('X-Accel-Buffering: no');
+    header('X-Content-Type-Options: nosniff');
     $fn = basename($path);
     $fallbackFn = preg_replace('/[^\x20-\x7e]/', '_', $fn) ?: 'file';
     header("Content-Disposition: inline; filename=\"{$fallbackFn}\"; filename*=UTF-8''" . rawurlencode($fn));
-    header('Cache-Control: public, max-age=604800, immutable');
+    header('Cache-Control: public, max-age=31536000, immutable');
     header('Content-Transfer-Encoding: binary');
-    header('X-Content-Type-Options: nosniff');
 
     $fp = @fopen($path, 'rb');
     if ($fp) {
@@ -1764,7 +1823,7 @@ HTACCESS;
         @fseek($fp, (int)$start, SEEK_SET);
       }
       $bytesLeft = $length;
-      $bufferSize = 512 * 1024; // 512KB for smooth 60fps streaming on low-end hardware
+      $bufferSize = ($length <= 2) ? 2 : 256 * 1024;
       while (!feof($fp) && $bytesLeft > 0) {
         if (connection_aborted()) break;
         $read = (int)min($bufferSize, $bytesLeft);
@@ -2136,12 +2195,15 @@ HTACCESS;
       ]);
     }
 
-    if ($action === 'gallery_list') {
+    if ($action === 'gallery_list' || $action === 'video_list' || $action === 'audio_list') {
       $maxResults = 2000;
       $foundFiles = [];
       $rootLen = strlen(realpath($config['root_dir']));
       $cacheReal = realpath($config['cache_dir']);
       $trashReal = realpath($config['trash_dir']);
+
+      $targetType = ($action === 'video_list') ? 'video' : (($action === 'audio_list') ? 'audio' : 'image');
+      $targetExts = ($targetType === 'video') ? $config['video_extensions'] : (($targetType === 'audio') ? $config['audio_extensions'] : $config['image_extensions']);
 
       $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
       $dirIterator = new RecursiveDirectoryIterator($config['root_dir'], $flags);
@@ -2158,12 +2220,14 @@ HTACCESS;
       $iterator->setMaxDepth(10);
 
       $count = 0;
+      $totalBytes = 0;
       foreach ($iterator as $item) {
         if ($item->isDir()) continue;
         $ext = strtolower($item->getExtension());
-        if (in_array($ext, $config['image_extensions'])) {
+        if (in_array($ext, $targetExts)) {
           if ($count >= $maxResults) break;
           $size = $item->getSize();
+          $totalBytes += $size;
           $rel = ltrim(str_replace(['\\', '//'], '/', substr($item->getRealPath(), $rootLen)), '/');
           $foundFiles[] = [
             'name'     => $item->getFilename(),
@@ -2172,7 +2236,7 @@ HTACCESS;
             'size_fmt' => formatBytes($size),
             'mtime'    => $item->getMTime(),
             'ext'      => $ext,
-            'type'     => 'image',
+            'type'     => $targetType,
             'width'    => 0,
             'height'   => 0
           ];
@@ -2185,7 +2249,7 @@ HTACCESS;
       jsonResponse([
         'folders' => [],
         'files'   => $foundFiles,
-        'stats'   => ['files' => count($foundFiles), 'folders' => 0, 'total_size' => '']
+        'stats'   => ['files' => count($foundFiles), 'folders' => 0, 'total_size' => formatBytes($totalBytes)]
       ]);
     }
 
@@ -2248,14 +2312,12 @@ HTACCESS;
           }
         }
 
-        // Video Frame Snapshot using server FFmpeg if available
+        // Aggressively optimized single-pass multi-threaded video frame capture
         if (!file_exists($cachePath) && in_array($ext, $config['video_extensions']) && function_exists('exec')) {
-          $tmpSnap = tempnam(sys_get_temp_dir(), 'vsnap_') . '.jpg';
-          @exec("ffmpeg -ss 00:00:01 -i " . escapeshellarg($fullPath) . " -vframes 1 -q:v 2 " . escapeshellarg($tmpSnap) . " 2>&1");
-          if (file_exists($tmpSnap) && filesize($tmpSnap) > 0) {
-            createThumbnail($tmpSnap, $cachePath, $config['thumb_size'], $config['thumb_quality']);
-            @unlink($tmpSnap);
-          }
+          $escSrc = escapeshellarg($fullPath);
+          $escCache = escapeshellarg($cachePath);
+          $thumbSize = (int)$config['thumb_size'];
+          @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
         }
 
         if (!file_exists($cachePath) && in_array($ext, $config['image_extensions'])) {
@@ -5915,7 +5977,8 @@ HTACCESS;
           border: 1px solid var(--md-sys-color-outline-variant);
           border-radius: 28px;
           width: 100%;
-          max-width: 480px;
+          max-width: 580px;
+          max-height: calc(100dvh - 3rem) !important;
           box-shadow: var(--md-elevation-2);
           overflow: hidden;
           display: flex;
@@ -5928,6 +5991,7 @@ HTACCESS;
           max-width: 95vw;
           width: 95vw;
           height: 92dvh;
+          max-height: calc(100dvh - 2rem) !important;
           border-radius: 20px;
           margin: auto !important;
         }
@@ -6568,6 +6632,7 @@ HTACCESS;
           border-bottom: 1px solid var(--md-sys-color-outline-variant);
           gap: 0.8rem;
           min-width: 0;
+          flex-shrink: 0;
         }
 
         .modal-header > span,
@@ -6585,10 +6650,15 @@ HTACCESS;
 
         .modal-content {
           padding: 1.25rem 1.5rem 1.35rem 1.5rem;
-          overflow-y: auto;
-          flex: 1;
+          overflow-y: auto !important;
+          flex: 1 1 auto;
+          min-height: 0;
           font-size: 0.96rem;
           line-height: 1.55;
+        }
+
+        .modal-footer {
+          flex-shrink: 0;
         }
 
         #modal-share #share-modal-filename {
@@ -7417,6 +7487,12 @@ HTACCESS;
               </div>
               <div class="filter-item" id="nav-gallery" onclick="app.switchDriveSection('gallery')">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zm-11-4l2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z"/></svg> Gallery</span>
+              </div>
+              <div class="filter-item" id="nav-videos" onclick="app.switchDriveSection('videos')">
+                <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg> Videos</span>
+              </div>
+              <div class="filter-item" id="nav-audio" onclick="app.switchDriveSection('audio')">
+                <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg> Audio</span>
               </div>
               <div class="filter-item" id="nav-recents" onclick="app.switchDriveSection('recents')">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> Recents</span>
@@ -9067,17 +9143,36 @@ HTACCESS;
               }
             }, { passive: true });
 
-            // Keyboard Navigation
+            // Keyboard Navigation & Fast Media Controls
             window.addEventListener('keydown', (e) => {
               if (!this.el.classList.contains('active')) return;
-              if (e.key === 'Escape') this.close();
-              if (e.key === 'ArrowLeft') { this.resetTransform(true); this.nav(-1); }
-              if (e.key === 'ArrowRight') { this.resetTransform(true); this.nav(1); }
-              if (e.key === ' ' && (e.target === document.body || e.target === this.el)) {
-                const vid = this.body.querySelector('video, audio');
-                if (vid) {
+              const mediaEl = this.body.querySelector('video, audio');
+
+              if (e.key === 'Escape') {
+                this.close();
+              } else if (e.key === ' ' && (e.target === document.body || e.target === this.el || e.target === mediaEl)) {
+                if (mediaEl) {
                   e.preventDefault();
-                  if (vid.paused) vid.play(); else vid.pause();
+                  if (mediaEl.paused) mediaEl.play(); else mediaEl.pause();
+                }
+              } else if (e.key.toLowerCase() === 'm' && mediaEl) {
+                e.preventDefault();
+                mediaEl.muted = !mediaEl.muted;
+              } else if (e.key === 'ArrowLeft') {
+                if (mediaEl && !mediaEl.paused) {
+                  e.preventDefault();
+                  mediaEl.currentTime = Math.max(0, mediaEl.currentTime - 5);
+                } else {
+                  this.resetTransform(true);
+                  this.nav(-1);
+                }
+              } else if (e.key === 'ArrowRight') {
+                if (mediaEl && !mediaEl.paused) {
+                  e.preventDefault();
+                  mediaEl.currentTime = Math.min(mediaEl.duration || 0, mediaEl.currentTime + 5);
+                } else {
+                  this.resetTransform(true);
+                  this.nav(1);
                 }
               }
             });
@@ -9492,19 +9587,30 @@ HTACCESS;
             const tile = document.createElement('div');
             tile.className = `lb-carousel-item ${index === this.currentIndex ? 'active' : ''}`;
             tile.dataset.index = index;
+            tile.style.position = 'relative';
 
             const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+            const isVid = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
             const isImage = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
 
-            if (isImage) {
-              tile.innerHTML = `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}" loading="lazy" decoding="async" alt="">`;
-            } else {
-              const isVid = item.type === 'video' || ['mp4', 'webm', 'mov', 'mkv'].includes(ext);
-              tile.innerHTML = `
-                <div class="lb-carousel-icon">
-                  <svg viewBox="0 0 24 24"><path d="${isVid ? 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z' : 'M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z'}"/></svg>
-                </div>`;
+            let fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>';
+            if (isVid) {
+              fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>';
+            } else if (isImage) {
+              fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>';
             }
+
+            const thumbUrl = `?access=user&action=thumb&f=${encodeURIComponent(item.path)}`;
+            const onErrorLogic = isVid 
+              ? `if(!this.dataset.tried){this.dataset.tried=true; window.app.captureVideoThumb(this, '${encodeURIComponent(item.path)}');}else{this.remove();}` 
+              : `this.remove();`;
+
+            tile.innerHTML = `
+              <div class="lb-carousel-icon" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:1;">
+                ${fallbackIconSvg}
+              </div>
+              <img src="${thumbUrl}" loading="lazy" decoding="async" alt="" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover; display:block; background-color:#1a1a1a;" onerror="${onErrorLogic}">
+            `;
 
             tile.addEventListener('click', (e) => {
               e.stopPropagation();
@@ -9560,9 +9666,9 @@ HTACCESS;
             if (!this.mediaList || this.mediaList.length <= 1) return;
             const indices = [];
             const len = this.mediaList.length;
-            for (let offset = -3; offset <= 3; offset++) {
+            for (let offset = -2; offset <= 2; offset++) {
               if (offset === 0) continue;
-              const targetIdx = (this.currentIndex + offset + len * 3) % len;
+              const targetIdx = (this.currentIndex + offset + len * 2) % len;
               if (!indices.includes(targetIdx)) {
                 indices.push(targetIdx);
               }
@@ -9571,10 +9677,9 @@ HTACCESS;
               const item = this.mediaList[idx];
               if (item) {
                 const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
-                if (item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext)) {
-                  const img = new Image();
-                  img.src = `?action=raw&f=${encodeURIComponent(item.path)}`;
-                }
+                const isImg = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
+                const img = new Image();
+                img.src = isImg ? `?access=user&action=raw&f=${encodeURIComponent(item.path)}` : `?access=user&action=thumb&f=${encodeURIComponent(item.path)}`;
               }
             });
           }
@@ -10782,7 +10887,7 @@ HTACCESS;
             // Distinguish special virtual tabs (@gallery, @recents, etc.) from physical folders
             if (decoded.startsWith('@')) {
               const secName = decoded.substring(1).toLowerCase();
-              const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+              const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
               if (specialSections.includes(secName)) {
                 if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
                   lightbox.close(false);
@@ -10819,7 +10924,7 @@ HTACCESS;
                 return;
               }
 
-              const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+              const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
               if (this.currentSection && specialSections.includes(this.currentSection)) {
                 this.originSection = this.currentSection;
                 this.openFile(targetFile, false);
@@ -11281,7 +11386,13 @@ HTACCESS;
               this.dirTitle.innerText = 'Trash Bin';
             } else if (this.currentSection === 'gallery') {
               this.dirTitle.innerText = 'Gallery';
-              this.dirStats.innerText = `${filteredFiles.length} Photos`;
+              this.dirStats.innerText = `${filteredFiles.length} Photos (${this.data.stats?.total_size || '0 B'})`;
+            } else if (this.currentSection === 'videos') {
+              this.dirTitle.innerText = 'Videos';
+              this.dirStats.innerText = `${filteredFiles.length} Videos (${this.data.stats?.total_size || '0 B'})`;
+            } else if (this.currentSection === 'audio') {
+              this.dirTitle.innerText = 'Audio';
+              this.dirStats.innerText = `${filteredFiles.length} Audio Tracks (${this.data.stats?.total_size || '0 B'})`;
             } else {
               this.dirTitle.innerText = this.data.path ? this.data.path.split('/').pop() : this.appTitle;
               this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
@@ -11892,6 +12003,10 @@ HTACCESS;
               html += `<span class="bc-sep">/</span><a href="#/@trash" class="bc-item active">Trash Bin</a>`;
             } else if (this.currentSection === 'gallery') {
               html += `<span class="bc-sep">/</span><a href="#/@gallery" class="bc-item active">Gallery</a>`;
+            } else if (this.currentSection === 'videos') {
+              html += `<span class="bc-sep">/</span><a href="#/@videos" class="bc-item active">Videos</a>`;
+            } else if (this.currentSection === 'audio') {
+              html += `<span class="bc-sep">/</span><a href="#/@audio" class="bc-item active">Audio</a>`;
             } else if (this.currentPath) {
               const parts = this.currentPath.split('/');
               let accum = '';
@@ -11921,29 +12036,79 @@ HTACCESS;
 
           captureVideoThumb(imgEl, encodedPath) {
             if (!imgEl) return;
+            if (!this.vThumbQueue) {
+              this.vThumbQueue = [];
+              this.vThumbActive = 0;
+              this.vThumbMax = 3;
+              this.vThumbCanvas = document.createElement('canvas');
+            }
+
+            this.vThumbQueue.push({ imgEl, encodedPath });
+            this.processVideoThumbQueue();
+          }
+
+          processVideoThumbQueue() {
+            if (this.vThumbActive >= this.vThumbMax || !this.vThumbQueue.length) return;
+            const { imgEl, encodedPath } = this.vThumbQueue.shift();
+            if (!imgEl || !imgEl.isConnected) {
+              return this.processVideoThumbQueue();
+            }
+
+            this.vThumbActive++;
             const video = document.createElement('video');
-            video.src = `?access=user&action=raw&f=${encodedPath}#t=0.8`;
-            video.crossOrigin = 'anonymous';
+            video.preload = 'metadata';
             video.muted = true;
             video.playsInline = true;
-            video.preload = 'metadata';
+            video.crossOrigin = 'anonymous';
+
+            const cleanup = () => {
+              video.onloadeddata = null;
+              video.onerror = null;
+              video.onseeked = null;
+              video.removeAttribute('src');
+              video.load();
+              video.remove();
+              this.vThumbActive--;
+              this.processVideoThumbQueue();
+            };
+
+            const timeoutId = setTimeout(() => {
+              imgEl.remove();
+              cleanup();
+            }, 6000);
 
             video.onloadeddata = () => {
               try {
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.min(480, video.videoWidth || 320);
-                canvas.height = Math.min(480, video.videoHeight || 240);
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                video.currentTime = Math.min(0.8, (video.duration || 1) / 2);
+              } catch(e) {}
+            };
+
+            video.onseeked = () => {
+              clearTimeout(timeoutId);
+              try {
+                const canvas = this.vThumbCanvas;
+                const w = Math.min(480, video.videoWidth || 320);
+                const h = Math.round(w * ((video.videoHeight || 240) / (video.videoWidth || 320)));
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+                ctx.drawImage(video, 0, 0, w, h);
                 imgEl.src = canvas.toDataURL('image/jpeg', 0.82);
                 imgEl.style.opacity = '1';
                 imgEl.closest('.file-card')?.classList.add('has-image');
-                video.remove();
               } catch (e) {
                 imgEl.remove();
               }
+              cleanup();
             };
-            video.onerror = () => { imgEl.remove(); };
+
+            video.onerror = () => {
+              clearTimeout(timeoutId);
+              imgEl.remove();
+              cleanup();
+            };
+
+            video.src = `?access=user&action=raw&f=${encodedPath}`;
           }
 
           updateBadges() {
@@ -12915,7 +13080,7 @@ HTACCESS;
             this.currentSection = section;
             this.sidebar.classList.remove('open');
             this.sidebarBackdrop.classList.remove('active');
-            document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery, #nav-videos, #nav-audio').forEach(el => el.classList.remove('active'));
             document.getElementById(`nav-${section}`)?.classList.add('active');
 
             this.filter = 'all';
@@ -12937,6 +13102,10 @@ HTACCESS;
               this.loadTrash();
             } else if (section === 'gallery') {
               this.loadGallery();
+            } else if (section === 'videos') {
+              this.loadVideos();
+            } else if (section === 'audio') {
+              this.loadAudio();
             }
           }
 
@@ -12962,13 +13131,83 @@ HTACCESS;
               this.data = {
                 folders: [],
                 files: data.files || [],
-                stats: { total_size: '', files: (data.files || []).length, folders: 0 },
+                stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
                 path: ''
               };
               this.renderGallery();
               this.updateBreadcrumbs();
               this.updateBadges();
               this.updateDocTitle('Gallery', this.data.files.length);
+            } catch (e) {
+              if (seq !== this.navSeq) return;
+              this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+            }
+          }
+
+          async loadVideos() {
+            const seq = ++this.navSeq;
+            this.currentSection = 'videos';
+            this.updateControlsVisibility();
+            this.currentPath = '';
+            this.selectedItems.clear();
+            this.updateBatchBar();
+            this.renderLimit = 25;
+            this.isSearching = false;
+            this.dirTitle.innerText = 'Videos';
+            this.dirStats.innerText = 'All videos across your drive';
+            this.container.style.opacity = '1';
+            this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading videos...</div></div>';
+
+            try {
+              const res = await fetch('?access=user&action=video_list');
+              if (seq !== this.navSeq) return;
+              const data = await res.json();
+              if (seq !== this.navSeq) return;
+              this.data = {
+                folders: [],
+                files: data.files || [],
+                stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
+                path: ''
+              };
+              this.renderGallery();
+              this.updateBreadcrumbs();
+              this.updateBadges();
+              this.updateDocTitle('Videos', this.data.files.length);
+            } catch (e) {
+              if (seq !== this.navSeq) return;
+              this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+            }
+          }
+
+          async loadAudio() {
+            const seq = ++this.navSeq;
+            this.currentSection = 'audio';
+            this.updateControlsVisibility();
+            this.currentPath = '';
+            this.selectedItems.clear();
+            this.updateBatchBar();
+            this.renderLimit = 25;
+            this.isSearching = false;
+            this.dirTitle.innerText = 'Audio';
+            this.dirStats.innerText = 'All audio tracks across your drive';
+            this.container.style.opacity = '1';
+            this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading audio...</div></div>';
+
+            try {
+              const res = await fetch('?access=user&action=audio_list');
+              if (seq !== this.navSeq) return;
+              const data = await res.json();
+              if (seq !== this.navSeq) return;
+              this.data = {
+                folders: [],
+                files: data.files || [],
+                stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
+                path: ''
+              };
+              this.renderGallery();
+              this.updateBreadcrumbs();
+              this.updateBadges();
+              this.updateDocTitle('Audio', this.data.files.length);
             } catch (e) {
               if (seq !== this.navSeq) return;
               this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
@@ -14154,16 +14393,21 @@ HTACCESS;
             }
 
             if (res.media && res.media.tags && Object.keys(res.media.tags).length) {
+              const hasVideo = !!(res.media.tags['Resolution'] || res.media.tags['Video Codec'] || res.media.tags['Frame Rate']);
+              const mediaIcon = hasVideo
+                ? '<svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>'
+                : '<svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>';
+
               html += `
                 <div class="details-section">
                   <div class="details-title">
-                    <svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>
-                    Media & Track Info
+                    ${mediaIcon}
+                    ${hasVideo ? 'Video & Audio Stream Info' : 'Audio & Track Metadata'}
                   </div>
                   <div class="details-grid">
               `;
               for (let k in res.media.tags) {
-                html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${res.media.tags[k]}</span></div>`;
+                html += `<div class="details-row"><span class="details-label">${this.escapeHtml(k)}</span><span class="details-value">${this.escapeHtml(String(res.media.tags[k]))}</span></div>`;
               }
               html += `</div></div>`;
             }
@@ -14399,7 +14643,7 @@ HTACCESS;
             }
 
             // If opened from a dedicated section (recents, starred, activity, trash, gallery), return to it
-            const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+            const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
             const returnSection = (this.originSection && specialSections.includes(this.originSection))
               ? this.originSection
               : (this.currentSection && specialSections.includes(this.currentSection) ? this.currentSection : null);
@@ -15330,24 +15574,82 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             $info = $getID3->analyze($filePath);
 
+            // Deep Tag Map Resolution across ID3v2, Vorbis, QuickTime, RIFF & Matroska
+            $tagMaps = [
+              'Track Title'   => ['title', 'track_title', 'song_title', 'nam'],
+              'Artist'        => ['artist', 'author', 'ART'],
+              'Album Artist'  => ['album_artist', 'albumartist', 'band', 'aART'],
+              'Album'         => ['album', 'alb'],
+              'Track #'       => ['track_number', 'tracknumber', 'track', 'trkn'],
+              'Disc #'        => ['disc_number', 'discnumber', 'disc', 'disk'],
+              'Year'          => ['year', 'date', 'creation_date', 'recording_time', 'day'],
+              'Genre'         => ['genre', 'gen'],
+              'Composer'      => ['composer', 'writer', 'wrt'],
+              'Publisher'     => ['publisher', 'label', 'organization', 'pub'],
+              'Copyright'     => ['copyright', 'cprt', 'cpy'],
+              'BPM'           => ['bpm', 'tempo'],
+              'Comment'       => ['comment', 'description', 'cmt', 'des'],
+            ];
+
+            $allComments = [];
             if (!empty($info['comments'])) {
-              if (!empty($info['comments']['title'][0])) $meta['tags']['Track Title'] = trim($info['comments']['title'][0]);
-              if (!empty($info['comments']['artist'][0])) $meta['tags']['Artist'] = trim($info['comments']['artist'][0]);
-              if (!empty($info['comments']['album'][0])) $meta['tags']['Album'] = trim($info['comments']['album'][0]);
-              if (!empty($info['comments']['year'][0])) $meta['tags']['Year'] = trim($info['comments']['year'][0]);
-              if (!empty($info['comments']['genre'][0])) $meta['tags']['Genre'] = trim($info['comments']['genre'][0]);
+              $allComments[] = $info['comments'];
+            }
+            if (!empty($info['tags'])) {
+              foreach ($info['tags'] as $fmtTags) {
+                if (is_array($fmtTags)) $allComments[] = $fmtTags;
+              }
+            }
+
+            foreach ($tagMaps as $label => $keys) {
+              foreach ($allComments as $commentGroup) {
+                foreach ($keys as $k) {
+                  if (!empty($commentGroup[$k])) {
+                    $val = is_array($commentGroup[$k]) ? $commentGroup[$k][0] : $commentGroup[$k];
+                    if (is_string($val) && trim($val) !== '') {
+                      $meta['tags'][$label] = trim($val);
+                      break 2;
+                    }
+                  }
+                }
+              }
             }
 
             if (!empty($info['playtime_seconds'])) {
               $meta['tags']['Duration'] = driveFormatDuration($info['playtime_seconds']);
             }
 
+            // Video Stream Metadata
             if (!empty($info['video']['resolution_x']) && !empty($info['video']['resolution_y'])) {
               $meta['tags']['Resolution'] = $info['video']['resolution_x'] . ' × ' . $info['video']['resolution_y'] . ' px';
             }
+            if (!empty($info['video']['codec']) || !empty($info['video']['dataformat'])) {
+              $meta['tags']['Video Codec'] = strtoupper($info['video']['codec'] ?? $info['video']['dataformat']);
+            }
+            if (!empty($info['video']['frame_rate'])) {
+              $meta['tags']['Frame Rate'] = round($info['video']['frame_rate'], 2) . ' fps';
+            }
+            if (!empty($info['video']['bitrate'])) {
+              $meta['tags']['Video Bitrate'] = round($info['video']['bitrate'] / 1000) . ' kbps';
+            }
 
+            // Audio Stream Metadata
+            if (!empty($info['audio']['codec']) || !empty($info['audio']['dataformat'])) {
+              $meta['tags']['Audio Codec'] = strtoupper($info['audio']['codec'] ?? $info['audio']['dataformat']);
+            }
+            if (!empty($info['audio']['bitrate'])) {
+              $brMode = !empty($info['audio']['bitrate_mode']) ? ' (' . strtoupper($info['audio']['bitrate_mode']) . ')' : '';
+              $meta['tags']['Audio Bitrate'] = round($info['audio']['bitrate'] / 1000) . ' kbps' . $brMode;
+            }
+            if (!empty($info['audio']['channels'])) {
+              $ch = (int)$info['audio']['channels'];
+              $meta['tags']['Channels'] = ($ch === 2) ? 'Stereo (2 ch)' : (($ch === 1) ? 'Mono (1 ch)' : "{$ch} Channels");
+            }
             if (!empty($info['audio']['sample_rate'])) {
               $meta['tags']['Sample Rate'] = number_format($info['audio']['sample_rate']) . ' Hz';
+            }
+            if (!empty($info['audio']['bits_per_sample'])) {
+              $meta['tags']['Bit Depth'] = $info['audio']['bits_per_sample'] . '-bit';
             }
 
             $coverData = null;
@@ -15691,12 +15993,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         header('Content-Type: ' . $mime);
         header('Accept-Ranges: bytes');
         header('Content-Length: ' . sprintf('%.0f', $length));
+        header('X-Accel-Buffering: no');
+        header('X-Content-Type-Options: nosniff');
         $fn = basename($path);
         $fallbackFn = preg_replace('/[^\x20-\x7e]/', '_', $fn) ?: 'file';
         header("Content-Disposition: inline; filename=\"{$fallbackFn}\"; filename*=UTF-8''" . rawurlencode($fn));
-        header('Cache-Control: public, max-age=604800, immutable');
+        header('Cache-Control: public, max-age=31536000, immutable');
         header('Content-Transfer-Encoding: binary');
-        header('X-Content-Type-Options: nosniff');
 
         $fp = @fopen($path, 'rb');
         if ($fp) {
@@ -15705,7 +16008,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             @fseek($fp, (int)$start, SEEK_SET);
           }
           $bytesLeft = $length;
-          $bufferSize = 512 * 1024; // 512KB for smooth high-bitrate video/anime stream delivery
+          $bufferSize = ($length <= 2) ? 2 : 256 * 1024;
           while (!feof($fp) && $bytesLeft > 0) {
             if (connection_aborted()) break;
             $read = (int)min($bufferSize, $bytesLeft);
@@ -16298,12 +16601,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         ]);
       }
 
-      if ($driveAction === 'gallery_list') {
+      if ($driveAction === 'gallery_list' || $driveAction === 'video_list' || $driveAction === 'audio_list') {
         $maxResults = 2000;
         $foundFiles = [];
         $rootLen = strlen(realpath($driveConfig['root_dir']));
         $cacheReal = realpath($driveConfig['cache_dir']);
         $trashReal = realpath($driveConfig['trash_dir']);
+
+        $targetType = ($driveAction === 'video_list') ? 'video' : (($driveAction === 'audio_list') ? 'audio' : 'image');
+        $targetExts = ($targetType === 'video') ? $driveConfig['video_extensions'] : (($targetType === 'audio') ? $driveConfig['audio_extensions'] : $driveConfig['image_extensions']);
 
         $flags = FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS;
         $dirIterator = new RecursiveDirectoryIterator($driveConfig['root_dir'], $flags);
@@ -16320,12 +16626,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $iterator->setMaxDepth(10);
 
         $count = 0;
+        $totalBytes = 0;
         foreach ($iterator as $item) {
           if ($item->isDir()) continue;
           $ext = strtolower($item->getExtension());
-          if (in_array($ext, $driveConfig['image_extensions'])) {
+          if (in_array($ext, $targetExts)) {
             if ($count >= $maxResults) break;
             $size = $item->getSize();
+            $totalBytes += $size;
             $rel = ltrim(str_replace(['\\', '//'], '/', substr($item->getRealPath(), $rootLen)), '/');
             $foundFiles[] = [
               'name'     => $item->getFilename(),
@@ -16334,7 +16642,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               'size_fmt' => driveFormatBytes($size),
               'mtime'    => $item->getMTime(),
               'ext'      => $ext,
-              'type'     => 'image',
+              'type'     => $targetType,
               'width'    => 0,
               'height'   => 0
             ];
@@ -16347,7 +16655,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         driveJsonResponse([
           'folders' => [],
           'files'   => $foundFiles,
-          'stats'   => ['files' => count($foundFiles), 'folders' => 0, 'total_size' => '']
+          'stats'   => ['files' => count($foundFiles), 'folders' => 0, 'total_size' => driveFormatBytes($totalBytes)]
         ]);
       }
 
@@ -16408,14 +16716,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
           }
 
-          // Video Frame Snapshot via FFmpeg on server
+          // Aggressively optimized single-pass multi-threaded video frame capture
           if (!file_exists($cachePath) && in_array($ext, $driveConfig['video_extensions']) && function_exists('exec')) {
-            $tmpSnap = tempnam(sys_get_temp_dir(), 'vsnap_') . '.jpg';
-            @exec("ffmpeg -ss 00:00:01 -i " . escapeshellarg($fullPath) . " -vframes 1 -q:v 2 " . escapeshellarg($tmpSnap) . " 2>&1");
-            if (file_exists($tmpSnap) && filesize($tmpSnap) > 0) {
-              driveCreateThumbnail($tmpSnap, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
-              @unlink($tmpSnap);
-            }
+            $escSrc = escapeshellarg($fullPath);
+            $escCache = escapeshellarg($cachePath);
+            $thumbSize = (int)$driveConfig['thumb_size'];
+            @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
           }
 
           if (!file_exists($cachePath) && in_array($ext, $driveConfig['image_extensions'])) {
@@ -30933,7 +31239,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               border: 1px solid var(--md-sys-color-outline-variant);
               border-radius: 28px;
               width: 100%;
-              max-width: 480px;
+              max-width: 580px;
+              max-height: calc(100dvh - 3rem) !important;
               box-shadow: var(--md-elevation-2);
               overflow: hidden;
               display: flex;
@@ -30946,6 +31253,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               max-width: 95vw;
               width: 95vw;
               height: 92dvh;
+              max-height: calc(100dvh - 2rem) !important;
               border-radius: 20px;
               margin: auto !important;
             }
@@ -31684,6 +31992,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               border-bottom: 1px solid var(--md-sys-color-outline-variant);
               gap: 0.75rem;
               min-width: 0;
+              flex-shrink: 0;
             }
 
             .modal-header>span,
@@ -31698,8 +32007,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             .modal-content {
               padding: 1rem 1.4rem 1.2rem 1.4rem;
-              overflow-y: auto;
-              flex: 1;
+              overflow-y: auto !important;
+              flex: 1 1 auto;
+              min-height: 0;
+            }
+
+            .modal-footer {
+              flex-shrink: 0;
             }
 
             .modal-footer {
@@ -32508,6 +32822,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </div>
                     <div class="filter-item" id="nav-gallery" onclick="app.switchDriveSection('gallery')">
                       <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zm-11-4l2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z"/></svg> Gallery</span>
+                    </div>
+                    <div class="filter-item" id="nav-videos" onclick="app.switchDriveSection('videos')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg> Videos</span>
+                    </div>
+                    <div class="filter-item" id="nav-audio" onclick="app.switchDriveSection('audio')">
+                      <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg> Audio</span>
                     </div>
                     <div class="filter-item" id="nav-recents" onclick="app.switchDriveSection('recents')">
                       <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg> Recents</span>
@@ -33423,7 +33743,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
 
               <!-- Item Details Modal -->
-              <div class="modal-box" id="modal-details" style="display:none;">
+              <div class="modal-box" id="modal-details" style="display:none; max-width: 720px;">
                 <div class="modal-header">
                   <span id="details-modal-title">Item Information</span>
                   <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
@@ -34116,17 +34436,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 });
 
-                // Keyboard Navigation
+                // Keyboard Navigation & Fast Media Controls
                 window.addEventListener('keydown', (e) => {
                   if (!this.el.classList.contains('active')) return;
-                  if (e.key === 'Escape') this.close();
-                  if (e.key === 'ArrowLeft') { this.resetTransform(true); this.nav(-1); }
-                  if (e.key === 'ArrowRight') { this.resetTransform(true); this.nav(1); }
-                  if (e.key === ' ' && (e.target === document.body || e.target === this.el)) {
-                    const vid = this.body.querySelector('video, audio');
-                    if (vid) {
+                  const mediaEl = this.body.querySelector('video, audio');
+
+                  if (e.key === 'Escape') {
+                    this.close();
+                  } else if (e.key === ' ' && (e.target === document.body || e.target === this.el || e.target === mediaEl)) {
+                    if (mediaEl) {
                       e.preventDefault();
-                      if (vid.paused) vid.play(); else vid.pause();
+                      if (mediaEl.paused) mediaEl.play(); else mediaEl.pause();
+                    }
+                  } else if (e.key.toLowerCase() === 'm' && mediaEl) {
+                    e.preventDefault();
+                    mediaEl.muted = !mediaEl.muted;
+                  } else if (e.key === 'ArrowLeft') {
+                    if (mediaEl && !mediaEl.paused) {
+                      e.preventDefault();
+                      mediaEl.currentTime = Math.max(0, mediaEl.currentTime - 5);
+                    } else {
+                      this.resetTransform(true);
+                      this.nav(-1);
+                    }
+                  } else if (e.key === 'ArrowRight') {
+                    if (mediaEl && !mediaEl.paused) {
+                      e.preventDefault();
+                      mediaEl.currentTime = Math.min(mediaEl.duration || 0, mediaEl.currentTime + 5);
+                    } else {
+                      this.resetTransform(true);
+                      this.nav(1);
                     }
                   }
                 });
@@ -34540,19 +34879,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const tile = document.createElement('div');
                 tile.className = `lb-carousel-item ${index === this.currentIndex ? 'active' : ''}`;
                 tile.dataset.index = index;
+                tile.style.position = 'relative';
 
                 const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
+                const isVid = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
                 const isImage = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
 
-                if (isImage) {
-                  tile.innerHTML = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" loading="lazy" decoding="async" alt="">`;
-                } else {
-                  const isVid = item.type === 'video' || ['mp4', 'webm', 'mov', 'mkv'].includes(ext);
-                  tile.innerHTML = `
-                    <div class="lb-carousel-icon">
-                      <svg viewBox="0 0 24 24"><path d="${isVid ? 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z' : 'M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z'}"/></svg>
-                    </div>`;
+                let fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>';
+                if (isVid) {
+                  fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>';
+                } else if (isImage) {
+                  fallbackIconSvg = '<svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>';
                 }
+
+                const thumbUrl = `?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}`;
+                const onErrorLogic = isVid 
+                  ? `if(!this.dataset.tried){this.dataset.tried=true; window.app.captureVideoThumb(this, '${encodeURIComponent(item.path)}');}else{this.remove();}` 
+                  : `this.remove();`;
+
+                tile.innerHTML = `
+                  <div class="lb-carousel-icon" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:1;">
+                    ${fallbackIconSvg}
+                  </div>
+                  <img src="${thumbUrl}" loading="lazy" decoding="async" alt="" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover; display:block; background-color:#1a1a1a;" onerror="${onErrorLogic}">
+                `;
 
                 tile.addEventListener('click', (e) => {
                   e.stopPropagation();
@@ -34608,9 +34958,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!this.mediaList || this.mediaList.length <= 1) return;
                 const indices = [];
                 const len = this.mediaList.length;
-                for (let offset = -3; offset <= 3; offset++) {
+                for (let offset = -2; offset <= 2; offset++) {
                   if (offset === 0) continue;
-                  const targetIdx = (this.currentIndex + offset + len * 3) % len;
+                  const targetIdx = (this.currentIndex + offset + len * 2) % len;
                   if (!indices.includes(targetIdx)) {
                     indices.push(targetIdx);
                   }
@@ -34619,10 +34969,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const item = this.mediaList[idx];
                   if (item) {
                     const ext = (item.name ? item.name.split('.').pop() : '').toLowerCase();
-                    if (item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext)) {
-                      const img = new Image();
-                      img.src = `?access=admin&page=drive&action=raw&f=${encodeURIComponent(item.path)}`;
-                    }
+                    const isImg = item.type === 'image' || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext);
+                    const img = new Image();
+                    img.src = isImg ? `?access=admin&page=drive&action=raw&f=${encodeURIComponent(item.path)}` : `?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}`;
                   }
                 });
               }
@@ -35798,7 +36147,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 // Distinguish special virtual tabs (@gallery, @recents, etc.) from physical folders
                 if (decoded.startsWith('@')) {
                   const secName = decoded.substring(1).toLowerCase();
-                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
                   if (specialSections.includes(secName)) {
                     if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
                       lightbox.close(false);
@@ -35835,7 +36184,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     return;
                   }
 
-                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+                  const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
                   if (this.currentSection && specialSections.includes(this.currentSection)) {
                     this.originSection = this.currentSection;
                     this.openFile(targetFile, false);
@@ -36298,7 +36647,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.dirTitle.innerText = 'Trash Bin';
                 } else if (this.currentSection === 'gallery') {
                   this.dirTitle.innerText = 'Gallery';
-                  this.dirStats.innerText = `${filteredFiles.length} Photos`;
+                  this.dirStats.innerText = `${filteredFiles.length} Photos (${this.data.stats?.total_size || '0 B'})`;
+                } else if (this.currentSection === 'videos') {
+                  this.dirTitle.innerText = 'Videos';
+                  this.dirStats.innerText = `${filteredFiles.length} Videos (${this.data.stats?.total_size || '0 B'})`;
+                } else if (this.currentSection === 'audio') {
+                  this.dirTitle.innerText = 'Audio';
+                  this.dirStats.innerText = `${filteredFiles.length} Audio Tracks (${this.data.stats?.total_size || '0 B'})`;
                 } else {
                   this.dirTitle.innerText = this.data.path ? this.data.path.split('/').pop() : this.appTitle;
                   this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
@@ -36915,6 +37270,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   html += `<span class="bc-sep">/</span><a href="#/@trash" class="bc-item active">Trash Bin</a>`;
                 } else if (this.currentSection === 'gallery') {
                   html += `<span class="bc-sep">/</span><a href="#/@gallery" class="bc-item active">Gallery</a>`;
+                } else if (this.currentSection === 'videos') {
+                  html += `<span class="bc-sep">/</span><a href="#/@videos" class="bc-item active">Videos</a>`;
+                } else if (this.currentSection === 'audio') {
+                  html += `<span class="bc-sep">/</span><a href="#/@audio" class="bc-item active">Audio</a>`;
                 } else if (this.currentPath) {
                   const parts = this.currentPath.split('/');
                   let accum = '';
@@ -36944,29 +37303,79 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               captureVideoThumb(imgEl, encodedPath) {
                 if (!imgEl) return;
+                if (!this.vThumbQueue) {
+                  this.vThumbQueue = [];
+                  this.vThumbActive = 0;
+                  this.vThumbMax = 3;
+                  this.vThumbCanvas = document.createElement('canvas');
+                }
+
+                this.vThumbQueue.push({ imgEl, encodedPath });
+                this.processVideoThumbQueue();
+              }
+
+              processVideoThumbQueue() {
+                if (this.vThumbActive >= this.vThumbMax || !this.vThumbQueue.length) return;
+                const { imgEl, encodedPath } = this.vThumbQueue.shift();
+                if (!imgEl || !imgEl.isConnected) {
+                  return this.processVideoThumbQueue();
+                }
+
+                this.vThumbActive++;
                 const video = document.createElement('video');
-                video.src = `?access=admin&page=drive&action=raw&f=${encodedPath}#t=0.8`;
-                video.crossOrigin = 'anonymous';
+                video.preload = 'metadata';
                 video.muted = true;
                 video.playsInline = true;
-                video.preload = 'metadata';
+                video.crossOrigin = 'anonymous';
+
+                const cleanup = () => {
+                  video.onloadeddata = null;
+                  video.onerror = null;
+                  video.onseeked = null;
+                  video.removeAttribute('src');
+                  video.load();
+                  video.remove();
+                  this.vThumbActive--;
+                  this.processVideoThumbQueue();
+                };
+
+                const timeoutId = setTimeout(() => {
+                  imgEl.remove();
+                  cleanup();
+                }, 6000);
 
                 video.onloadeddata = () => {
                   try {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = Math.min(480, video.videoWidth || 320);
-                    canvas.height = Math.min(480, video.videoHeight || 240);
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    video.currentTime = Math.min(0.8, (video.duration || 1) / 2);
+                  } catch(e) {}
+                };
+
+                video.onseeked = () => {
+                  clearTimeout(timeoutId);
+                  try {
+                    const canvas = this.vThumbCanvas;
+                    const w = Math.min(480, video.videoWidth || 320);
+                    const h = Math.round(w * ((video.videoHeight || 240) / (video.videoWidth || 320)));
+                    canvas.width = w;
+                    canvas.height = h;
+                    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+                    ctx.drawImage(video, 0, 0, w, h);
                     imgEl.src = canvas.toDataURL('image/jpeg', 0.82);
                     imgEl.style.opacity = '1';
                     imgEl.closest('.file-card')?.classList.add('has-image');
-                    video.remove();
                   } catch (e) {
                     imgEl.remove();
                   }
+                  cleanup();
                 };
-                video.onerror = () => { imgEl.remove(); };
+
+                video.onerror = () => {
+                  clearTimeout(timeoutId);
+                  imgEl.remove();
+                  cleanup();
+                };
+
+                video.src = `?access=admin&page=drive&action=raw&f=${encodedPath}`;
               }
 
               updateBadges() {
@@ -37933,7 +38342,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.selectedItems.clear();
                 this.updateBatchBar();
 
-                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
+                document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery, #nav-videos, #nav-audio').forEach(el => el.classList.remove('active'));
                 document.getElementById(`nav-${section}`)?.classList.add('active');
 
                 if (updateHash) {
@@ -37962,6 +38371,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.loadTrash();
                 } else if (section === 'gallery') {
                   this.loadGallery();
+                } else if (section === 'videos') {
+                  this.loadVideos();
+                } else if (section === 'audio') {
+                  this.loadAudio();
                 }
               }
 
@@ -37987,13 +38400,83 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.data = {
                     folders: [],
                     files: data.files || [],
-                    stats: { total_size: '', files: (data.files || []).length, folders: 0 },
+                    stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
                     path: ''
                   };
                   this.renderGallery();
                   this.updateBreadcrumbs();
                   this.updateBadges();
                   this.updateDocTitle('Gallery', this.data.files.length);
+                } catch (e) {
+                  if (seq !== this.navSeq) return;
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+                }
+              }
+
+              async loadVideos() {
+                const seq = ++this.navSeq;
+                this.currentSection = 'videos';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.selectedItems.clear();
+                this.updateBatchBar();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Videos';
+                this.dirStats.innerText = 'All videos across your drive';
+                this.container.style.opacity = '1';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading videos...</div></div>';
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=video_list');
+                  if (seq !== this.navSeq) return;
+                  const data = await res.json();
+                  if (seq !== this.navSeq) return;
+                  this.data = {
+                    folders: [],
+                    files: data.files || [],
+                    stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
+                    path: ''
+                  };
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  this.updateDocTitle('Videos', this.data.files.length);
+                } catch (e) {
+                  if (seq !== this.navSeq) return;
+                  this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+                }
+              }
+
+              async loadAudio() {
+                const seq = ++this.navSeq;
+                this.currentSection = 'audio';
+                this.updateControlsVisibility();
+                this.currentPath = '';
+                this.selectedItems.clear();
+                this.updateBatchBar();
+                this.renderLimit = 25;
+                this.isSearching = false;
+                this.dirTitle.innerText = 'Audio';
+                this.dirStats.innerText = 'All audio tracks across your drive';
+                this.container.style.opacity = '1';
+                this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading audio...</div></div>';
+
+                try {
+                  const res = await fetch('?access=admin&page=drive&action=audio_list');
+                  if (seq !== this.navSeq) return;
+                  const data = await res.json();
+                  if (seq !== this.navSeq) return;
+                  this.data = {
+                    folders: [],
+                    files: data.files || [],
+                    stats: data.stats || { total_size: '', files: (data.files || []).length, folders: 0 },
+                    path: ''
+                  };
+                  this.renderGallery();
+                  this.updateBreadcrumbs();
+                  this.updateBadges();
+                  this.updateDocTitle('Audio', this.data.files.length);
                 } catch (e) {
                   if (seq !== this.navSeq) return;
                   this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
@@ -39215,16 +39698,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 if (res.media && res.media.tags && Object.keys(res.media.tags).length) {
+                  const hasVideo = !!(res.media.tags['Resolution'] || res.media.tags['Video Codec'] || res.media.tags['Frame Rate']);
+                  const mediaIcon = hasVideo
+                    ? '<svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>'
+                    : '<svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>';
+
                   html += `
                     <div class="details-section">
                       <div class="details-title">
-                        <svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>
-                        Media & Track Info
+                        ${mediaIcon}
+                        ${hasVideo ? 'Video & Audio Stream Info' : 'Audio & Track Metadata'}
                       </div>
                       <div class="details-grid">
                   `;
                   for (let k in res.media.tags) {
-                    html += `<div class="details-row"><span class="details-label">${k}</span><span class="details-value">${res.media.tags[k]}</span></div>`;
+                    html += `<div class="details-row"><span class="details-label">${this.escapeHtml(k)}</span><span class="details-value">${this.escapeHtml(String(res.media.tags[k]))}</span></div>`;
                   }
                   html += `</div></div>`;
                 }
@@ -39431,7 +39919,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   return;
                 }
 
-                const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery'];
+                const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio'];
                 const returnSection = (this.originSection && specialSections.includes(this.originSection))
                   ? this.originSection
                   : (this.currentSection && specialSections.includes(this.currentSection) ? this.currentSection : null);
@@ -59684,7 +60172,7 @@ function perform_cover_scan($db) {
                       <div class="p-2 bg-dark rounded text-white fs-5"><i class="bi bi-shield-lock-fill"></i></div>
                       <div>
                         <strong class="text-white">Cryptographic Account Backups</strong><br>
-                        <span class="text-secondary">In Settings, you can choose to "Delete Account but Keep Data". The server destroys your email/password logic, turns you into an anonymous ghost account, and provides a complex Backup Key. Keep this key safeâ€”you can enter it into the "Restore Account" module later to reclaim your exact library under a totally different name!</span>
+                        <span class="text-secondary">In Settings, you can choose to "Delete Account but Keep Data". The server destroys your email/password logic, turns you into an anonymous ghost account, and provides a complex Backup Key. Keep this key safe 🔑 — you can enter it into the "Restore Account" module later to reclaim your exact library under a totally different name!</span>
                       </div>
                     </div>
                   </li>
@@ -59751,7 +60239,7 @@ function perform_cover_scan($db) {
                   </div>
                   <div class="col-12 col-md-6 d-flex align-items-center gap-3">
                     <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-repeat"></i></div>
-                    <span class="text-secondary"><strong>Repeat:</strong> Cycle (Off â†’ Repeat All â†’ Repeat One).</span>
+                    <span class="text-secondary"><strong>Repeat:</strong> Cycle (Off ➡️ Repeat All ➡️ Repeat One).</span>
                   </div>
                   <div class="col-12 col-md-6 d-flex align-items-center gap-3">
                     <div class="p-2 bg-dark rounded text-white fs-5" style="min-width: 45px; text-align: center;"><i class="bi bi-three-dots-vertical"></i></div>
@@ -59955,7 +60443,7 @@ function perform_cover_scan($db) {
                 </div>
                 <ul class="mb-0 text-secondary" style="font-size: 0.85rem; padding-left: 1.2rem; line-height: 1.6;">
                   <li><strong>Trigger Instructions:</strong> Press the 'R' key sequentially to cycle through repeat states.</li>
-                  <li><strong>Context & Requirements:</strong> Cycles through the three primary modes: Repeat Off â†’ Repeat All (loops active playlist) â†’ Repeat One (loops current song).</li>
+                  <li><strong>Context & Requirements:</strong> Cycles through the three primary modes: Repeat Off ➡️ Repeat All (loops active playlist) ➡️ Repeat One (loops current song).</li>
                 </ul>
               </div>
     
@@ -63643,22 +64131,22 @@ function perform_cover_scan($db) {
                 <div class="row g-3 text-center mb-4">
                   <div class="col-3">
                     <div class="fw-bold fs-5 text-white">PERFECT</div>
-                    <div class="text-success small">Â±45ms</div>
+                    <div class="text-success small">🎯 ±45ms</div>
                     <div class="text-secondary small">100% Acc</div>
                   </div>
                   <div class="col-3">
                     <div class="fw-bold fs-5" style="color: #ff3b30;">GREAT</div>
-                    <div class="text-success small">Â±80ms</div>
+                    <div class="text-success small">✨ ±80ms</div>
                     <div class="text-secondary small">75% Acc</div>
                   </div>
                   <div class="col-3">
                     <div class="fw-bold fs-5" style="color: #ffa000;">GOOD</div>
-                    <div class="text-success small">Â±125ms</div>
+                    <div class="text-success small">👍 ±125ms</div>
                     <div class="text-secondary small">40% Acc</div>
                   </div>
                   <div class="col-3">
                     <div class="fw-bold fs-5" style="color: #8e1c1c;">BAD / MISS</div>
-                    <div class="text-danger small">&gt;125ms</div>
+                    <div class="text-danger small">❌ &gt;125ms</div>
                     <div class="text-secondary small">Breaks Combo</div>
                   </div>
                 </div>
@@ -66339,7 +66827,7 @@ curl_close($ch);
           <div class="modal-body text-light">
             <div class="p-3 rounded" style="background: rgba(0,0,0,0.2); font-family: 'Courier New', Courier, monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap;">MIT License
 
-Copyright (c) 2026 èµ¤è‘¦ã ã‚“ã”
+Copyright (c) 2026 赤葦だんご (HirotakaDango 🍡)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -66371,7 +66859,7 @@ SOFTWARE.</div>
         <div class="modal-content" style="background-color: var(--ytm-bg);">
           <div class="modal-header border-0" style="background-color: var(--ytm-surface-2);">
             <h5 class="modal-title"><i class="bi bi-cloud-arrow-down-fill"></i> Playlist Downloader</h5>
-            <button type="button" class="btn-close-white" data-bs-dismiss="modal"></button>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body p-2 p-md-4">
             <div class="container-fluid mx-auto" style="max-width: 1000px;">
