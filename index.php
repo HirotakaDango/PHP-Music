@@ -7764,6 +7764,9 @@ HTACCESS;
                 <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
               </button>
               <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.1rem;"></div>
+              <button class="btn-icon" id="btn-select-all" title="Select All / Deselect All (Ctrl+A)">
+                <svg viewBox="0 0 24 24"><path d="M18 7l-1.41-1.41-6.34 6.34 1.41 1.41L18 7zm4.24-1.41L11.66 16.17 7.48 12l-1.41 1.41L11.66 19l12-12-1.42-1.41zM.41 13.41L6 19l1.41-1.41L1.83 12 .41 13.41z"/></svg>
+              </button>
               <button class="btn-icon" id="btn-sort" title="Sort Items">
                 <svg viewBox="0 0 24 24"><path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/></svg>
               </button>
@@ -10639,6 +10642,10 @@ HTACCESS;
               });
             });
     
+            document.getElementById('btn-select-all')?.addEventListener('click', () => {
+              this.toggleSelectAll();
+            });
+
             document.getElementById('btn-folder-info').addEventListener('click', () => {
               this.showDetails(this.currentPath);
             });
@@ -11853,6 +11860,16 @@ HTACCESS;
             this.updateBatchBar();
           }
     
+          toggleSelectAll() {
+            if (this.selectedItems.size === this.filteredList.length && this.filteredList.length > 0) {
+              this.clearSelection();
+            } else {
+              this.filteredList.forEach(item => this.selectedItems.add(item.path));
+              this.container.querySelectorAll('.file-card').forEach(c => c.classList.add('selected'));
+              this.updateBatchBar();
+            }
+          }
+
           clearSelection() {
             this.selectedItems.clear();
             const dbm = document.getElementById('dropdown-batch-more');
@@ -34507,6 +34524,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
                     </button>
                     <div style="width:1px; height:20px; background:var(--md-sys-color-outline-variant); margin:0 0.1rem;"></div>
+                    <button class="btn-icon" id="btn-select-all" title="Select All / Deselect All (Ctrl+A)">
+                      <svg viewBox="0 0 24 24"><path d="M18 7l-1.41-1.41-6.34 6.34 1.41 1.41L18 7zm4.24-1.41L11.66 16.17 7.48 12l-1.41 1.41L11.66 19l12-12-1.42-1.41zM.41 13.41L6 19l1.41-1.41L1.83 12 .41 13.41z"/></svg>
+                    </button>
                     <button class="btn-icon" id="btn-sort" title="Sort Items">
                       <svg viewBox="0 0 24 24"><path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/></svg>
                     </button>
@@ -37320,6 +37340,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   });
                 });
         
+                document.getElementById('btn-select-all')?.addEventListener('click', () => {
+                  this.toggleSelectAll();
+                });
+
                 document.getElementById('btn-folder-info').addEventListener('click', () => {
                   this.showDetails(this.currentPath);
                 });
@@ -38542,6 +38566,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 this.updateBatchBar();
               }
         
+              toggleSelectAll() {
+                if (this.selectedItems.size === this.filteredList.length && this.filteredList.length > 0) {
+                  this.clearSelection();
+                } else {
+                  this.filteredList.forEach(item => this.selectedItems.add(item.path));
+                  this.container.querySelectorAll('.file-card').forEach(c => c.classList.add('selected'));
+                  this.updateBatchBar();
+                }
+              }
+
               clearSelection() {
                 this.selectedItems.clear();
                 const dbm = document.getElementById('dropdown-batch-more');
