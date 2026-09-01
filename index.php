@@ -35,8 +35,8 @@ $needs_htaccess_update = false;
 
 if (file_exists($htaccess_path)) {
   $content = file_get_contents($htaccess_path);
-  // Force update if file is empty, outdated, or missing the users_drive exemption rule
-  if (empty(trim($content)) || strpos($content, 'users_drive') === false) {
+  // Force update if file is empty, outdated, or missing exemptions
+  if (empty(trim($content)) || strpos($content, 'users_drive') === false || strpos($content, 'phpshares') === false) {
     $needs_htaccess_update = true;
   }
 } else {
@@ -71,6 +71,7 @@ Options -Indexes
   # --- RULE A: Match files inside subfolders (e.g., screenshots/7.png) ---
   RewriteCond %{REQUEST_URI} !^/index\.php$
   RewriteCond %{REQUEST_URI} !^/users_drive/
+  RewriteCond %{REQUEST_URI} !^/phpshares/
   RewriteCond %{ENV:REDIRECT_STATUS} ^$
   # First, ensure the file is within allowed paths or has an allowed extension
   RewriteCond $0 ^(uploads/.*|getid3/.*|.*\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$
@@ -80,6 +81,7 @@ Options -Indexes
   # --- RULE B: Match files directly in the root folder (e.g., 7.png) ---
   RewriteCond %{REQUEST_URI} !^/index\.php$
   RewriteCond %{REQUEST_URI} !^/users_drive/
+  RewriteCond %{REQUEST_URI} !^/phpshares/
   RewriteCond %{ENV:REDIRECT_STATUS} ^$
   # Only allow specific media extensions if they sit in the root folder
   RewriteCond $0 \.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif)$
@@ -186,7 +188,7 @@ if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act
   $temp_action = $act_match[1];
 }
 
-$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon']);
+$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_art_image', 'get_status_media', 'get_message_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon']);
 $is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
 
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -487,6 +489,189 @@ if (isset($_GET['page']) && $_GET['page'] === 'forbidden') {
 $is_super_admin = 0;
 $is_admin = 0;
 
+// VISITOR PARSING & DAILY TRACKING ENGINE
+function parse_user_agent_details($ua_string) {
+  $details = [
+    'browser' => 'Other',
+    'browser_version' => '',
+    'os' => 'Other',
+    'device_type' => 'Desktop',
+    'is_bot' => 0
+  ];
+
+  if (empty($ua_string)) return $details;
+
+  // Bot & Crawler Detection
+  if (preg_match('/(googlebot|bingbot|yandex|duckduckbot|slurp|baiduspider|facebookexternalhit|twitterbot|rogerbot|linkedinbot|embedly|quora link preview|showyoubot|outbrain|pinterest\/0\.|pinterestbot|slackbot|vkShare|W3C_Validator|whatsapp|screaming frog|bot|spider|crawl|scraper|curl|wget)/i', $ua_string)) {
+    $details['is_bot'] = 1;
+    $details['device_type'] = 'Bot';
+    $details['browser'] = 'Crawler / Bot';
+    $details['os'] = 'Bot Network';
+    return $details;
+  }
+
+  // Device Classification
+  if (preg_match('/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i', $ua_string)) {
+    $details['device_type'] = 'Tablet';
+  } elseif (preg_match('/(mobile|iphone|ipod|blackberry|opera mini|iemobile|kindle|silk-mobi|fennec|minimo|symbian|teleca|up\.browser|up\.link|wap|vodafone)/i', $ua_string)) {
+    $details['device_type'] = 'Mobile';
+  } else {
+    $details['device_type'] = 'Desktop';
+  }
+
+  // Operating System Parser
+  $os_rules = [
+    'Windows 11' => '/windows nt 10\.0.*build (?:2[2-9]\d{3}|[3-9]\d{4})/i',
+    'Windows 10' => '/windows nt 10\.0/i',
+    'Windows 8.1' => '/windows nt 6\.3/i',
+    'Windows 8' => '/windows nt 6\.2/i',
+    'Windows 7' => '/windows nt 6\.1/i',
+    'Windows' => '/windows/i',
+    'iOS (iPhone/iPad)' => '/(iphone|ipad|ipod).*os ([0-9_]+)/i',
+    'macOS' => '/macintosh|mac os x/i',
+    'Android' => '/android ([0-9.]+)?/i',
+    'Ubuntu Linux' => '/ubuntu/i',
+    'Debian Linux' => '/debian/i',
+    'Chrome OS' => '/cros/i',
+    'Linux' => '/linux/i'
+  ];
+
+  foreach ($os_rules as $os_name => $pattern) {
+    if (preg_match($pattern, $ua_string)) {
+      $details['os'] = $os_name;
+      break;
+    }
+  }
+
+  // Browser Parser
+  $browser_rules = [
+    'Brave' => '/brave\/([0-9.]+)/i',
+    'Edge' => '/edg(?:e|a|ios)?\/([0-9.]+)/i',
+    'Vivaldi' => '/vivaldi\/([0-9.]+)/i',
+    'Opera' => '/opr\/([0-9.]+)|opera\/([0-9.]+)/i',
+    'Samsung Internet' => '/samsungbrowser\/([0-9.]+)/i',
+    'Chrome' => '/chrome\/([0-9.]+)/i',
+    'Firefox' => '/firefox\/([0-9.]+)/i',
+    'Safari' => '/version\/([0-9.]+).*safari/i',
+    'Internet Explorer' => '/msie\s([0-9.]+)|trident\/.*rv:([0-9.]+)/i'
+  ];
+
+  foreach ($browser_rules as $b_name => $pattern) {
+    if (preg_match($pattern, $ua_string, $m)) {
+      $details['browser'] = $b_name;
+      $details['browser_version'] = $m[1] ?? ($m[2] ?? '');
+      break;
+    }
+  }
+
+  return $details;
+}
+
+function track_site_visitor($db) {
+  // 1. Bypass media streaming, audio chunks, static thumbs, icons, and service worker queries
+  $raw_uri = $_SERVER['REQUEST_URI'] ?? '';
+  $action = $_GET['action'] ?? '';
+  $bypass_actions = [
+    'get_stream', 'stream', 'thumb', 'get_image', 'get_profile_picture',
+    'get_profile_background', 'get_app_icon', 'icon', 'app_icon',
+    'pwa', 'og_image', 'download_song', 'download_cover', 'download',
+    'get_art_image', 'get_status_media', 'get_message_image'
+  ];
+
+  if (in_array($action, $bypass_actions) || isset($_GET['pwa']) || isset($_GET['download'])) {
+    return;
+  }
+
+  // 2. Resolve client IP securely
+  $ip_raw = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+  if (strpos($ip_raw, ',') !== false) {
+    $ip_raw = trim(explode(',', $ip_raw)[0]);
+  }
+
+  // Normalize local and loopback IPv6 addresses
+  if ($ip_raw === '::1' || $ip_raw === '0.0.0.0') {
+    $ip_raw = '127.0.0.1';
+  }
+
+  $visit_date = date('Y-m-d');
+  $ip_hash = hash('sha256', $ip_raw . '_' . $visit_date); // Daily unique salt per IP
+
+  try {
+    // 3. STRICT DEDUPLICATION: Check if this IP has already been logged today
+    $stmt_check = $db->prepare("SELECT id FROM site_analytics WHERE visit_date = ? AND ip_hash = ? LIMIT 1");
+    $stmt_check->execute([$visit_date, $ip_hash]);
+    $already_visited_today = (bool)$stmt_check->fetchColumn();
+
+    // If IP visited today, exit immediately to guarantee zero duplicate counts
+    if ($already_visited_today) {
+      return;
+    }
+
+    $visit_time = date('H:i:s');
+    $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
+    $referer = $_SERVER['HTTP_REFERER'] ?? null;
+    $current_user_id = $_SESSION['user_id'] ?? 0;
+    $ua_info = parse_user_agent_details($user_agent);
+
+    // 4. Log the unique visitor footprint
+    $stmt_ins = $db->prepare("
+      INSERT INTO site_analytics (
+        visit_date, visit_time, ip_hash, ip_address, user_id, user_agent,
+        browser, browser_version, os, device_type, referer, request_uri,
+        is_unique_daily, is_bot
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ");
+    $stmt_ins->execute([
+      $visit_date,
+      $visit_time,
+      $ip_hash,
+      $ip_raw,
+      $current_user_id,
+      mb_substr($user_agent, 0, 500),
+      $ua_info['browser'],
+      $ua_info['browser_version'],
+      $ua_info['os'],
+      $ua_info['device_type'],
+      $referer ? mb_substr($referer, 0, 500) : null,
+      mb_substr($raw_uri, 0, 500),
+      $ua_info['is_bot']
+    ]);
+
+    // 5. Increment daily aggregated metrics
+    $col_dev = 'desktop_hits';
+    if ($ua_info['device_type'] === 'Mobile') $col_dev = 'mobile_hits';
+    elseif ($ua_info['device_type'] === 'Tablet') $col_dev = 'tablet_hits';
+    elseif ($ua_info['is_bot']) $col_dev = 'bot_hits';
+
+    $db->prepare("
+      INSERT INTO daily_visitor_stats (
+        visit_date, total_hits, unique_visitors, registered_visitors,
+        guest_visitors, desktop_hits, mobile_hits, tablet_hits, bot_hits, updated_at
+      ) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(visit_date) DO UPDATE SET
+        total_hits = total_hits + 1,
+        unique_visitors = unique_visitors + 1,
+        registered_visitors = registered_visitors + excluded.registered_visitors,
+        guest_visitors = guest_visitors + excluded.guest_visitors,
+        desktop_hits = desktop_hits + excluded.desktop_hits,
+        mobile_hits = mobile_hits + excluded.mobile_hits,
+        tablet_hits = tablet_hits + excluded.tablet_hits,
+        bot_hits = bot_hits + excluded.bot_hits,
+        updated_at = CURRENT_TIMESTAMP
+    ")->execute([
+      $visit_date,
+      ($current_user_id > 0) ? 1 : 0,
+      ($current_user_id === 0) ? 1 : 0,
+      ($col_dev === 'desktop_hits') ? 1 : 0,
+      ($col_dev === 'mobile_hits') ? 1 : 0,
+      ($col_dev === 'tablet_hits') ? 1 : 0,
+      ($col_dev === 'bot_hits') ? 1 : 0
+    ]);
+  } catch (Exception $e) {
+    // Non-blocking logging failure fallback
+  }
+}
+
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
 $write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'upload_art', 'edit_art', 'delete_art', 'toggle_art_favorite', 'add_art_comment', 'edit_art_comment', 'delete_art_comment'];
 $current_action = $_GET['action'] ?? '';
@@ -499,11 +684,16 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.4');
+define('APP_VERSION', '10.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
 $auto_scan = true; // Auto scan songs during empty or new files
+
+// Track visitor footprint on non-media requests (Runs safely AFTER DB_FILE is defined)
+try {
+  track_site_visitor(get_db());
+} catch (Exception $e) {}
 
 // Disable auto scan if super admin does not exist to enforce setup page
 try {
@@ -18327,6 +18517,196 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       die("Security violation: CSRF token mismatch.");
     }
 
+    // ANALYTICS & STORAGE ADMIN ACTIONS
+
+    // 1. Export Analytics to CSV
+    if (isset($_POST['export_analytics_csv'])) {
+      $db = get_db();
+      $days = (int)($_POST['export_days'] ?? 30);
+      $date_limit = date('Y-m-d', strtotime("-{$days} days"));
+
+      header('Content-Type: text/csv; charset=utf-8');
+      header('Content-Disposition: attachment; filename="analytics_export_' . date('Y-m-d_His') . '.csv"');
+
+      $output = fopen('php://output', 'w');
+      fputcsv($output, ['ID', 'Date', 'Time', 'IP Hash', 'User ID', 'Browser', 'OS', 'Device Type', 'Is Unique', 'Is Bot', 'Referer', 'Request URI']);
+
+      $stmt = $db->prepare("SELECT id, visit_date, visit_time, ip_hash, user_id, browser, os, device_type, is_unique_daily, is_bot, referer, request_uri FROM site_analytics WHERE visit_date >= ? ORDER BY id DESC");
+      $stmt->execute([$date_limit]);
+
+      while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        fputcsv($output, $row);
+      }
+      fclose($output);
+      exit;
+    }
+
+    // 2. Prune / Clear Old Analytics Logs
+    if (isset($_POST['prune_analytics_logs'])) {
+      $db = get_db();
+      $prune_range = $_POST['prune_range'] ?? '90';
+
+      if ($prune_range === 'all') {
+        $db->exec("DELETE FROM site_analytics; DELETE FROM daily_visitor_stats;");
+        log_admin_activity($db, $_SESSION['admin_email'], 'Purged All Visitor Analytics & Daily Stats', 0);
+        $_SESSION['admin_flash_msg'] = "All analytics logs and statistics have been permanently cleared.";
+      } else {
+        $days = (int)$prune_range;
+        $date_threshold = date('Y-m-d', strtotime("-{$days} days"));
+        $stmt_del = $db->prepare("DELETE FROM site_analytics WHERE visit_date < ?");
+        $stmt_del->execute([$date_threshold]);
+        $del_count = $stmt_del->rowCount();
+
+        log_admin_activity($db, $_SESSION['admin_email'], "Pruned Analytics logs older than {$days} days ({$del_count} records removed)", 0);
+        $_SESSION['admin_flash_msg'] = "Pruned {$del_count} visitor records older than {$days} days.";
+      }
+      header('Location: ?access=admin&page=analytics');
+      exit;
+    }
+
+    // 3. Clean Thumbnail & Gallery Cache
+    if (isset($_POST['clean_storage_cache'])) {
+      $db = get_db();
+      $cache_dir = MUSIC_DIR . '/.gallery_cache';
+      $reclaimed = 0;
+      $files_deleted = 0;
+
+      if (is_dir($cache_dir)) {
+        $files = new RecursiveIteratorIterator(
+          new RecursiveDirectoryIterator($cache_dir, FilesystemIterator::SKIP_DOTS),
+          RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($files as $file) {
+          if ($file->isFile()) {
+            $sz = $file->getSize();
+            if (@unlink($file->getRealPath())) {
+              $reclaimed += $sz;
+              $files_deleted++;
+            }
+          }
+        }
+      }
+
+      // Also clean user drive .gallery_cache folders
+      $users_drive_base = MUSIC_DIR . '/users_drive';
+      if (is_dir($users_drive_base)) {
+        foreach (glob($users_drive_base . '/user_*_folder/.gallery_cache/*', GLOB_NOSORT) as $f) {
+          if (is_file($f)) {
+            $sz = @filesize($f);
+            if (@unlink($f)) {
+              $reclaimed += $sz;
+              $files_deleted++;
+            }
+          }
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Cleaned Thumbnail Cache: Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB across {$files_deleted} files", 0);
+      $_SESSION['admin_flash_msg'] = "Thumbnail cache cleaned! Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB across {$files_deleted} items.";
+      header('Location: ?access=admin&page=storage');
+      exit;
+    }
+
+    // 4. Prune Staging & Temporary Chunk Uploads
+    if (isset($_POST['clean_temp_uploads'])) {
+      $db = get_db();
+      $temp_folders = [
+        MUSIC_DIR . '/.tmp_uploads',
+        MUSIC_DIR . '/.tmp_db',
+        MUSIC_DIR . '/.gallery_cache/chunks'
+      ];
+      $reclaimed = 0;
+      $deleted_count = 0;
+
+      foreach ($temp_folders as $tdir) {
+        if (is_dir($tdir)) {
+          $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($tdir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+          );
+          foreach ($it as $item) {
+            if ($item->isFile()) {
+              $sz = $item->getSize();
+              if (@unlink($item->getRealPath())) {
+                $reclaimed += $sz;
+                $deleted_count++;
+              }
+            } elseif ($item->isDir()) {
+              @rmdir($item->getRealPath());
+            }
+          }
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Pruned Temp Uploads: Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB", 0);
+      $_SESSION['admin_flash_msg'] = "Purged temporary chunks and staging files. Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB.";
+      header('Location: ?access=admin&page=storage');
+      exit;
+    }
+
+    // 5. Vacuum SQLite Database Engine
+    if (isset($_POST['vacuum_storage_db'])) {
+      $db = get_db();
+      $before_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
+      try {
+        $db->exec("PRAGMA temp_store = FILE;");
+        $db->exec("VACUUM;");
+        clearstatcache(true, DB_FILE);
+        $after_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
+        $saved = max(0, $before_size - $after_size);
+
+        // Invalidate storage cache so next view displays freshly compacted sizes
+        $storage_cache_file = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+        if (file_exists($storage_cache_file)) @unlink($storage_cache_file);
+
+        log_admin_activity($db, $_SESSION['admin_email'], "Executed SQLite VACUUM: Reclaimed " . number_format($saved / 1048576, 2) . " MB", 0);
+        $_SESSION['admin_flash_msg'] = "Database compacted successfully! Reclaimed " . number_format($saved / 1048576, 2) . " MB of fragmentation.";
+      } catch (Exception $e) {
+        $_SESSION['admin_flash_msg'] = "Vacuum error: " . $e->getMessage();
+      }
+      header('Location: ?access=admin&page=storage');
+      exit;
+    }
+
+    // 5b. Force Storage Real-Time Deep Re-Audit
+    if (isset($_POST['force_storage_reaudit'])) {
+      $storage_cache_file = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+      if (file_exists($storage_cache_file)) @unlink($storage_cache_file);
+      $_SESSION['admin_flash_msg'] = "Storage cache flushed. Deep disk audit recalculated in real time.";
+      header('Location: ?access=admin&page=storage');
+      exit;
+    }
+
+    // 6. Delete User's Trash Bin Files
+    if (isset($_POST['purge_user_drive_trash']) && isset($_POST['target_user_id'])) {
+      $db = get_db();
+      $target_uid = (int)$_POST['target_user_id'];
+      $trash_dir = MUSIC_DIR . '/users_drive/user_' . $target_uid . '_folder/.drive_trash_bin';
+      $reclaimed = 0;
+
+      if (is_dir($trash_dir)) {
+        foreach (glob($trash_dir . '/*', GLOB_NOSORT) as $f) {
+          if (is_file($f)) {
+            $reclaimed += @filesize($f);
+            @unlink($f);
+          }
+        }
+        $meta_file = MUSIC_DIR . '/users_drive/user_' . $target_uid . '_folder/.gallery_cache/.drive_meta.json';
+        if (file_exists($meta_file)) {
+          $meta = @json_decode(@file_get_contents($meta_file), true);
+          if (is_array($meta)) {
+            $meta['trash'] = [];
+            @file_put_contents($meta_file, json_encode($meta));
+          }
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Purged Trash for User ID: {$target_uid} (" . number_format($reclaimed / 1048576, 2) . " MB)", $target_uid);
+      $_SESSION['admin_flash_msg'] = "Purged trash for User ID {$target_uid}. Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB.";
+      header('Location: ?access=admin&page=storage');
+      exit;
+    }
+
     // log_admin_activity defined globally above
 
     if (isset($_POST['generate_reset_link']) && isset($_POST['user_id'])) {
@@ -18885,7 +19265,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage']; // Default to all if missing
+  $current_admin_permissions = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -18925,6 +19305,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 ?>
 <?php
   $page_titles = [
+    'analytics' => 'Daily Traffic & Visitor Analytics',
+    'storage' => 'Storage Management & Cleanup',
     'users' => 'User Management',
     'songs' => 'Song Management',
     'artworks' => 'Artwork Management',
@@ -18934,8 +19316,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'drive' => 'Drive Manager',
     'dbmanager' => 'PHPDBManager',
     'ide' => 'PHPEditor (IDE)',
-    'api' => 'API Keys',
-    'storage' => 'Storage Stats'
+    'api' => 'API Keys'
   ];
   $active_page_key = $_GET['page'] ?? 'users';
   $admin_page_title = isset($page_titles[$active_page_key]) ? $page_titles[$active_page_key] . " - Admin Panel" : "Admin Panel";
@@ -18944,7 +19325,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 <html lang="en" data-bs-theme="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=1280, initial-scale=0.35, minimum-scale=0.25, maximum-scale=3.0, user-scalable=yes" />
     <title><?php echo $admin_page_title; ?> - PHP Music</title>
     <link rel="icon" id="app-favicon" type="image/svg+xml" href="?action=get_app_icon" />
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
@@ -19911,8 +20292,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
           
           <div class="mb-4 mt-3 d-flex flex-column">
+            <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=storage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
-            <a href="?access=admin" class="nav-link <?php echo (empty($_GET['page']) || $_GET['page'] === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <a href="?access=admin&page=users" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && ($_GET['page'] ?? '') !== 'analytics' && ($_GET['page'] ?? '') !== 'storage') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
             <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
@@ -19934,9 +20321,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
             <a href="?access=admin&page=dbmanager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=storage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-network-fill"></i><span>Storage Stats</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
             <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
@@ -20129,7 +20513,823 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php unset($_SESSION['admin_flash_msg']); ?>
         <?php endif; ?>
 
-        <?php if (($_GET['page'] ?? '') === 'reports'): ?>
+        <?php if (($_GET['page'] ?? '') === 'analytics'): ?>
+          <?php
+            $db = get_db();
+            $analytics_period = $_GET['period'] ?? '30';
+            $analytics_filter_bot = isset($_GET['show_bots']) && $_GET['show_bots'] === '1';
+            $analytics_search = trim($_GET['search'] ?? '');
+            $analytics_page = max(1, (int)($_GET['p'] ?? 1));
+            $analytics_limit = 25;
+            $analytics_offset = ($analytics_page - 1) * $analytics_limit;
+
+            $date_where = "1=1";
+            if ($analytics_period !== 'all') {
+              $days_back = (int)$analytics_period;
+              $start_date_filter = date('Y-m-d', strtotime("-{$days_back} days"));
+              $date_where = "visit_date >= '{$start_date_filter}'";
+            }
+
+            $bot_where = $analytics_filter_bot ? "1=1" : "is_bot = 0";
+
+            $today_str = date('Y-m-d');
+            $yesterday_str = date('Y-m-d', strtotime('-1 day'));
+
+            // 1. High-speed Indexed Queries for Top KPI Cards
+            $stmt_today = $db->prepare("SELECT total_hits, unique_visitors, registered_visitors, guest_visitors FROM daily_visitor_stats WHERE visit_date = ?");
+            $stmt_today->execute([$today_str]);
+            $today_kpi = $stmt_today->fetch() ?: ['total_hits' => 0, 'unique_visitors' => 0, 'registered_visitors' => 0, 'guest_visitors' => 0];
+
+            $stmt_yest = $db->prepare("SELECT total_hits, unique_visitors FROM daily_visitor_stats WHERE visit_date = ?");
+            $stmt_yest->execute([$yesterday_str]);
+            $yest_kpi = $stmt_yest->fetch() ?: ['total_hits' => 0, 'unique_visitors' => 0];
+
+            $stmt_period = $db->query("SELECT SUM(total_hits) as total_hits, SUM(unique_visitors) as total_uniques, SUM(registered_visitors) as total_reg, SUM(bot_hits) as total_bots FROM daily_visitor_stats WHERE {$date_where}")->fetch();
+            $period_total_hits = (int)($stmt_period['total_hits'] ?? 0);
+            $period_total_uniques = (int)($stmt_period['total_uniques'] ?? 0);
+            $period_total_reg = (int)($stmt_period['total_reg'] ?? 0);
+            $period_total_bots = (int)($stmt_period['total_bots'] ?? 0);
+
+            $active_days_count = (int)$db->query("SELECT COUNT(DISTINCT visit_date) FROM daily_visitor_stats WHERE {$date_where}")->fetchColumn() ?: 1;
+            $avg_daily_hits = round($period_total_hits / max(1, $active_days_count));
+            $avg_daily_uniques = round($period_total_uniques / max(1, $active_days_count));
+
+            // 2. Chart Dataset 1: Traffic Growth (Area Line)
+            $stmt_chart_days = $db->query("
+              SELECT visit_date, total_hits, unique_visitors, registered_visitors 
+              FROM daily_visitor_stats 
+              WHERE {$date_where} 
+              ORDER BY visit_date ASC 
+              LIMIT 90
+            ")->fetchAll();
+
+            $chart_labels = [];
+            $chart_hits = [];
+            $chart_uniques = [];
+            $chart_reg = [];
+            foreach ($stmt_chart_days as $cd) {
+              $chart_labels[] = date('M j', strtotime($cd['visit_date']));
+              $chart_hits[] = (int)$cd['total_hits'];
+              $chart_uniques[] = (int)$cd['unique_visitors'];
+              $chart_reg[] = (int)$cd['registered_visitors'];
+            }
+
+            // 2b. Date-Based Uploads & Registration Aggregations
+            $days_back_val = ($analytics_period !== 'all') ? (int)$analytics_period : 365;
+            $start_ts_filter = ($analytics_period !== 'all') ? strtotime("-{$days_back_val} days 00:00:00") : 0;
+            $start_date_str = date('Y-m-d', $start_ts_filter);
+
+            $music_date_filter = ($analytics_period !== 'all') ? "WHERE last_modified >= {$start_ts_filter}" : "WHERE last_modified IS NOT NULL";
+            $arts_date_filter = ($analytics_period !== 'all') ? "WHERE date(created_at) >= '{$start_date_str}'" : "WHERE created_at IS NOT NULL";
+            $users_date_filter = ($analytics_period !== 'all') ? "WHERE date(created_at) >= '{$start_date_str}'" : "WHERE created_at IS NOT NULL";
+
+            $daily_songs = [];
+            $daily_arts = [];
+            $daily_users = [];
+
+            try {
+              $daily_songs = $db->query("
+                SELECT date(last_modified, 'unixepoch') as d, COUNT(id) as c 
+                FROM music 
+                {$music_date_filter} AND last_modified > 0
+                GROUP BY d
+              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+            } catch (Exception $e) {}
+
+            try {
+              $daily_arts = $db->query("
+                SELECT date(created_at) as d, COUNT(id) as c 
+                FROM arts 
+                {$arts_date_filter} 
+                GROUP BY d
+              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+            } catch (Exception $e) {}
+
+            try {
+              $daily_users = $db->query("
+                SELECT date(created_at) as d, COUNT(id) as c 
+                FROM users 
+                {$users_date_filter} 
+                GROUP BY d
+              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+            } catch (Exception $e) {}
+
+            $period_total_songs = array_sum($daily_songs);
+            $period_total_arts = array_sum($daily_arts);
+            $period_total_new_users = array_sum($daily_users);
+
+            // Synchronize unified dates for the upload growth chart
+            $all_growth_dates = [];
+            foreach ($stmt_chart_days as $cd) {
+              $all_growth_dates[$cd['visit_date']] = true;
+            }
+            foreach (array_keys($daily_songs) as $d) { if ($d) $all_growth_dates[$d] = true; }
+            foreach (array_keys($daily_arts) as $d) { if ($d) $all_growth_dates[$d] = true; }
+            foreach (array_keys($daily_users) as $d) { if ($d) $all_growth_dates[$d] = true; }
+            ksort($all_growth_dates);
+
+            $uploads_chart_labels = [];
+            $uploads_chart_songs = [];
+            $uploads_chart_arts = [];
+            $uploads_chart_users = [];
+
+            foreach (array_keys($all_growth_dates) as $d_key) {
+              $uploads_chart_labels[] = date('M j', strtotime($d_key));
+              $uploads_chart_songs[] = (int)($daily_songs[$d_key] ?? 0);
+              $uploads_chart_arts[] = (int)($daily_arts[$d_key] ?? 0);
+              $uploads_chart_users[] = (int)($daily_users[$d_key] ?? 0);
+            }
+
+            // 3. Chart Dataset 2: 24-Hour Peak Hourly Heatmap
+            $stmt_hourly = $db->query("
+              SELECT SUBSTR(visit_time, 1, 2) as hour_slot, COUNT(id) as hits
+              FROM site_analytics
+              WHERE {$date_where} AND {$bot_where}
+              GROUP BY hour_slot
+              ORDER BY hour_slot ASC
+            ")->fetchAll(PDO::FETCH_KEY_PAIR);
+
+            $hourly_labels = [];
+            $hourly_values = [];
+            for ($h = 0; $h < 24; $h++) {
+              $slot = sprintf('%02d', $h);
+              $hourly_labels[] = sprintf('%02d:00', $h);
+              $hourly_values[] = (int)($stmt_hourly[$slot] ?? 0);
+            }
+
+            // 4. Chart Dataset 3: Browsers Breakdown
+            $stmt_browser = $db->query("
+              SELECT browser, COUNT(id) as count 
+              FROM site_analytics 
+              WHERE {$date_where} AND {$bot_where} AND browser != ''
+              GROUP BY browser 
+              ORDER BY count DESC 
+              LIMIT 6
+            ")->fetchAll();
+            $browser_labels = array_column($stmt_browser, 'browser');
+            $browser_counts = array_map('intval', array_column($stmt_browser, 'count'));
+
+            // 5. Chart Dataset 4: Operating Systems
+            $stmt_os = $db->query("
+              SELECT os, COUNT(id) as count 
+              FROM site_analytics 
+              WHERE {$date_where} AND {$bot_where} AND os != ''
+              GROUP BY os 
+              ORDER BY count DESC 
+              LIMIT 6
+            ")->fetchAll();
+            $os_labels = array_column($stmt_os, 'os');
+            $os_counts = array_map('intval', array_column($stmt_os, 'count'));
+
+            // 6. Chart Dataset 5: Device Classification
+            $stmt_dev = $db->query("
+              SELECT device_type, COUNT(id) as count 
+              FROM site_analytics 
+              WHERE {$date_where} AND {$bot_where}
+              GROUP BY device_type 
+              ORDER BY count DESC
+            ")->fetchAll();
+            $dev_labels = array_column($stmt_dev, 'device_type');
+            $dev_counts = array_map('intval', array_column($stmt_dev, 'count'));
+
+            // 7. Top Referrers & Entry Gateways
+            $stmt_ref = $db->query("
+              SELECT COALESCE(NULLIF(referer, ''), 'Direct / Bookmark') as source, COUNT(id) as count
+              FROM site_analytics
+              WHERE {$date_where} AND {$bot_where}
+              GROUP BY source
+              ORDER BY count DESC 
+              LIMIT 8
+            ")->fetchAll();
+
+            // 8. Filtered & Paginated Live Stream Event Logs
+            $log_where = "WHERE {$date_where} AND {$bot_where}";
+            $log_params = [];
+
+            if ($analytics_search !== '') {
+              $log_where .= " AND (ip_address LIKE ? OR ip_hash LIKE ? OR browser LIKE ? OR os LIKE ? OR request_uri LIKE ?)";
+              $log_params = ["%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%"];
+            }
+
+            $stmt_log_count = $db->prepare("SELECT COUNT(id) FROM site_analytics $log_where");
+            $stmt_log_count->execute($log_params);
+            $total_log_records = (int)$stmt_log_count->fetchColumn();
+            $total_log_pages = ceil($total_log_records / $analytics_limit);
+
+            $stmt_live = $db->prepare("
+              SELECT s.*, u.artist, u.email as user_email
+              FROM site_analytics s
+              LEFT JOIN users u ON s.user_id = u.id
+              $log_where
+              ORDER BY s.id DESC
+              LIMIT ? OFFSET ?
+            ");
+            $p_idx = 1;
+            foreach ($log_params as $pv) {
+              $stmt_live->bindValue($p_idx++, $pv, PDO::PARAM_STR);
+            }
+            $stmt_live->bindValue($p_idx++, (int)$analytics_limit, PDO::PARAM_INT);
+            $stmt_live->bindValue($p_idx++, (int)$analytics_offset, PDO::PARAM_INT);
+            $stmt_live->execute();
+            $live_logs = $stmt_live->fetchAll();
+          ?>
+
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Traffic &amp; Visitor Analytics</h1>
+              <div class="small text-secondary mt-1">Real-time daily unique footprints, peak traffic distribution, and device classification</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="analytics">
+                <select name="period" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="1" <?php echo $analytics_period === '1' ? 'selected' : ''; ?>>Today Only</option>
+                  <option value="7" <?php echo $analytics_period === '7' ? 'selected' : ''; ?>>Last 7 Days</option>
+                  <option value="30" <?php echo $analytics_period === '30' ? 'selected' : ''; ?>>Last 30 Days</option>
+                  <option value="90" <?php echo $analytics_period === '90' ? 'selected' : ''; ?>>Last 90 Days</option>
+                  <option value="365" <?php echo $analytics_period === '365' ? 'selected' : ''; ?>>Past 1 Year</option>
+                  <option value="all" <?php echo $analytics_period === 'all' ? 'selected' : ''; ?>>All-Time History</option>
+                </select>
+                <div class="form-check form-switch m-0 ms-1 d-none d-sm-flex align-items-center gap-1">
+                  <input class="form-check-input bg-dark border-secondary" type="checkbox" name="show_bots" value="1" id="show_bots_cb" <?php echo $analytics_filter_bot ? 'checked' : ''; ?> onchange="this.form.submit()">
+                  <label class="form-check-label text-secondary small fw-bold" for="show_bots_cb">Bots</label>
+                </div>
+              </form>
+
+              <button class="admin-btn-pill" data-bs-toggle="modal" data-bs-target="#exportAnalyticsModal">
+                <i class="bi bi-download"></i> Export
+              </button>
+              <button class="admin-btn-pill admin-btn-primary" data-bs-toggle="modal" data-bs-target="#pruneAnalyticsModal">
+                <i class="bi bi-trash3"></i> Prune
+              </button>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Top Summary KPI Cards -->
+            <div class="row g-3 mb-4">
+              <!-- Unique Visitors Today -->
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden">
+                  <div class="d-flex justify-content-between align-items-start mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">Uniques Today</span>
+                    <span class="text-danger"><i class="bi bi-person-check-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white mb-1"><?php echo number_format($today_kpi['unique_visitors']); ?></div>
+                  <div class="small text-secondary d-flex align-items-center gap-1">
+                    <?php
+                      $diff_uniques = $today_kpi['unique_visitors'] - $yest_kpi['unique_visitors'];
+                      $badge_color = $diff_uniques >= 0 ? 'text-success' : 'text-danger';
+                      $arrow_icon = $diff_uniques >= 0 ? 'bi-arrow-up-short' : 'bi-arrow-down-short';
+                    ?>
+                    <span class="<?php echo $badge_color; ?> fw-bold"><i class="bi <?php echo $arrow_icon; ?>"></i><?php echo abs($diff_uniques); ?></span>
+                    <span>vs yesterday (<?php echo number_format($yest_kpi['unique_visitors']); ?>)</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Total Unique Pageviews in Period -->
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden">
+                  <div class="d-flex justify-content-between align-items-start mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">Total Unique Traffic</span>
+                    <span class="text-info"><i class="bi bi-lightning-charge-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white mb-1"><?php echo number_format($period_total_uniques); ?></div>
+                  <div class="small text-secondary">
+                    <span class="text-info fw-bold"><?php echo number_format($period_total_reg); ?></span> member / <span class="text-white fw-bold"><?php echo number_format($period_total_uniques - $period_total_reg); ?></span> guest
+                  </div>
+                </div>
+              </div>
+
+              <!-- Period Daily Average -->
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden">
+                  <div class="d-flex justify-content-between align-items-start mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">Daily Average</span>
+                    <span class="text-success"><i class="bi bi-calculator fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white mb-1"><?php echo number_format($avg_daily_uniques); ?> <span class="fs-6 text-secondary fw-normal">uniques/day</span></div>
+                  <div class="small text-secondary">
+                    Calculated over <?php echo $active_days_count; ?> active recorded days
+                  </div>
+                </div>
+              </div>
+
+              <!-- Filtered Timeline Span -->
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden">
+                  <div class="d-flex justify-content-between align-items-start mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">Bot Detections</span>
+                    <span class="text-warning"><i class="bi bi-robot fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white mb-1"><?php echo number_format($period_total_bots); ?></div>
+                  <div class="small text-secondary">
+                    <span class="text-warning fw-bold"><?php echo $analytics_filter_bot ? 'Included' : 'Filtered out'; ?></span> from unique visitor metrics
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Content Uploads & Registration KPI Summary Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Songs Uploaded</span>
+                    <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($period_total_songs); ?> <span class="fs-6 text-secondary fw-normal">tracks</span></div>
+                  <small class="text-secondary">Uploaded in selected period</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Artworks Uploaded</span>
+                    <span class="text-info"><i class="bi bi-images fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($period_total_arts); ?> <span class="fs-6 text-secondary fw-normal">works</span></div>
+                  <small class="text-secondary">Galleries &amp; manga uploaded</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">New Registrations</span>
+                    <span class="text-success"><i class="bi bi-person-plus-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($period_total_new_users); ?> <span class="fs-6 text-secondary fw-normal">users</span></div>
+                  <small class="text-secondary">New accounts created</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Charts Row 1: Traffic Growth Timeline (Area Line) & Hourly Peak Heatmap (Bar) -->
+            <div class="row g-4 mb-4">
+              <div class="col-12 col-xl-8">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-graph-up text-danger"></i> Daily Unique Visitor Growth Curve
+                    </h5>
+                    <span class="admin-badge admin-badge-primary">1 Unique / IP / Day</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 260px; width: 100%;">
+                    <canvas id="trafficGrowthChart"></canvas>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-xl-4">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-clock-history text-warning"></i> 24-Hour Peak Hours
+                    </h5>
+                    <span class="admin-badge admin-badge-warning">00:00 - 23:00</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 260px; width: 100%;">
+                    <canvas id="hourlyTrafficChart"></canvas>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Charts Row 1.5: Content & User Uploads by Date (Multi-Series Bar Chart) -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                  <i class="bi bi-calendar-event text-info"></i> Uploads &amp; Registrations by Date
+                </h5>
+                <span class="admin-badge admin-badge-info">Daily Activity Timeline</span>
+              </div>
+              <div class="position-relative" style="min-height: 250px; width: 100%;">
+                <canvas id="uploadsGrowthChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Charts Row 2: Browsers, OS & Devices Doughnuts + Top Referrers List -->
+            <div class="row g-4 mb-4">
+              <div class="col-12 col-md-4">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-browser-chrome text-info"></i> Browsers
+                  </h5>
+                  <div class="position-relative flex-grow-1" style="min-height: 200px; width: 100%;">
+                    <canvas id="browserDoughnutChart"></canvas>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-4">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-laptop text-success"></i> Operating Systems
+                  </h5>
+                  <div class="position-relative flex-grow-1" style="min-height: 200px; width: 100%;">
+                    <canvas id="osDoughnutChart"></canvas>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-4">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-phone text-warning"></i> Device Types
+                  </h5>
+                  <div class="position-relative flex-grow-1" style="min-height: 200px; width: 100%;">
+                    <canvas id="devicePolarChart"></canvas>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Top Referrers & Entry Points Box -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                  <i class="bi bi-box-arrow-in-up-right text-primary"></i> Top Traffic Sources &amp; Referrers
+                </h5>
+                <span class="text-secondary small">Aggregated over current filter period</span>
+              </div>
+              <div class="row g-2">
+                <?php if (empty($stmt_ref)): ?>
+                  <div class="col-12 text-center text-secondary py-3 small">No referrer data logged for this timeframe.</div>
+                <?php else: foreach ($stmt_ref as $ref): ?>
+                  <div class="col-12 col-md-6 col-xl-3">
+                    <div class="p-2 rounded bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-truncate text-white small font-monospace" style="max-width: 75%;" title="<?php echo htmlspecialchars($ref['source']); ?>"><?php echo htmlspecialchars($ref['source']); ?></span>
+                      <span class="admin-badge admin-badge-info"><?php echo number_format($ref['count']); ?> uniques</span>
+                    </div>
+                  </div>
+                <?php endforeach; endif; ?>
+              </div>
+            </div>
+
+            <!-- Live Real-Time Logs Table -->
+            <div class="admin-card mb-4">
+              <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi bi-activity text-danger fs-5"></i>
+                  <h5 class="m-0 text-white fw-bold fs-6">Live Visit Stream (<?php echo number_format($total_log_records); ?> unique events)</h5>
+                </div>
+                <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-grow-1 justify-content-end" style="max-width: 420px;">
+                  <input type="hidden" name="access" value="admin">
+                  <input type="hidden" name="page" value="analytics">
+                  <input type="hidden" name="period" value="<?php echo htmlspecialchars($analytics_period); ?>">
+                  <div class="position-relative flex-grow-1">
+                    <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search IP, URI, OS..." value="<?php echo htmlspecialchars($analytics_search); ?>">
+                    <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                  </div>
+                  <?php if ($analytics_search !== ''): ?>
+                    <a href="?access=admin&page=analytics&period=<?php echo htmlspecialchars($analytics_period); ?>" class="admin-btn-pill" style="height: 38px; padding: 0 0.85rem;">Clear</a>
+                  <?php endif; ?>
+                </form>
+              </div>
+
+              <div class="table-responsive">
+                <table class="admin-table text-nowrap">
+                  <thead>
+                    <tr>
+                      <th style="width: 140px;">Timestamp</th>
+                      <th>Visitor / Identity</th>
+                      <th>Platform / Device</th>
+                      <th>Browser</th>
+                      <th>Entry URI</th>
+                      <th class="text-end">Origin</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php if (empty($live_logs)): ?>
+                      <tr><td colspan="6" class="text-center py-5 text-secondary">No traffic records match your query.</td></tr>
+                    <?php else: foreach ($live_logs as $log): ?>
+                      <tr>
+                        <td class="text-secondary small font-monospace">
+                          <div><?php echo htmlspecialchars($log['visit_date']); ?></div>
+                          <div style="font-size: 0.72rem; opacity: 0.7;"><?php echo htmlspecialchars($log['visit_time']); ?></div>
+                        </td>
+                        <td>
+                          <?php if (!empty($log['user_id'])): ?>
+                            <span class="fw-bold text-info"><i class="bi bi-person-fill me-1"></i><?php echo htmlspecialchars($log['artist'] ?: 'User #' . $log['user_id']); ?></span>
+                          <?php else: ?>
+                            <span class="text-secondary"><i class="bi bi-person-dash me-1"></i>Guest Visitor</span>
+                          <?php endif; ?>
+                          <div class="font-monospace mt-1" style="font-size: 0.75rem;">
+                            <span class="text-white fw-bold"><i class="bi bi-geo-alt-fill text-danger me-1"></i><?php echo htmlspecialchars($log['ip_address'] ?: '127.0.0.1'); ?></span>
+                            <span class="badge bg-success bg-opacity-25 text-success border border-success ms-1 p-0 px-1" style="font-size: 0.65rem;">Unique</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="d-flex align-items-center gap-1">
+                            <?php if ($log['device_type'] === 'Mobile'): ?>
+                              <i class="bi bi-phone text-warning"></i>
+                            <?php elseif ($log['device_type'] === 'Tablet'): ?>
+                              <i class="bi bi-tablet text-success"></i>
+                            <?php elseif ($log['is_bot']): ?>
+                              <i class="bi bi-robot text-danger"></i>
+                            <?php else: ?>
+                              <i class="bi bi-display text-info"></i>
+                            <?php endif; ?>
+                            <span class="text-white fw-medium"><?php echo htmlspecialchars($log['os']); ?></span>
+                          </div>
+                          <small class="text-secondary" style="font-size: 0.72rem;"><?php echo htmlspecialchars($log['device_type']); ?></small>
+                        </td>
+                        <td>
+                          <div class="text-white"><?php echo htmlspecialchars($log['browser']); ?></div>
+                          <small class="text-secondary" style="font-size: 0.72rem;"><?php echo htmlspecialchars($log['browser_version'] ?: 'Standard'); ?></small>
+                        </td>
+                        <td style="max-width: 280px; overflow: hidden; text-overflow: ellipsis;">
+                          <span class="font-monospace text-secondary small" title="<?php echo htmlspecialchars($log['request_uri']); ?>">
+                            <?php echo htmlspecialchars($log['request_uri'] ?: '/'); ?>
+                          </span>
+                        </td>
+                        <td class="text-end">
+                          <?php if (!empty($log['referer'])): ?>
+                            <span class="admin-badge admin-badge-info" title="<?php echo htmlspecialchars($log['referer']); ?>">Referral</span>
+                          <?php else: ?>
+                            <span class="admin-badge admin-badge-secondary">Direct</span>
+                          <?php endif; ?>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Pagination -->
+            <?php if ($total_log_pages > 1): ?>
+              <div class="admin-pagination">
+                <a class="admin-page-btn <?php echo ($analytics_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&search=<?php echo urlencode($analytics_search); ?>&p=1">«</a>
+                <a class="admin-page-btn <?php echo ($analytics_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&search=<?php echo urlencode($analytics_search); ?>&p=<?php echo $analytics_page - 1; ?>">‹</a>
+                <?php
+                  $start_p = max(1, $analytics_page - 2);
+                  $end_p = min($total_log_pages, $start_p + 4);
+                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                  for ($i = $start_p; $i <= $end_p; $i++):
+                ?>
+                  <a class="admin-page-btn <?php echo ($analytics_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&search=<?php echo urlencode($analytics_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <?php endfor; ?>
+                <a class="admin-page-btn <?php echo ($analytics_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&search=<?php echo urlencode($analytics_search); ?>&p=<?php echo $analytics_page + 1; ?>">›</a>
+                <a class="admin-page-btn <?php echo ($analytics_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&search=<?php echo urlencode($analytics_search); ?>&p=<?php echo $total_log_pages; ?>">»</a>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Export Analytics Modal -->
+          <div class="modal fade" id="exportAnalyticsModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-download text-info me-2"></i> Export Data</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=analytics">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div class="modal-body p-3">
+                    <label class="form-label text-secondary small fw-bold mb-2">EXPORT TIMEFRAME</label>
+                    <select name="export_days" class="admin-pill-select w-100 mb-3">
+                      <option value="7">Last 7 Days</option>
+                      <option value="30" selected>Last 30 Days</option>
+                      <option value="90">Last 90 Days</option>
+                      <option value="365">Past 1 Year</option>
+                    </select>
+                    <button type="submit" name="export_analytics_csv" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
+                      Download CSV File
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Prune Analytics Modal -->
+          <div class="modal fade" id="pruneAnalyticsModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-trash3 text-danger me-2"></i> Prune Records</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=analytics" onsubmit="return confirm('Confirm pruning visitor logs?');">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div class="modal-body p-3">
+                    <label class="form-label text-secondary small fw-bold mb-2">PRUNE RETENTION</label>
+                    <select name="prune_range" class="admin-pill-select w-100 mb-3">
+                      <option value="30">Older than 30 Days</option>
+                      <option value="90" selected>Older than 90 Days</option>
+                      <option value="180">Older than 180 Days</option>
+                      <option value="all">Purge All Logs (Reset Complete)</option>
+                    </select>
+                    <button type="submit" name="prune_analytics_logs" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
+                      Execute Cleanup
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            (function() {
+              if (window.trafficGrowthChartInstance instanceof Chart) window.trafficGrowthChartInstance.destroy();
+              if (window.hourlyTrafficChartInstance instanceof Chart) window.hourlyTrafficChartInstance.destroy();
+              if (window.browserDoughnutChartInstance instanceof Chart) window.browserDoughnutChartInstance.destroy();
+              if (window.osDoughnutChartInstance instanceof Chart) window.osDoughnutChartInstance.destroy();
+              if (window.devicePolarChartInstance instanceof Chart) window.devicePolarChartInstance.destroy();
+
+              Chart.defaults.color = '#aaaaaa';
+              Chart.defaults.font.family = "'Roboto', sans-serif";
+
+              const ctxGrowth = document.getElementById('trafficGrowthChart');
+              if (ctxGrowth) {
+                window.trafficGrowthChartInstance = new Chart(ctxGrowth.getContext('2d'), {
+                  type: 'line',
+                  data: {
+                    labels: <?php echo json_encode($chart_labels); ?>,
+                    datasets: [
+                      {
+                        label: 'Unique Visitors',
+                        data: <?php echo json_encode($chart_uniques); ?>,
+                        borderColor: '#ff0000',
+                        backgroundColor: 'rgba(255, 0, 0, 0.15)',
+                        borderWidth: 2.5,
+                        fill: true,
+                        tension: 0.35,
+                        pointRadius: 3,
+                        pointHoverRadius: 6
+                      }
+                    ]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255,255,255,0.06)' },
+                        ticks: { precision: 0 }
+                      },
+                      x: { grid: { display: false } }
+                    },
+                    plugins: {
+                      legend: { position: 'top', labels: { color: '#ffffff', boxWidth: 12 } }
+                    }
+                  }
+                });
+              }
+
+              const ctxUploads = document.getElementById('uploadsGrowthChart');
+              if (ctxUploads) {
+                if (window.uploadsGrowthChartInstance instanceof Chart) window.uploadsGrowthChartInstance.destroy();
+                window.uploadsGrowthChartInstance = new Chart(ctxUploads.getContext('2d'), {
+                  type: 'bar',
+                  data: {
+                    labels: <?php echo json_encode($uploads_chart_labels); ?>,
+                    datasets: [
+                      {
+                        label: 'Songs Uploaded',
+                        data: <?php echo json_encode($uploads_chart_songs); ?>,
+                        backgroundColor: '#ff0000',
+                        borderRadius: 4
+                      },
+                      {
+                        label: 'Artworks Uploaded',
+                        data: <?php echo json_encode($uploads_chart_arts); ?>,
+                        backgroundColor: '#38bdf8',
+                        borderRadius: 4
+                      },
+                      {
+                        label: 'New Users Registered',
+                        data: <?php echo json_encode($uploads_chart_users); ?>,
+                        backgroundColor: '#4ade80',
+                        borderRadius: 4
+                      }
+                    ]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255,255,255,0.06)' },
+                        ticks: { precision: 0 }
+                      },
+                      x: {
+                        grid: { display: false }
+                      }
+                    },
+                    plugins: {
+                      legend: {
+                        position: 'top',
+                        labels: { color: '#ffffff', boxWidth: 12 }
+                      }
+                    }
+                  }
+                });
+              }
+
+              const ctxHourly = document.getElementById('hourlyTrafficChart');
+              if (ctxHourly) {
+                window.hourlyTrafficChartInstance = new Chart(ctxHourly.getContext('2d'), {
+                  type: 'bar',
+                  data: {
+                    labels: <?php echo json_encode($hourly_labels); ?>,
+                    datasets: [{
+                      label: 'Unique Visitors by Hour',
+                      data: <?php echo json_encode($hourly_values); ?>,
+                      backgroundColor: 'rgba(251, 191, 36, 0.75)',
+                      borderRadius: 4
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { precision: 0 } },
+                      x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } }
+                    },
+                    plugins: { legend: { display: false } }
+                  }
+                });
+              }
+
+              const ctxBrowser = document.getElementById('browserDoughnutChart');
+              if (ctxBrowser) {
+                window.browserDoughnutChartInstance = new Chart(ctxBrowser.getContext('2d'), {
+                  type: 'doughnut',
+                  data: {
+                    labels: <?php echo json_encode($browser_labels); ?>,
+                    datasets: [{
+                      data: <?php echo json_encode($browser_counts); ?>,
+                      backgroundColor: ['#38bdf8', '#ff0000', '#fbbf24', '#4ade80', '#c084fc', '#f87171'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: '#fff', boxWidth: 10 } } }
+                  }
+                });
+              }
+
+              const ctxOS = document.getElementById('osDoughnutChart');
+              if (ctxOS) {
+                window.osDoughnutChartInstance = new Chart(ctxOS.getContext('2d'), {
+                  type: 'doughnut',
+                  data: {
+                    labels: <?php echo json_encode($os_labels); ?>,
+                    datasets: [{
+                      data: <?php echo json_encode($os_counts); ?>,
+                      backgroundColor: ['#4ade80', '#38bdf8', '#c084fc', '#fbbf24', '#ff0000', '#6b7280'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: '#fff', boxWidth: 10 } } }
+                  }
+                });
+              }
+
+              const ctxDev = document.getElementById('devicePolarChart');
+              if (ctxDev) {
+                window.devicePolarChartInstance = new Chart(ctxDev.getContext('2d'), {
+                  type: 'polarArea',
+                  data: {
+                    labels: <?php echo json_encode($dev_labels); ?>,
+                    datasets: [{
+                      data: <?php echo json_encode($dev_counts); ?>,
+                      backgroundColor: ['rgba(56, 189, 248, 0.65)', 'rgba(251, 191, 36, 0.65)', 'rgba(74, 222, 128, 0.65)', 'rgba(248, 113, 113, 0.65)'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      r: {
+                        display: false
+                      }
+                    },
+                    plugins: { legend: { position: 'right', labels: { color: '#fff', boxWidth: 10 } } }
+                  }
+                });
+              }
+            })();
+          </script>
+
+        <?php elseif (($_GET['page'] ?? '') === 'reports'): ?>
           <?php 
             $rep_search = trim($_GET['search'] ?? '');
             $rep_sort = $_GET['sort'] ?? 'newest';
@@ -20150,7 +21350,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </select>
               <div class="position-relative flex-grow-1">
                 <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search accounts, emails, reason..." value="<?php echo htmlspecialchars($rep_search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
@@ -20399,40 +21599,160 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">Song Management</h1>
-              <div class="small text-secondary mt-1">Manage tracks, metadata, transfers, and moderation</div>
+          <?php 
+            $db = get_db();
+            $search_songs = $_GET['search'] ?? ''; 
+            $sort_songs = $_GET['sort'] ?? 'newest';
+            $genre_filter = $_GET['genre'] ?? '';
+            $s_page = max(1, (int)($_GET['p'] ?? 1));
+            $s_limit = ADMIN_PAGE_SIZE;
+            $s_offset = ($s_page - 1) * $s_limit;
+
+            // Global Metrics for Songs
+            $total_library_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
+            $total_library_duration = (int)$db->query("SELECT SUM(duration) FROM music")->fetchColumn();
+            $total_library_plays = (int)$db->query("SELECT SUM(play_count) FROM play_counts")->fetchColumn();
+            $total_banned_songs = (int)$db->query("SELECT COUNT(id) FROM music WHERE banned = 1")->fetchColumn();
+
+            $where_clauses = [];
+            $params = [];
+            if ($search_songs !== '') {
+              if (preg_match('/^(?:uid|user|user_id):(\d+)$/i', $search_songs, $m_uid)) {
+                $where_clauses[] = "m.user_id = ?";
+                $params = [(int)$m_uid[1]];
+              } elseif (preg_match('/^(?:#|id|song_id):(\d+)$/i', $search_songs, $m_id)) {
+                $where_clauses[] = "m.id = ?";
+                $params = [(int)$m_id[1]];
+              } elseif (is_numeric($search_songs)) {
+                // Exact numeric match for track ID or User ID (avoids substring matching on '(id:1)' or '(id:21)')
+                $where_clauses[] = "(m.id = ? OR m.user_id = ? OR m.title = ? OR m.album = ?)";
+                $params = [(int)$search_songs, (int)$search_songs, $search_songs, $search_songs];
+              } else {
+                $where_clauses[] = "(m.title LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR (match_artist(m.artist, ?) = 1))";
+                $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
+              }
+            }
+            if ($genre_filter !== '') {
+              $where_clauses[] = "m.genre = ?";
+              $params[] = $genre_filter;
+            }
+            
+            $where = !empty($where_clauses) ? ("WHERE " . implode(' AND ', $where_clauses)) : "";
+            
+            $sort_map = [
+              'newest' => 'ORDER BY m.id DESC',
+              'oldest' => 'ORDER BY m.id ASC',
+              'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
+              'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC',
+              'plays_desc' => 'ORDER BY plays DESC',
+              'duration_desc' => 'ORDER BY m.duration DESC'
+            ];
+            $order_by = $sort_map[$sort_songs] ?? 'ORDER BY m.id DESC';
+
+            $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
+            $t_stmt->execute($params);
+            $t_songs = (int)$t_stmt->fetchColumn();
+            $t_pages = ceil($t_songs / $s_limit);
+            
+            $stmt = $db->prepare("
+              SELECT m.id, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.user_id, m.banned, m.is_private, m.last_modified, u.email,
+              COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as plays
+              FROM music m 
+              LEFT JOIN users u ON m.user_id = u.id 
+              $where $order_by 
+              LIMIT ? OFFSET ?
+            ");
+            $p_idx = 1;
+            foreach ($params as $pv) {
+              $stmt->bindValue($p_idx++, $pv);
+            }
+            $stmt->bindValue($p_idx++, (int)$s_limit, PDO::PARAM_INT);
+            $stmt->bindValue($p_idx++, (int)$s_offset, PDO::PARAM_INT);
+            $stmt->execute();
+            $songs = $stmt->fetchAll();
+          ?>
+
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Song Management Studio</h1>
+              <div class="small text-secondary mt-1">Full library administration, live audio inspection, bulk transfers, and metadata controls</div>
             </div>
-            <?php 
-              $search_songs = $_GET['search'] ?? ''; 
-              $sort_songs = $_GET['sort'] ?? 'newest';
-            ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
               <input type="hidden" name="page" value="songs">
               <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
                 <option value="title_asc" <?php echo $sort_songs === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
                 <option value="artist_asc" <?php echo $sort_songs === 'artist_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
+                <option value="plays_desc" <?php echo $sort_songs === 'plays_desc' ? 'selected' : ''; ?>>Most Played</option>
+                <option value="duration_desc" <?php echo $sort_songs === 'duration_desc' ? 'selected' : ''; ?>>Longest Tracks</option>
               </select>
               <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, artist, album, uploader..." value="<?php echo htmlspecialchars($search_songs); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search track, artist, album, uploader..." value="<?php echo htmlspecialchars($search_songs); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
+
           <div class="content-area-wrapper">
+            <!-- Metric KPI Summary Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Tracks</span>
+                    <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_songs); ?></div>
+                  <small class="text-secondary"><?php echo number_format($t_songs); ?> matching search filter</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Library Playtime</span>
+                    <span class="text-info"><i class="bi bi-clock-history fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo round($total_library_duration / 3600, 1); ?> <span class="fs-6 text-secondary fw-normal">hours</span></div>
+                  <small class="text-secondary">~<?php echo round(($total_library_duration / 86400), 2); ?> total days of continuous playback</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Streams</span>
+                    <span class="text-success"><i class="bi bi-play-circle-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_plays); ?></div>
+                  <small class="text-secondary">Combined all-time logged plays</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Moderated / Banned</span>
+                    <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_songs); ?></div>
+                  <small class="text-secondary">Tracks hidden from public queries</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Multi-Operation Action Console -->
             <form method="POST" action="" id="admin-songs-form">
               <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
               <div class="mb-3 d-flex flex-wrap gap-2">
-                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
-                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Batch Edit / Transfer</button>
                 
                 <div class="dropdown">
                   <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                    <i class="bi bi-shield-slash text-warning"></i> Ban Control
+                    <i class="bi bi-shield-slash text-warning"></i> Moderation
                   </button>
                   <ul class="dropdown-menu dropdown-menu-dark border-secondary">
                     <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban me-2"></i> Ban Selected</button></li>
@@ -20450,73 +21770,71 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </ul>
                 </div>
               </div>
+
+              <!-- Song Table Studio -->
               <div class="admin-card mb-4">
                 <div class="table-responsive">
                   <table class="admin-table align-middle text-nowrap">
-                    <thead class="border-bottom border-secondary">
+                    <thead>
                       <tr>
-                        <th class="py-3 px-3" style="width: 40px;"></th>
-                        <th class="py-3 px-3" style="width: 60px;">Action</th>
-                        <th class="py-3 px-3" style="width: 70px;">ID</th>
-                        <th class="py-3 px-3">Title</th>
-                        <th class="py-3 px-3">Artist</th>
-                        <th class="py-3 px-3">Album</th>
-                        <th class="py-3 px-3">Uploader</th>
+                        <th style="width: 40px;" class="text-center"></th>
+                        <th style="width: 50px;">Play</th>
+                        <th style="width: 70px;">ID</th>
+                        <th>Track Title</th>
+                        <th>Artist</th>
+                        <th>Album</th>
+                        <th>Genre</th>
+                        <th>Streams</th>
+                        <th>Uploader</th>
+                        <th class="text-end" style="width: 120px;">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <?php
-                        $s_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                        $s_limit = ADMIN_PAGE_SIZE;
-                        $s_offset = ($s_page - 1) * $s_limit;
-                        
-                        $where_clauses = [];
-                        $params = [];
-                        if ($search_songs !== '') {
-                          $where_clauses[] = "(m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR m.user_id = ?)";
-                          $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
-                        }
-                        
-                        $where = '';
-                        if (!empty($where_clauses)) {
-                          $where = "WHERE " . implode(' AND ', $where_clauses);
-                        }
-                        
-                        $sort_map = [
-                          'newest' => 'ORDER BY m.id DESC',
-                          'oldest' => 'ORDER BY m.id ASC',
-                          'title_asc' => 'ORDER BY m.title COLLATE NOCASE ASC',
-                          'artist_asc' => 'ORDER BY m.artist COLLATE NOCASE ASC'
-                        ];
-                        $order_by = $sort_map[$sort_songs] ?? 'ORDER BY m.id DESC';
-  
-                        $db = get_db();
-                        $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
-                        $t_stmt->execute($params);
-                        $t_songs = $t_stmt->fetchColumn();
-                        $t_pages = ceil($t_songs / $s_limit);
-                        
-                        $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.user_id, u.email FROM music m LEFT JOIN users u ON m.user_id = u.id $where $order_by LIMIT ? OFFSET ?");
-                        $stmt->execute(array_merge($params, [$s_limit, $s_offset]));
-                        $songs = $stmt->fetchAll();
-                        
-                        if (empty($songs)): ?>
-                          <tr><td colspan="7" class="text-center py-4 text-secondary">No songs found.</td></tr>
+                      <?php if (empty($songs)): ?>
+                        <tr><td colspan="10" class="text-center py-5 text-secondary">No audio tracks found matching your query.</td></tr>
                       <?php else: foreach ($songs as $s): ?>
                         <tr data-song="<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>">
-                          <td class="py-3 px-3 text-center"><input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.2);"></td>
-                          <td class="py-3 px-3">
-                            <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Song" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
-                              <i class="bi bi-pencil-fill"></i> Edit
+                          <td class="text-center">
+                            <input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.1);">
+                          </td>
+                          <td>
+                            <!-- In-line Mini Audio Stream Trigger -->
+                            <button type="button" class="btn btn-sm btn-outline-danger rounded-circle d-flex align-items-center justify-content-center p-0" style="width: 32px; height: 32px;" onclick="playAdminAudioStream(<?php echo $s['id']; ?>, '<?php echo addslashes(htmlspecialchars($s['title'])); ?>', '<?php echo addslashes(htmlspecialchars($s['artist'])); ?>')">
+                              <i class="bi bi-play-fill fs-5 ms-1"></i>
                             </button>
                           </td>
-                          <td class="py-3 px-3 text-secondary">#<?php echo $s['id']; ?></td>
-                          <td class="py-3 px-3 fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></td>
-                          <td class="py-3 px-3 text-info"><?php echo htmlspecialchars($s['artist']); ?></td>
-                          <td class="py-3 px-3 text-secondary"><?php echo htmlspecialchars($s['album']); ?></td>
-                          <td class="py-3 px-3 text-secondary">
-                            <div class="small fw-bold">ID: <?php echo $s['user_id']; ?></div>
-                            <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($s['email'] ?? 'Anonymous'); ?></div>
+                          <td class="text-secondary font-monospace small">#<?php echo $s['id']; ?></td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <img src="?action=get_image&id=<?php echo $s['id']; ?>&size=small&v=<?php echo $s['last_modified'] ?? 0; ?>" alt="" class="rounded" style="width: 34px; height: 34px; object-fit: cover; background: #000;">
+                              <div>
+                                <div class="fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></div>
+                                <small class="text-secondary font-monospace"><?php echo gmdate("i:s", (int)$s['duration']); ?> &bull; <?php echo round($s['bitrate'] / 1000); ?> kbps</small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <div class="text-info fw-medium"><?php echo htmlspecialchars($s['artist']); ?></div>
+                          </td>
+                          <td class="text-secondary">
+                            <span class="text-truncate d-inline-block" style="max-width: 160px;" title="<?php echo htmlspecialchars($s['album']); ?>"><?php echo htmlspecialchars($s['album']); ?></span>
+                          </td>
+                          <td>
+                            <span class="admin-badge admin-badge-secondary"><?php echo htmlspecialchars($s['genre'] ?: 'General'); ?></span>
+                          </td>
+                          <td>
+                            <span class="text-white fw-bold font-monospace"><?php echo number_format($s['plays']); ?></span>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-1">
+                              <a href="?access=admin&page=storage&search=<?php echo urlencode($s['user_id']); ?>" class="text-white small fw-bold text-decoration-none" title="Inspect User Storage">UID #<?php echo $s['user_id']; ?></a>
+                            </div>
+                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($s['email'] ?? 'System / Local'); ?></small>
+                          </td>
+                          <td class="text-end">
+                            <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.7rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="Edit Metadata" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
+                              <i class="bi bi-pencil-fill"></i> Edit
+                            </button>
                           </td>
                         </tr>
                       <?php endforeach; endif; ?>
@@ -20524,71 +21842,70 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </table>
                 </div>
               </div>
+
+              <!-- Pagination -->
               <?php if ($t_pages > 1): ?>
-              <div class="admin-pagination">
-                <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=1">«</a>
-                <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $s_page - 1; ?>">‹</a>
-                <?php
-                  $start_p = max(1, $s_page - 2);
-                  $end_p = min($t_pages, $start_p + 4);
-                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-                  for ($i = $start_p; $i <= $end_p; $i++):
-                ?>
-                  <a class="admin-page-btn <?php echo ($s_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                <?php endfor; ?>
-                <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $s_page + 1; ?>">›</a>
-                <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&p=<?php echo $t_pages; ?>">»</a>
-              </div>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $s_page - 2);
+                    $end_p = min($t_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($s_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $t_pages; ?>">»</a>
+                </div>
               <?php endif; ?>
             </form>
           </div>
 
-          <!-- Admin Edit Song Modal -->
-          <div class="modal fade" id="admin-song-modal" tabindex="-1">
-            <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
-              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
-                <div class="modal-header border-0 pb-2">
-                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i> Edit Song Metadata</h5>
-                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body p-4 pt-2 text-start">
-                  <form method="POST" action="">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <input type="hidden" name="song_id" id="admin-song-id">
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">TITLE</label>
-                      <input type="text" name="title" id="admin-song-title" class="form-control bg-dark text-white border-secondary" required>
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">ARTIST</label>
-                      <input type="text" name="artist" id="admin-song-artist" class="form-control bg-dark text-white border-secondary" required>
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">ALBUM</label>
-                      <input type="text" name="album" id="admin-song-album" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <div class="mb-4">
-                      <label class="form-label text-secondary small fw-bold mb-1">GENRE</label>
-                      <input type="text" name="genre" id="admin-song-genre" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <button type="submit" name="edit_admin_song" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save Changes</button>
-                  </form>
-                </div>
-              </div>
+          <!-- Live Floating Audio Previewer Bar -->
+          <div id="admin-audio-player-bar" class="position-fixed start-50 translate-middle-x p-2 px-4 rounded-pill shadow-lg border border-danger d-none align-items-center gap-3" style="bottom: 30px; background: #111; z-index: 5000; min-width: 320px; max-width: 90vw;">
+            <i class="bi bi-music-note-beamed text-danger fs-5"></i>
+            <div class="text-truncate flex-grow-1" style="max-width: 220px;">
+              <div id="admin-player-title" class="fw-bold text-white small text-truncate">Song Title</div>
+              <div id="admin-player-artist" class="text-secondary small font-monospace" style="font-size: 0.72rem;">Artist</div>
             </div>
+            <audio id="admin-global-audio" controls style="height: 32px; filter: invert(1); max-width: 200px;"></audio>
+            <button type="button" class="btn-close btn-close-white p-1" onclick="closeAdminAudioPlayer()"></button>
           </div>
+
           <script>
+            function playAdminAudioStream(id, title, artist) {
+              const bar = document.getElementById('admin-audio-player-bar');
+              const audio = document.getElementById('admin-global-audio');
+              document.getElementById('admin-player-title').textContent = title;
+              document.getElementById('admin-player-artist').textContent = artist;
+              audio.src = '?action=get_stream&id=' + id;
+              bar.classList.remove('d-none');
+              bar.classList.add('d-flex');
+              audio.play();
+            }
+
+            function closeAdminAudioPlayer() {
+              const bar = document.getElementById('admin-audio-player-bar');
+              const audio = document.getElementById('admin-global-audio');
+              audio.pause();
+              audio.src = '';
+              bar.classList.add('d-none');
+              bar.classList.remove('d-flex');
+            }
+
             function openAdminSingleSongEdit(song) {
               const container = document.getElementById('admin-multi-edit-container');
               container.innerHTML = '';
               const fieldset = document.createElement('div');
-              fieldset.style.border = '1px solid #4d4d4d';
+              fieldset.style.border = '1px solid #333';
               fieldset.style.padding = '1.25rem';
-              fieldset.style.borderRadius = '8px';
-              fieldset.style.background = '#1a1a1a';
+              fieldset.style.borderRadius = '12px';
+              fieldset.style.background = '#111';
               fieldset.style.marginBottom = '1rem';
               fieldset.innerHTML = `
-                <h6 class="text-danger fw-bold mb-3">Editing Song #${song.id}</h6>
+                <h6 class="text-danger fw-bold mb-3"><i class="bi bi-music-note-beamed me-1"></i> Editing Song #${song.id}</h6>
                 <input type="hidden" name="multi_edit_ids[]" value="${song.id}">
                 <div class="row g-2">
                   <div class="col-12 col-md-6 mb-2">
@@ -20608,7 +21925,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <input type="text" name="multi_genre[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.genre || '').replace(/"/g, '&quot;')}">
                   </div>
                   <div class="col-6 col-md-3 mb-2">
-                    <label class="form-label text-warning small fw-bold mb-1">Transfer UID</label>
+                    <label class="form-label text-warning small fw-bold mb-1">Owner User ID</label>
                     <input type="number" name="multi_userid[${song.id}]" class="form-control bg-dark text-warning border-warning" value="${song.user_id || ''}">
                   </div>
                 </div>
@@ -20630,13 +21947,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const row = cb.closest('tr');
                 const song = JSON.parse(row.dataset.song);
                 const fieldset = document.createElement('div');
-                fieldset.style.border = '1px solid #4d4d4d';
+                fieldset.style.border = '1px solid #333';
                 fieldset.style.padding = '1.25rem';
-                fieldset.style.borderRadius = '8px';
-                fieldset.style.background = '#1a1a1a';
+                fieldset.style.borderRadius = '12px';
+                fieldset.style.background = '#111';
                 fieldset.style.marginBottom = '1rem';
                 fieldset.innerHTML = `
-                  <h6 class="text-danger fw-bold mb-3">Editing Song #${song.id}</h6>
+                  <h6 class="text-danger fw-bold mb-3"><i class="bi bi-music-note-beamed me-1"></i> Editing Song #${song.id}</h6>
                   <input type="hidden" name="multi_edit_ids[]" value="${song.id}">
                   <div class="row g-2">
                     <div class="col-12 col-md-6 mb-2">
@@ -20656,7 +21973,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <input type="text" name="multi_genre[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.genre || '').replace(/"/g, '&quot;')}">
                     </div>
                     <div class="col-6 col-md-3 mb-2">
-                      <label class="form-label text-warning small fw-bold mb-1">Transfer UID</label>
+                      <label class="form-label text-warning small fw-bold mb-1">Owner User ID</label>
                       <input type="number" name="multi_userid[${song.id}]" class="form-control bg-dark text-warning border-warning" value="${song.user_id || ''}">
                     </div>
                   </div>
@@ -20667,58 +21984,157 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               new bootstrap.Modal(document.getElementById('admin-multi-edit-modal')).show();
             }
           </script>
-
-          <!-- Admin Multi-Edit DBManager Style Modal -->
-          <div class="modal fade" id="admin-multi-edit-modal" tabindex="-1">
-            <div class="modal-dialog modal-dialog-scrollable modal-lg modal-dialog-centered">
-              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
-                <div class="modal-header border-0 pb-2">
-                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info"></i> Multi-Edit: <span id="multi-edit-count">0</span> Song(s)</h5>
-                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body p-4 pt-2 text-start">
-                  <form method="POST" action="">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <div id="admin-multi-edit-container" style="max-height: 60vh; overflow-y: auto; padding-right: 10px;"></div>
-                    <div class="mt-4 pt-3 border-top border-secondary">
-                      <button type="submit" name="multi_edit_admin_songs" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save All Changes</button>
-                    </div>
-                  </form>
-                </div>
-              </div>
-            </div>
-          </div>
         <?php elseif (($_GET['page'] ?? '') === 'artworks'): ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">Artwork Management</h1>
-              <div class="small text-secondary mt-1">Manage galleries, manga, parodies, and series tags</div>
+          <?php
+            $db = get_db();
+            $search_artworks = $_GET['search'] ?? '';
+            $sort_artworks = $_GET['sort'] ?? 'newest';
+            $type_filter = $_GET['type'] ?? '';
+            $view_mode = $_GET['view'] ?? 'table'; // table or grid
+            $a_page = max(1, (int)($_GET['p'] ?? 1));
+            $a_limit = 24;
+            $a_offset = ($a_page - 1) * $a_limit;
+
+            // Global Metrics
+            $total_artworks = (int)$db->query("SELECT COUNT(id) FROM arts")->fetchColumn();
+            $total_illustrations = (int)$db->query("SELECT COUNT(id) FROM arts WHERE type = 'image'")->fetchColumn();
+            $total_manga_works = (int)$db->query("SELECT COUNT(id) FROM arts WHERE type = 'manga'")->fetchColumn();
+            $total_manga_series = (int)$db->query("SELECT COUNT(id) FROM art_series")->fetchColumn();
+            $total_art_pages = (int)$db->query("SELECT COUNT(id) FROM art_files")->fetchColumn();
+            $total_nsfw_count = (int)$db->query("SELECT COUNT(id) FROM arts WHERE nsfw = 1")->fetchColumn();
+
+            $where_clauses = [];
+            $params = [];
+            if ($search_artworks !== '') {
+              $where_clauses[] = "(a.title LIKE ? OR a.tags LIKE ? OR a.parodies LIKE ? OR a.characters LIKE ? OR u.email LIKE ? OR a.user_id = ?)";
+              $params = ["%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", $search_artworks];
+            }
+            if ($type_filter !== '') {
+              $where_clauses[] = "a.type = ?";
+              $params[] = $type_filter;
+            }
+
+            $where = !empty($where_clauses) ? ("WHERE " . implode(' AND ', $where_clauses)) : "";
+
+            $sort_map = [
+              'newest' => 'ORDER BY a.id DESC',
+              'oldest' => 'ORDER BY a.id ASC',
+              'title_asc' => 'ORDER BY a.title COLLATE NOCASE ASC',
+              'views_desc' => 'ORDER BY a.views DESC'
+            ];
+            $order_by = $sort_map[$sort_artworks] ?? 'ORDER BY a.id DESC';
+
+            $t_stmt = $db->prepare("SELECT COUNT(a.id) FROM arts a LEFT JOIN users u ON a.user_id = u.id $where");
+            $t_stmt->execute($params);
+            $t_artworks = (int)$t_stmt->fetchColumn();
+            $t_pages = ceil($t_artworks / $a_limit);
+
+            $stmt = $db->prepare("
+              SELECT a.id, a.public_id, a.title, a.type, a.tags, a.nsfw, a.views, a.user_id, u.email, a.description, a.parodies, a.characters, a.groups_name, a.series_id, 
+              s.title as series_title,
+              (SELECT COUNT(*) FROM art_files WHERE art_id = a.id) as page_count,
+              (SELECT COALESCE(thumb_path, file_path) FROM art_files WHERE art_id = a.id ORDER BY sort_order ASC LIMIT 1) as cover_image
+              FROM arts a 
+              LEFT JOIN users u ON a.user_id = u.id 
+              LEFT JOIN art_series s ON a.series_id = s.id 
+              $where $order_by 
+              LIMIT ? OFFSET ?
+            ");
+            $p_idx = 1;
+            foreach ($params as $pv) {
+              $stmt->bindValue($p_idx++, $pv);
+            }
+            $stmt->bindValue($p_idx++, (int)$a_limit, PDO::PARAM_INT);
+            $stmt->bindValue($p_idx++, (int)$a_offset, PDO::PARAM_INT);
+            $stmt->execute();
+            $artworks = $stmt->fetchAll();
+
+            $allSeries = $db->query("SELECT id, title FROM art_series ORDER BY title COLLATE NOCASE ASC")->fetchAll(PDO::FETCH_KEY_PAIR);
+          ?>
+
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Artwork &amp; Manga Studio</h1>
+              <div class="small text-secondary mt-1">Manage PHPShares image galleries, manga chapters, tag indexing, and series</div>
             </div>
-            <?php
-              $search_artworks = $_GET['search'] ?? '';
-              $sort_artworks = $_GET['sort'] ?? 'newest';
-            ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 680px;">
               <input type="hidden" name="access" value="admin">
               <input type="hidden" name="page" value="artworks">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $sort_artworks === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $sort_artworks === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+              <input type="hidden" name="view" value="<?php echo htmlspecialchars($view_mode); ?>">
+              <select name="type" class="admin-pill-select" onchange="this.form.submit()" title="Filter by Format">
+                <option value="" <?php echo $type_filter === '' ? 'selected' : ''; ?>>All Formats (<?php echo number_format($total_artworks); ?>)</option>
+                <option value="image" <?php echo $type_filter === 'image' ? 'selected' : ''; ?>>Illustrations (<?php echo number_format($total_illustrations); ?>)</option>
+                <option value="manga" <?php echo $type_filter === 'manga' ? 'selected' : ''; ?>>Manga (<?php echo number_format($total_manga_works); ?>)</option>
+              </select>
+              <select name="sort" class="admin-pill-select" onchange="this.form.submit()" title="Sort Order">
+                <option value="newest" <?php echo $sort_artworks === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                <option value="oldest" <?php echo $sort_artworks === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
                 <option value="title_asc" <?php echo $sort_artworks === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
                 <option value="views_desc" <?php echo $sort_artworks === 'views_desc' ? 'selected' : ''; ?>>Most Viewed</option>
               </select>
               <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, tags, uploader..." value="<?php echo htmlspecialchars($search_artworks); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, tag, series, parody..." value="<?php echo htmlspecialchars($search_artworks); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
+
           <div class="content-area-wrapper">
+            <!-- Metrics Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Works</span>
+                    <span class="text-danger"><i class="bi bi-images fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_artworks); ?></div>
+                  <small class="text-secondary"><?php echo number_format($total_art_pages); ?> total physical image pages</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Manga Series</span>
+                    <span class="text-warning"><i class="bi bi-journal-album fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_manga_series); ?></div>
+                  <small class="text-secondary">Grouped multi-chapter series</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">NSFW Ratio</span>
+                    <span class="text-danger"><i class="bi bi-shield-exclamation fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_nsfw_count); ?> <span class="fs-6 text-secondary fw-normal">works</span></div>
+                  <small class="text-secondary">Marked as 18+ adult content</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Display View</span>
+                    <span class="text-info"><i class="bi bi-grid-3x3-gap-fill fs-5"></i></span>
+                  </div>
+                  <div class="d-flex align-items-center gap-2 mt-2">
+                    <a href="?access=admin&page=artworks&view=table&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>" class="admin-btn-pill <?php echo $view_mode === 'table' ? 'admin-btn-primary' : ''; ?>" style="height: 32px; padding: 0 0.8rem;">Table</a>
+                    <a href="?access=admin&page=artworks&view=grid&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>" class="admin-btn-pill <?php echo $view_mode === 'grid' ? 'admin-btn-primary' : ''; ?>" style="height: 32px; padding: 0 0.8rem;">Posters</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Form Toolbar -->
             <form method="POST" action="" id="admin-artworks-form">
               <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
               <div class="mb-3 d-flex flex-wrap gap-2">
-                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Select All</button>
-                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditArtworkModal()"><i class="bi bi-pencil-square"></i> Multi-Edit / Transfer</button>
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditArtworkModal()"><i class="bi bi-pencil-square"></i> Batch Edit / Transfer</button>
 
                 <div class="dropdown">
                   <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
@@ -20730,160 +22146,131 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </ul>
                 </div>
               </div>
-              <div class="admin-card mb-4">
-                <div class="table-responsive">
-                  <table class="admin-table align-middle text-nowrap">
-                    <thead class="border-bottom border-secondary">
-                      <tr>
-                        <th class="py-3 px-3" style="width: 40px;"></th>
-                        <th class="py-3 px-3" style="width: 60px;">Action</th>
-                        <th class="py-3 px-3" style="width: 70px;">ID</th>
-                        <th class="py-3 px-3">Title</th>
-                        <th class="py-3 px-3">Type</th>
-                        <th class="py-3 px-3">Tags</th>
-                        <th class="py-3 px-3">Uploader</th>
-                        <th class="py-3 px-3" style="width: 80px;">Views</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <?php
-                        $a_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                        $a_limit = ADMIN_PAGE_SIZE;
-                        $a_offset = ($a_page - 1) * $a_limit;
-  
-                        $where_clauses = [];
-                        $params = [];
-                        if ($search_artworks !== '') {
-                          $where_clauses[] = "(a.title LIKE ? OR a.tags LIKE ? OR a.parodies LIKE ? OR a.characters LIKE ? OR u.email LIKE ? OR a.user_id = ?)";
-                          $params = ["%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", "%$search_artworks%", $search_artworks];
-                        }
-  
-                        $where = '';
-                        if (!empty($where_clauses)) {
-                          $where = "WHERE " . implode(' AND ', $where_clauses);
-                        }
-  
-                        $sort_map = [
-                          'newest' => 'ORDER BY a.id DESC',
-                          'oldest' => 'ORDER BY a.id ASC',
-                          'title_asc' => 'ORDER BY a.title COLLATE NOCASE ASC',
-                          'views_desc' => 'ORDER BY a.views DESC'
-                        ];
-                        $order_by = $sort_map[$sort_artworks] ?? 'ORDER BY a.id DESC';
-  
-                        $db = get_db();
-                        $t_stmt = $db->prepare("SELECT COUNT(a.id) FROM arts a LEFT JOIN users u ON a.user_id = u.id $where");
-                        $t_stmt->execute($params);
-                        $t_artworks = $t_stmt->fetchColumn();
-                        $t_pages = ceil($t_artworks / $a_limit);
-  
-                        $stmt = $db->prepare("SELECT a.id, a.title, a.type, a.tags, a.nsfw, a.views, a.user_id, u.email, a.description, a.parodies, a.characters, a.groups_name, a.series_id, s.title as series_title FROM arts a LEFT JOIN users u ON a.user_id = u.id LEFT JOIN art_series s ON a.series_id = s.id $where $order_by LIMIT ? OFFSET ?");
-                        $stmt->execute(array_merge($params, [$a_limit, $a_offset]));
-                        $artworks = $stmt->fetchAll();
-  
-                        $allSeries = $db->query("SELECT id, title FROM art_series ORDER BY title COLLATE NOCASE ASC")->fetchAll(PDO::FETCH_KEY_PAIR);
-                        if (empty($artworks)): ?>
-                          <tr><td colspan="8" class="text-center py-4 text-secondary">No artworks found.</td></tr>
-                      <?php else: foreach ($artworks as $a): ?>
-                        <tr data-artwork="<?php echo htmlspecialchars(json_encode(array_merge($a, ['series_title' => $a['series_title'] ?? null])), ENT_QUOTES, 'UTF-8'); ?>">
-                          <td class="py-3 px-3 text-center"><input type="checkbox" name="artwork_ids[]" value="<?php echo $a['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform: scale(1.2);"></td>
-                          <td class="py-3 px-3">
-                            <button type="button" class="btn btn-sm btn-info text-dark fw-bold rounded-pill shadow-sm" title="Edit Artwork" onclick="openAdminSingleArtworkEdit(<?php echo htmlspecialchars(json_encode($a), ENT_QUOTES, 'UTF-8'); ?>)">
-                              <i class="bi bi-pencil-fill"></i> Edit
-                            </button>
-                          </td>
-                          <td class="py-3 px-3 text-secondary">#<?php echo $a['id']; ?></td>
-                          <td class="py-3 px-3 fw-bold text-white">
-                            <?php echo htmlspecialchars($a['title']); ?>
-                            <?php if ($a['nsfw']): ?><span class="badge bg-danger ms-1">NSFW</span><?php endif; ?>
-                          </td>
-                          <td class="py-3 px-3">
-                            <span class="badge bg-<?php echo $a['type'] === 'manga' ? 'warning text-dark' : 'info'; ?>"><?php echo htmlspecialchars($a['type']); ?></span>
-                          </td>
-                          <td class="py-3 px-3 text-secondary" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;"><?php echo htmlspecialchars($a['tags'] ?? ''); ?></td>
-                          <td class="py-3 px-3 text-secondary">
-                            <div class="small fw-bold">ID: <?php echo $a['user_id']; ?></div>
-                            <div class="small" style="font-size: 0.75rem;"><?php echo htmlspecialchars($a['email'] ?? 'Anonymous'); ?></div>
-                          </td>
-                          <td class="py-3 px-3 text-white fw-medium"><?php echo number_format($a['views']); ?></td>
-                        </tr>
-                      <?php endforeach; endif; ?>
-                    </tbody>
-                  </table>
+
+              <?php if ($view_mode === 'grid'): ?>
+                <!-- Visual Poster Grid View -->
+                <div class="row g-3 mb-4">
+                  <?php if (empty($artworks)): ?>
+                    <div class="col-12 text-center py-5 text-secondary">No artworks found.</div>
+                  <?php else: foreach ($artworks as $a): ?>
+                    <div class="col-6 col-md-4 col-xl-2">
+                      <div class="admin-card h-100 p-2 d-flex flex-column position-relative">
+                        <div class="position-absolute top-0 start-0 m-2 z-2">
+                          <input type="checkbox" name="artwork_ids[]" value="<?php echo $a['id']; ?>" class="form-check-input artwork-cb" style="transform: scale(1.1);">
+                        </div>
+                        <div class="position-relative overflow-hidden rounded mb-2" style="aspect-ratio: 3/4; background: #050505;">
+                          <?php if (!empty($a['cover_image'])): ?>
+                            <img src="?action=get_art_image&path=<?php echo urlencode($a['cover_image']); ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                          <?php else: ?>
+                            <div class="d-flex align-items-center justify-content-center h-100 text-secondary"><i class="bi bi-image fs-1"></i></div>
+                          <?php endif; ?>
+                          <?php if ($a['nsfw']): ?>
+                            <span class="position-absolute top-0 end-0 m-1 badge bg-danger">18+</span>
+                          <?php endif; ?>
+                          <span class="position-absolute bottom-0 end-0 m-1 badge bg-black bg-opacity-75"><?php echo $a['page_count']; ?>P</span>
+                        </div>
+                        <div class="text-truncate fw-bold text-white small mb-1" title="<?php echo htmlspecialchars($a['title']); ?>"><?php echo htmlspecialchars($a['title']); ?></div>
+                        <div class="small text-secondary text-truncate mb-2" style="font-size: 0.72rem;"><?php echo htmlspecialchars($a['series_title'] ?: 'Standalone Work'); ?></div>
+                        <div class="mt-auto pt-2 border-top border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                          <span class="text-secondary small font-monospace"><i class="bi bi-eye"></i> <?php echo number_format($a['views']); ?></span>
+                          <button type="button" class="admin-btn-pill p-0 px-2" style="height: 26px; font-size: 0.7rem;" onclick="openAdminSingleArtworkEdit(<?php echo htmlspecialchars(json_encode($a), ENT_QUOTES, 'UTF-8'); ?>)">Edit</button>
+                        </div>
+                      </div>
+                    </div>
+                  <?php endforeach; endif; ?>
                 </div>
-              </div>
+              <?php else: ?>
+                <!-- Table View -->
+                <div class="admin-card mb-4">
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle text-nowrap">
+                      <thead>
+                        <tr>
+                          <th style="width: 40px;" class="text-center"></th>
+                          <th style="width: 70px;">ID</th>
+                          <th>Artwork / Gallery</th>
+                          <th>Format</th>
+                          <th>Series Name</th>
+                          <th>Tags / Metas</th>
+                          <th>Views</th>
+                          <th>Uploader</th>
+                          <th class="text-end" style="width: 120px;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($artworks)): ?>
+                          <tr><td colspan="9" class="text-center py-5 text-secondary">No artworks found.</td></tr>
+                        <?php else: foreach ($artworks as $a): ?>
+                          <tr data-artwork="<?php echo htmlspecialchars(json_encode(array_merge($a, ['series_title' => $a['series_title'] ?? null])), ENT_QUOTES, 'UTF-8'); ?>">
+                            <td class="text-center">
+                              <input type="checkbox" name="artwork_ids[]" value="<?php echo $a['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform: scale(1.1);">
+                            </td>
+                            <td class="text-secondary font-monospace small">#<?php echo $a['id']; ?></td>
+                            <td>
+                              <div class="d-flex align-items-center gap-2">
+                                <img src="<?php echo !empty($a['cover_image']) ? ('?action=get_art_image&path=' . urlencode($a['cover_image'])) : '?action=get_app_icon'; ?>" alt="" class="rounded" style="width: 38px; height: 38px; object-fit: cover; background: #000;" onerror="this.src='?action=get_app_icon'">
+                                <div>
+                                  <div class="fw-bold text-white">
+                                    <?php echo htmlspecialchars($a['title']); ?>
+                                    <?php if ($a['nsfw']): ?><span class="badge bg-danger ms-1" style="font-size: 0.65rem;">NSFW</span><?php endif; ?>
+                                  </div>
+                                  <small class="text-secondary font-monospace"><?php echo $a['page_count']; ?> page(s) &bull; Code: <?php echo htmlspecialchars($a['public_id']); ?></small>
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              <span class="admin-badge <?php echo $a['type'] === 'manga' ? 'admin-badge-warning' : 'admin-badge-info'; ?>">
+                                <?php echo htmlspecialchars($a['type']); ?>
+                              </span>
+                            </td>
+                            <td>
+                              <span class="text-white fw-medium"><?php echo htmlspecialchars($a['series_title'] ?: '—'); ?></span>
+                            </td>
+                            <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
+                              <span class="small text-secondary font-monospace" title="<?php echo htmlspecialchars($a['tags'] ?? ''); ?>"><?php echo htmlspecialchars($a['tags'] ?: 'No tags'); ?></span>
+                            </td>
+                            <td>
+                              <span class="text-white fw-bold font-monospace"><?php echo number_format($a['views']); ?></span>
+                            </td>
+                            <td>
+                              <div class="d-flex align-items-center gap-1">
+                                <a href="?access=admin&page=storage&search=<?php echo urlencode($a['user_id']); ?>" class="text-white small fw-bold text-decoration-none" title="Inspect User Storage">UID #<?php echo $a['user_id']; ?></a>
+                              </div>
+                              <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($a['email'] ?? 'Anonymous'); ?></small>
+                            </td>
+                            <td class="text-end">
+                              <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.7rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="Edit Artwork" onclick="openAdminSingleArtworkEdit(<?php echo htmlspecialchars(json_encode($a), ENT_QUOTES, 'UTF-8'); ?>)">
+                                <i class="bi bi-pencil-fill"></i> Edit
+                              </button>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              <?php endif; ?>
+
+              <!-- Pagination -->
               <?php if ($t_pages > 1): ?>
-              <div class="admin-pagination">
-                <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&search=<?php echo urlencode($search_artworks); ?>&p=1">«</a>
-                <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&search=<?php echo urlencode($search_artworks); ?>&p=<?php echo $a_page - 1; ?>">‹</a>
-                <?php
-                  $start_p = max(1, $a_page - 2);
-                  $end_p = min($t_pages, $start_p + 4);
-                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-                  for ($i = $start_p; $i <= $end_p; $i++):
-                ?>
-                  <a class="admin-page-btn <?php echo ($a_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=artworks&search=<?php echo urlencode($search_artworks); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                <?php endfor; ?>
-                <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&search=<?php echo urlencode($search_artworks); ?>&p=<?php echo $a_page + 1; ?>">›</a>
-                <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&search=<?php echo urlencode($search_artworks); ?>&p=<?php echo $t_pages; ?>">»</a>
-              </div>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&view=<?php echo urlencode($view_mode); ?>&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&view=<?php echo urlencode($view_mode); ?>&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $a_page - 2);
+                    $end_p = min($t_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($a_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=artworks&view=<?php echo urlencode($view_mode); ?>&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&view=<?php echo urlencode($view_mode); ?>&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&view=<?php echo urlencode($view_mode); ?>&type=<?php echo urlencode($type_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $t_pages; ?>">»</a>
+                </div>
               <?php endif; ?>
             </form>
           </div>
 
-          <!-- Admin Edit Artwork Modal -->
-          <div class="modal fade" id="admin-artwork-modal" tabindex="-1">
-            <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
-              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
-                <div class="modal-header border-0 pb-2">
-                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info me-2"></i> Edit Artwork Metadata</h5>
-                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body p-4 pt-2 text-start">
-                  <form method="POST" action="">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <input type="hidden" name="artwork_id" id="admin-artwork-id">
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">TITLE</label>
-                      <input type="text" name="title" id="admin-artwork-title" class="form-control bg-dark text-white border-secondary" required>
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">DESCRIPTION</label>
-                      <textarea name="description" id="admin-artwork-description" class="form-control bg-dark text-white border-secondary" rows="3"></textarea>
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">TAGS (comma-separated)</label>
-                      <input type="text" name="tags" id="admin-artwork-tags" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">PARODIES</label>
-                      <input type="text" name="parodies" id="admin-artwork-parodies" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">CHARACTERS</label>
-                      <input type="text" name="characters" id="admin-artwork-characters" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">GROUPS</label>
-                      <input type="text" name="groups_name" id="admin-artwork-groups" class="form-control bg-dark text-white border-secondary">
-                    </div>
-                    <div class="mb-3">
-                      <label class="form-label text-secondary small fw-bold mb-1">TYPE</label>
-                      <select name="type" id="admin-artwork-type" class="form-select bg-dark text-white border-secondary">
-                        <option value="image">Image</option>
-                        <option value="manga">Manga</option>
-                      </select>
-                    </div>
-                    <div class="mb-4 form-check">
-                      <input type="checkbox" name="nsfw" id="admin-artwork-nsfw" class="form-check-input" value="1">
-                      <label class="form-check-label text-secondary small fw-bold" for="admin-artwork-nsfw">NSFW Content</label>
-                    </div>
-                    <button type="submit" name="edit_admin_artwork" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save Changes</button>
-                  </form>
-                </div>
-              </div>
-            </div>
-          </div>
           <script>
             function buildSeriesSelectHtml(artwork, allSeries) {
               let html = `<select name="multi_series_id[${artwork.id}]" class="form-select bg-dark text-white border-secondary mb-2">`;
@@ -20901,13 +22288,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const container = document.getElementById('admin-multi-edit-artwork-container');
               container.innerHTML = '';
               const fieldset = document.createElement('div');
-              fieldset.style.border = '1px solid #4d4d4d';
+              fieldset.style.border = '1px solid #333';
               fieldset.style.padding = '1.25rem';
-              fieldset.style.borderRadius = '8px';
-              fieldset.style.background = '#1a1a1a';
+              fieldset.style.borderRadius = '12px';
+              fieldset.style.background = '#111';
               fieldset.style.marginBottom = '1rem';
               fieldset.innerHTML = `
-                <h6 class="text-danger fw-bold mb-3">Editing Artwork #${artwork.id}</h6>
+                <h6 class="text-danger fw-bold mb-3"><i class="bi bi-images me-1"></i> Editing Artwork #${artwork.id}</h6>
                 <input type="hidden" name="multi_edit_ids[]" value="${artwork.id}">
                 <div class="row g-2">
                   <div class="col-12 mb-2">
@@ -20919,18 +22306,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <textarea name="multi_description[${artwork.id}]" class="form-control bg-dark text-white border-secondary" rows="2">${(artwork.description || '').replace(/"/g, '&quot;')}</textarea>
                   </div>
                   <div class="col-12 col-md-6 mb-2">
-                    <label class="form-label text-secondary small fw-bold mb-1">Type</label>
+                    <label class="form-label text-secondary small fw-bold mb-1">Format Type</label>
                     <select name="multi_type[${artwork.id}]" class="form-select bg-dark text-white border-secondary">
-                      <option value="image" ${artwork.type === 'image' ? 'selected' : ''}>Image</option>
-                      <option value="manga" ${artwork.type === 'manga' ? 'selected' : ''}>Manga</option>
+                      <option value="image" ${artwork.type === 'image' ? 'selected' : ''}>Single/Multi Image</option>
+                      <option value="manga" ${artwork.type === 'manga' ? 'selected' : ''}>Manga / Doujin</option>
                     </select>
                   </div>
                   <div class="col-12 col-md-6 mb-2">
-                    <label class="form-label text-secondary small fw-bold mb-1">Tags</label>
+                    <label class="form-label text-secondary small fw-bold mb-1">Tags (Comma Separated)</label>
                     <input type="text" name="multi_tags[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.tags || '').replace(/"/g, '&quot;')}">
                   </div>
                   <div class="col-12 mb-2">
-                    <label class="form-label text-secondary small fw-bold mb-1">Series</label>
+                    <label class="form-label text-secondary small fw-bold mb-1">Series Assignment</label>
                     ${buildSeriesSelectHtml(artwork, window.__adminAllSeries || {})}
                   </div>
                   <div class="col-12 col-md-6 mb-2">
@@ -20941,19 +22328,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <label class="form-label text-secondary small fw-bold mb-1">Characters</label>
                     <input type="text" name="multi_characters[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.characters || '').replace(/"/g, '&quot;')}">
                   </div>
-                  <div class="col-12 col-md-6 mb-2">
-                    <label class="form-label text-secondary small fw-bold mb-1">Groups</label>
-                    <input type="text" name="multi_groups_name[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.groups_name || '').replace(/"/g, '&quot;')}">
-                  </div>
                   <div class="col-6 col-md-3 mb-2">
-                    <label class="form-label text-secondary small fw-bold mb-1">NSFW</label>
+                    <label class="form-label text-secondary small fw-bold mb-1">NSFW Content</label>
                     <select name="multi_nsfw[${artwork.id}]" class="form-select bg-dark text-white border-secondary">
-                      <option value="0" ${artwork.nsfw == 0 ? 'selected' : ''}>SFW</option>
-                      <option value="1" ${artwork.nsfw == 1 ? 'selected' : ''}>NSFW</option>
+                      <option value="0" ${artwork.nsfw == 0 ? 'selected' : ''}>SFW (General)</option>
+                      <option value="1" ${artwork.nsfw == 1 ? 'selected' : ''}>NSFW (18+)</option>
                     </select>
                   </div>
                   <div class="col-6 col-md-3 mb-2">
-                    <label class="form-label text-warning small fw-bold mb-1">Transfer UID</label>
+                    <label class="form-label text-warning small fw-bold mb-1">Owner User ID</label>
                     <input type="number" name="multi_userid[${artwork.id}]" class="form-control bg-dark text-warning border-warning" value="${artwork.user_id || ''}">
                   </div>
                 </div>
@@ -20972,16 +22355,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const container = document.getElementById('admin-multi-edit-artwork-container');
               container.innerHTML = '';
               checkedBoxes.forEach(cb => {
-                const row = cb.closest('tr');
+                const row = cb.closest('tr') || cb.closest('.col-6');
                 const artwork = JSON.parse(row.dataset.artwork);
                 const fieldset = document.createElement('div');
-                fieldset.style.border = '1px solid #4d4d4d';
+                fieldset.style.border = '1px solid #333';
                 fieldset.style.padding = '1.25rem';
-                fieldset.style.borderRadius = '8px';
-                fieldset.style.background = '#1a1a1a';
+                fieldset.style.borderRadius = '12px';
+                fieldset.style.background = '#111';
                 fieldset.style.marginBottom = '1rem';
                 fieldset.innerHTML = `
-                  <h6 class="text-danger fw-bold mb-3">Editing Artwork #${artwork.id}</h6>
+                  <h6 class="text-danger fw-bold mb-3"><i class="bi bi-images me-1"></i> Editing Artwork #${artwork.id}</h6>
                   <input type="hidden" name="multi_edit_ids[]" value="${artwork.id}">
                   <div class="row g-2">
                     <div class="col-12 mb-2">
@@ -20993,18 +22376,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <textarea name="multi_description[${artwork.id}]" class="form-control bg-dark text-white border-secondary" rows="2">${(artwork.description || '').replace(/"/g, '&quot;')}</textarea>
                     </div>
                     <div class="col-12 col-md-6 mb-2">
-                      <label class="form-label text-secondary small fw-bold mb-1">Type</label>
+                      <label class="form-label text-secondary small fw-bold mb-1">Format Type</label>
                       <select name="multi_type[${artwork.id}]" class="form-select bg-dark text-white border-secondary">
-                        <option value="image" ${artwork.type === 'image' ? 'selected' : ''}>Image</option>
-                        <option value="manga" ${artwork.type === 'manga' ? 'selected' : ''}>Manga</option>
+                        <option value="image" ${artwork.type === 'image' ? 'selected' : ''}>Single/Multi Image</option>
+                        <option value="manga" ${artwork.type === 'manga' ? 'selected' : ''}>Manga / Doujin</option>
                       </select>
                     </div>
                     <div class="col-12 col-md-6 mb-2">
-                      <label class="form-label text-secondary small fw-bold mb-1">Tags</label>
+                      <label class="form-label text-secondary small fw-bold mb-1">Tags (Comma Separated)</label>
                       <input type="text" name="multi_tags[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.tags || '').replace(/"/g, '&quot;')}">
                     </div>
                     <div class="col-12 mb-2">
-                      <label class="form-label text-secondary small fw-bold mb-1">Series</label>
+                      <label class="form-label text-secondary small fw-bold mb-1">Series Assignment</label>
                       ${buildSeriesSelectHtml(artwork, window.__adminAllSeries || {})}
                     </div>
                     <div class="col-12 col-md-6 mb-2">
@@ -21015,19 +22398,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <label class="form-label text-secondary small fw-bold mb-1">Characters</label>
                       <input type="text" name="multi_characters[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.characters || '').replace(/"/g, '&quot;')}">
                     </div>
-                    <div class="col-12 col-md-6 mb-2">
-                      <label class="form-label text-secondary small fw-bold mb-1">Groups</label>
-                      <input type="text" name="multi_groups_name[${artwork.id}]" class="form-control bg-dark text-white border-secondary" value="${(artwork.groups_name || '').replace(/"/g, '&quot;')}">
-                    </div>
                     <div class="col-6 col-md-3 mb-2">
-                      <label class="form-label text-secondary small fw-bold mb-1">NSFW</label>
+                      <label class="form-label text-secondary small fw-bold mb-1">NSFW Content</label>
                       <select name="multi_nsfw[${artwork.id}]" class="form-select bg-dark text-white border-secondary">
-                        <option value="0" ${artwork.nsfw == 0 ? 'selected' : ''}>SFW</option>
-                        <option value="1" ${artwork.nsfw == 1 ? 'selected' : ''}>NSFW</option>
+                        <option value="0" ${artwork.nsfw == 0 ? 'selected' : ''}>SFW (General)</option>
+                        <option value="1" ${artwork.nsfw == 1 ? 'selected' : ''}>NSFW (18+)</option>
                       </select>
                     </div>
                     <div class="col-6 col-md-3 mb-2">
-                      <label class="form-label text-warning small fw-bold mb-1">Transfer UID</label>
+                      <label class="form-label text-warning small fw-bold mb-1">Owner User ID</label>
                       <input type="number" name="multi_userid[${artwork.id}]" class="form-control bg-dark text-warning border-warning" value="${artwork.user_id || ''}">
                     </div>
                   </div>
@@ -21038,31 +22417,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               new bootstrap.Modal(document.getElementById('admin-multi-edit-artwork-modal')).show();
             }
           </script>
-
-          <script>
-            window.__adminAllSeries = <?php echo json_encode(array_map(function($s) { return htmlspecialchars($s, ENT_QUOTES, 'UTF-8'); }, $allSeries)); ?>;
-          </script>
-
-          <!-- Admin Multi-Edit Artwork Modal -->
-          <div class="modal fade" id="admin-multi-edit-artwork-modal" tabindex="-1">
-            <div class="modal-dialog modal-dialog-scrollable modal-lg modal-dialog-centered">
-              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
-                <div class="modal-header border-0 pb-2">
-                  <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-info"></i> Multi-Edit: <span id="multi-edit-artwork-count">0</span> Artwork(s)</h5>
-                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body p-4 pt-2 text-start">
-                  <form method="POST" action="">
-                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <div id="admin-multi-edit-artwork-container" style="max-height: 60vh; overflow-y: auto; padding-right: 10px;"></div>
-                    <div class="mt-4 pt-3 border-top border-secondary">
-                      <button type="submit" name="multi_edit_admin_artworks" class="btn btn-info text-dark fw-bold w-100 rounded-pill py-2 shadow-sm">Save All Changes</button>
-                    </div>
-                  </form>
-                </div>
-              </div>
-            </div>
-          </div>
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
           <?php 
             $log_search = trim($_GET['search'] ?? '');
@@ -21169,122 +22523,145 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
           </div>
         <?php elseif (($_GET['page'] ?? '') === 'storage'): ?>
-          <div class="page-header d-flex align-items-center justify-content-between">
-            <div>
-              <h1 class="content-title m-0 fw-bold">System Storage & Assets</h1>
-              <div class="small text-secondary mt-1">Real-time disk breakdown, assets footprint, and user storage consumption</div>
-            </div>
-          </div>
-          <div class="content-area-wrapper">
-            <?php
-              $disk_total = @disk_total_space(__DIR__) ?: 0;
-              $disk_free = @disk_free_space(__DIR__) ?: 0;
-              $disk_used = max(0, $disk_total - $disk_free);
-              $disk_pct = $disk_total > 0 ? min(100, ($disk_used / $disk_total) * 100) : 0;
-              $disk_pct_css = number_format($disk_pct, 2, '.', ''); // Forces dot decimal for valid CSS
+          <?php
+            $db = get_db();
+            $storage_search = trim($_GET['search'] ?? '');
+            $storage_sort = $_GET['sort'] ?? 'total_desc';
+            $storage_page = max(1, (int)($_GET['p'] ?? 1));
+            $storage_limit = 20;
 
-              if (!function_exists('format_storage_bytes')) {
-                function format_storage_bytes($bytes, $precision = 2) {
-                  $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-                  $bytes = max($bytes, 0);
-                  $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
-                  $pow = min($pow, count($units) - 1);
-                  $bytes /= pow(1024, $pow);
-                  return number_format($bytes, $precision, '.', '') . ' ' . $units[$pow];
-                }
+            if (!function_exists('format_admin_bytes')) {
+              function format_admin_bytes($bytes, $precision = 2) {
+                $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+                $bytes = max($bytes, 0);
+                $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+                $pow = min($pow, count($units) - 1);
+                $bytes /= pow(1024, $pow);
+                return number_format($bytes, $precision, '.', '') . ' ' . $units[$pow];
               }
-  
-              $db_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
-              $total_songs = 0;
-              $total_audio_size = 0;
-              $artist_stats = [];
-  
-              // Recursively scan the entire directory for non-audio assets (images, zip backups, webp covers)
-              $non_audio_count = 0;
-              $non_audio_size = 0;
+            }
+
+            // 1. Host Partition Metrics
+            $disk_total = @disk_total_space(__DIR__) ?: 1;
+            $disk_free = @disk_free_space(__DIR__) ?: 0;
+            $disk_used = max(0, $disk_total - $disk_free);
+            $disk_pct = min(100, ($disk_used / $disk_total) * 100);
+            $disk_pct_css = number_format($disk_pct, 2, '.', '');
+
+            // 2. High-Performance Cached Disk Storage Audit (Cached 10 mins to eliminate page latency)
+            $storage_cache_file = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+            $cat_sizes = [];
+            $cat_counts = [];
+            $user_storage_matrix = [];
+            $is_cached = false;
+
+            if (file_exists($storage_cache_file) && (time() - filemtime($storage_cache_file)) < 600) {
+              $cache_data = @json_decode(@file_get_contents($storage_cache_file), true);
+              if (is_array($cache_data) && isset($cache_data['cat_sizes'], $cache_data['user_storage_matrix'])) {
+                $cat_sizes = $cache_data['cat_sizes'];
+                $cat_counts = $cache_data['cat_counts'];
+                $user_storage_matrix = $cache_data['user_storage_matrix'];
+                $is_cached = true;
+              }
+            }
+
+            if (!$is_cached) {
+              $cat_sizes = [
+                'music_audio' => 0,
+                'users_cloud_drive' => 0,
+                'artworks' => 0,
+                'thumbnails_cache' => 0,
+                'sqlite_database' => file_exists(DB_FILE) ? filesize(DB_FILE) : 0,
+                'temp_staging' => 0,
+                'other_files' => 0
+              ];
+
+              $cat_counts = [
+                'music_audio' => 0,
+                'users_cloud_drive' => 0,
+                'artworks' => 0,
+                'thumbnails_cache' => 0,
+                'temp_staging' => 0
+              ];
+
+              // Fast Scan
               try {
-                $dir_iterator = new RecursiveIteratorIterator(
-                  new RecursiveDirectoryIterator(
-                    MUSIC_DIR,
-                    FilesystemIterator::SKIP_DOTS
-                  )
+                $it = new RecursiveIteratorIterator(
+                  new RecursiveDirectoryIterator(MUSIC_DIR, FilesystemIterator::SKIP_DOTS),
+                  RecursiveIteratorIterator::LEAVES_ONLY
                 );
-                foreach ($dir_iterator as $file) {
+
+                foreach ($it as $file) {
                   if ($file->isFile()) {
+                    $path = str_replace('\\', '/', $file->getPathname());
+                    $size = (int)$file->getSize();
                     $ext = strtolower($file->getExtension());
-                    // Audio extensions recognized by the system
-                    if (!in_array($ext, ["mp3", "flac", "m4a", "ogg", "wav"])) {
-                      $non_audio_count++;
-                      $non_audio_size += $file->getSize();
+
+                    if (strpos($path, '/users_drive/') !== false) {
+                      if (strpos($path, '/.gallery_cache/') !== false) {
+                        $cat_sizes['thumbnails_cache'] += $size;
+                        $cat_counts['thumbnails_cache']++;
+                      } else {
+                        $cat_sizes['users_cloud_drive'] += $size;
+                        $cat_counts['users_cloud_drive']++;
+                      }
+                    } elseif (strpos($path, '/.gallery_cache') !== false || strpos($path, '/thumbnails/') !== false || strpos($path, '/covers/') !== false) {
+                      $cat_sizes['thumbnails_cache'] += $size;
+                      $cat_counts['thumbnails_cache']++;
+                    } elseif (strpos($path, '/.tmp_uploads') !== false || strpos($path, '/.tmp_db') !== false) {
+                      $cat_sizes['temp_staging'] += $size;
+                      $cat_counts['temp_staging']++;
+                    } elseif (strpos($path, '/phpshares/') !== false || strpos($path, '/uploads/arts/') !== false) {
+                      $cat_sizes['artworks'] += $size;
+                      $cat_counts['artworks']++;
+                    } elseif (in_array($ext, ['mp3', 'flac', 'm4a', 'ogg', 'wav'])) {
+                      $cat_sizes['music_audio'] += $size;
+                      $cat_counts['music_audio']++;
+                    } elseif ($path !== str_replace('\\', '/', DB_FILE)) {
+                      $cat_sizes['other_files'] += $size;
                     }
                   }
                 }
-              } catch (Exception $e) {
-              }
-  
-              // Remove the Database file itself from the "Non-Audio" count to prevent duplicate display counting
-              if (file_exists(DB_FILE)) {
-                $non_audio_count = max(0, $non_audio_count - 1);
-                $non_audio_size = max(0, $non_audio_size - filesize(DB_FILE));
-              }
-  
-              $db = get_db();
-              $stmt_u = $db->query("SELECT id, artist, email FROM users");
-              while ($u = $stmt_u->fetch()) {
-                $artist_stats[$u["id"]] = [
-                  "name" => $u["artist"],
-                  "email" => $u["email"] ?? "Anonymous",
-                  "count" => 0,
-                  "size" => 0,
-                  "drive_count" => 0,
-                  "drive_size" => 0,
-                  "total_size" => 0,
+              } catch (Exception $e) {}
+
+              // Calculate user matrix
+              $stmt_all_u = $db->query("SELECT id, artist, email, status, banned, verified FROM users ORDER BY id ASC");
+              while ($u = $stmt_all_u->fetch(PDO::FETCH_ASSOC)) {
+                $user_storage_matrix[$u['id']] = [
+                  'id' => $u['id'],
+                  'artist' => $u['artist'] ?: 'Anonymous',
+                  'email' => $u['email'] ?: 'No Email',
+                  'status' => $u['status'],
+                  'banned' => (int)$u['banned'],
+                  'verified' => $u['verified'],
+                  'music_count' => 0,
+                  'music_bytes' => 0,
+                  'drive_count' => 0,
+                  'drive_bytes' => 0,
+                  'trash_bytes' => 0,
+                  'total_bytes' => 0
                 ];
               }
-  
-              $stmt_m = $db->query("SELECT user_id, file FROM music");
-              while ($m = $stmt_m->fetch()) {
-                $uid = $m["user_id"];
-                $path = $m["file"];
-                if ($path) {
-                  if (!file_exists($path)) {
-                    $dynamic_path =
-                      MUSIC_DIR .
-                      "/uploads/" .
-                      basename(dirname(dirname($path))) .
-                      "/" .
-                      basename(dirname($path)) .
-                      "/" .
-                      basename($path);
-                    if (file_exists($dynamic_path)) {
-                      $path = $dynamic_path;
-                    }
-                  }
-                  if (file_exists($path)) {
-                    $fsize = filesize($path);
-                    if (isset($artist_stats[$uid])) {
-                      $artist_stats[$uid]["count"]++;
-                      $artist_stats[$uid]["size"] += $fsize;
-                    }
-                    $total_songs++;
-                    $total_audio_size += $fsize;
-                  }
+
+              $stmt_m_sum = $db->query("SELECT user_id, file FROM music");
+              while ($m = $stmt_m_sum->fetch(PDO::FETCH_ASSOC)) {
+                $uid = $m['user_id'];
+                $fpath = $m['file'];
+                if ($fpath && file_exists($fpath) && isset($user_storage_matrix[$uid])) {
+                  $user_storage_matrix[$uid]['music_count']++;
+                  $user_storage_matrix[$uid]['music_bytes'] += (int)filesize($fpath);
                 }
               }
-  
-              // Scan all Users' Cloud Drives in users_drive/
-              $total_drive_files = 0;
-              $total_drive_size = 0;
+
               $users_drive_base = MUSIC_DIR . '/users_drive';
-  
               if (is_dir($users_drive_base)) {
                 foreach (glob($users_drive_base . '/user_*_folder', GLOB_ONLYDIR) as $uFolder) {
                   if (preg_match('/user_(\d+)_folder$/', $uFolder, $matches)) {
                     $uid = (int)$matches[1];
-                    $u_files = 0;
-                    $u_size = 0;
+                    $u_files = 0; $u_size = 0; $u_trash = 0;
                     $cacheReal = realpath($uFolder . '/.gallery_cache');
-  
+                    $trashReal = realpath($uFolder . '/.drive_trash_bin');
+
                     $queue = [$uFolder];
                     while (!empty($queue)) {
                       $currentDir = array_shift($queue);
@@ -21300,217 +22677,430 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           $sz = @filesize($full);
                           if ($sz !== false) {
                             $u_files++;
-                            $u_size += $sz;
+                            $u_size += (int)$sz;
+                            if ($trashReal && strpos($full, $trashReal) === 0) {
+                              $u_trash += (int)$sz;
+                            }
                           }
                         }
                       }
                       @closedir($dh);
                     }
-  
-                    if (isset($artist_stats[$uid])) {
-                      $artist_stats[$uid]["drive_count"] = $u_files;
-                      $artist_stats[$uid]["drive_size"] = $u_size;
+
+                    if (isset($user_storage_matrix[$uid])) {
+                      $user_storage_matrix[$uid]['drive_count'] = $u_files;
+                      $user_storage_matrix[$uid]['drive_bytes'] = $u_size;
+                      $user_storage_matrix[$uid]['trash_bytes'] = $u_trash;
                     }
-                    $total_drive_files += $u_files;
-                    $total_drive_size += $u_size;
                   }
                 }
               }
-  
-              foreach ($artist_stats as &$as) {
-                $as["total_size"] = $as["size"] + $as["drive_size"];
+
+              foreach ($user_storage_matrix as &$item) {
+                $item['total_bytes'] = $item['music_bytes'] + $item['drive_bytes'];
               }
-              unset($as);
-  
-              usort($artist_stats, function ($a, $b) {
-                return $b["total_size"] <=> $a["total_size"];
+              unset($item);
+
+              // Cache audit
+              @file_put_contents($storage_cache_file, json_encode([
+                'cat_sizes' => $cat_sizes,
+                'cat_counts' => $cat_counts,
+                'user_storage_matrix' => $user_storage_matrix
+              ]));
+            }
+
+            $app_managed_total = array_sum($cat_sizes);
+            $unmanaged_system_used = max(0, $disk_used - $app_managed_total);
+
+            // Filter search
+            $filtered_matrix = $user_storage_matrix;
+            if ($storage_search !== '') {
+              $filtered_matrix = array_filter($filtered_matrix, function($u) use ($storage_search) {
+                return stripos($u['artist'], $storage_search) !== false || stripos($u['email'], $storage_search) !== false || $u['id'] == $storage_search;
               });
-  
-              $storage_page = isset($_GET["p"]) ? max(1, (int) $_GET["p"]) : 1;
-              $total_storage_users = count($artist_stats);
-              $total_storage_pages = ceil($total_storage_users / ADMIN_PAGE_SIZE);
-              if ($total_storage_pages == 0) {
-                $total_storage_pages = 1;
+            }
+
+            // Sort
+            usort($filtered_matrix, function($a, $b) use ($storage_sort) {
+              switch ($storage_sort) {
+                case 'total_asc': return $a['total_bytes'] <=> $b['total_bytes'];
+                case 'music_desc': return $b['music_bytes'] <=> $a['music_bytes'];
+                case 'drive_desc': return $b['drive_bytes'] <=> $a['drive_bytes'];
+                case 'name_asc': return strcasecmp($a['artist'], $b['artist']);
+                case 'total_desc':
+                default: return $b['total_bytes'] <=> $a['total_bytes'];
               }
-              $storage_offset = ($storage_page - 1) * ADMIN_PAGE_SIZE;
-  
-              $paged_artist_stats = array_slice($artist_stats, $storage_offset, ADMIN_PAGE_SIZE);
-              
-              $app_assets_total = $total_audio_size + $total_drive_size + $non_audio_size + $db_size;
-              $other_used = max(0, $disk_used - $app_assets_total);
-            ?>
+            });
+
+            $total_storage_users = count($filtered_matrix);
+            $total_storage_pages = ceil($total_storage_users / $storage_limit);
+            $offset = ($storage_page - 1) * $storage_limit;
+            $paged_users = array_slice($filtered_matrix, $offset, $storage_limit);
+
+            $top_users_chart = array_slice($filtered_matrix, 0, 10);
+            $top_user_names = array_column($top_users_chart, 'artist');
+            $top_user_music_mb = array_map(fn($u) => round($u['music_bytes'] / 1048576, 2), $top_users_chart);
+            $top_user_drive_mb = array_map(fn($u) => round($u['drive_bytes'] / 1048576, 2), $top_users_chart);
+          ?>
+
+          <div class="page-header admin-toolbar-wrap">
+            <div>
+              <h1 class="content-title m-0 fw-bold">Storage Studio &amp; Quota Matrix</h1>
+              <div class="small text-secondary mt-1">Direct file system oversight, per-user cloud footprints, cache pruning, and jumpers</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <form method="POST" action="?access=admin&page=storage" class="m-0">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="force_storage_reaudit" class="admin-btn-pill" title="Recalculate live disk scan">
+                  <i class="bi bi-arrow-clockwise text-info"></i> Force Re-Audit
+                </button>
+              </form>
+              <button class="admin-btn-pill" data-bs-toggle="modal" data-bs-target="#quickCleanModal">
+                <i class="bi bi-magic text-warning"></i> Clean Console
+              </button>
+              <form method="POST" action="?access=admin&page=storage" class="m-0" onsubmit="return confirm('Compact and optimize SQLite database?');">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="vacuum_storage_db" class="admin-btn-pill admin-btn-primary">
+                  <i class="bi bi-database-fill-gear"></i> Vacuum DB
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Server Disk Bar & Global Health Card -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                <div>
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-hdd-network text-danger"></i> Host Partition Mount
+                  </h5>
+                  <div class="small text-secondary mt-1">Physical filesystem storage capacity</div>
+                </div>
+                <div class="text-end">
+                  <span class="fs-4 fw-bold text-white"><?php echo format_admin_bytes($disk_used); ?></span>
+                  <span class="text-secondary small">/ <?php echo format_admin_bytes($disk_total); ?> (<?php echo $disk_pct_css; ?>% full)</span>
+                </div>
+              </div>
+
+              <div class="progress mb-3" style="height: 50px; background: #050505; border: 1px solid #333; border-radius: 14px;">
+                <div class="progress-bar d-flex align-items-center justify-content-center <?php echo $disk_pct > 85 ? 'bg-danger' : ($disk_pct > 65 ? 'bg-warning text-dark fw-bold' : 'bg-info'); ?>" role="progressbar" style="width: <?php echo $disk_pct_css; ?>%; font-size: 1rem; font-weight: 700;">
+                  <?php echo $disk_pct_css; ?>%
+                </div>
+              </div>
+
+              <div class="d-flex justify-content-between align-items-center text-secondary small flex-wrap gap-2 font-monospace">
+                <span><i class="bi bi-check-circle-fill text-success me-1"></i> Available Free: <strong class="text-white"><?php echo format_admin_bytes($disk_free); ?></strong></span>
+                <span><i class="bi bi-folder-fill text-primary me-1"></i> App Managed: <strong class="text-white"><?php echo format_admin_bytes($app_managed_total); ?></strong></span>
+                <span><i class="bi bi-server text-secondary me-1"></i> System Host Files: <strong class="text-white"><?php echo format_admin_bytes($unmanaged_system_used); ?></strong></span>
+              </div>
+            </div>
+
+            <!-- Storage Category Breakdown Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">Audio Library</span>
+                    <span class="text-danger"><i class="bi bi-file-earmark-music-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['music_audio']); ?></div>
+                  <div class="small text-secondary"><?php echo number_format($cat_counts['music_audio']); ?> audio files (MP3, FLAC, M4A, OGG)</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">User Cloud Drives</span>
+                    <span class="text-warning"><i class="bi bi-cloud-arrow-up-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['users_cloud_drive']); ?></div>
+                  <div class="small text-secondary"><?php echo number_format($cat_counts['users_cloud_drive']); ?> personal drive files</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">Cache &amp; Thumbnails</span>
+                    <span class="text-info"><i class="bi bi-image-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['thumbnails_cache']); ?></div>
+                  <div class="small text-secondary"><?php echo number_format($cat_counts['thumbnails_cache']); ?> generated WebP thumbs</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">PHPShares Artworks</span>
+                    <span class="text-success"><i class="bi bi-images fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['artworks']); ?></div>
+                  <div class="small text-secondary"><?php echo number_format($cat_counts['artworks']); ?> illustration &amp; manga assets</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">SQLite Engine</span>
+                    <span class="text-primary"><i class="bi bi-database-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['sqlite_database']); ?></div>
+                  <div class="small text-secondary font-monospace">WAL Mode &bull; 50MB RAM Cache</div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase">Staging &amp; Chunks</span>
+                    <span class="text-white"><i class="bi bi-hourglass-split fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mb-1"><?php echo format_admin_bytes($cat_sizes['temp_staging']); ?></div>
+                  <div class="small text-secondary"><?php echo number_format($cat_counts['temp_staging']); ?> upload buffer files</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Charts Matrix -->
             <div class="row g-4 mb-4">
-              <!-- Disk Stats & Chart -->
               <div class="col-12 col-xl-5">
-                <div class="card bg-dark border-secondary shadow-sm h-100">
-                  <div class="card-body p-4 d-flex flex-column">
-                    <h5 class="fw-bold text-white mb-4">
-                      <i class="bi bi-device-hdd text-info me-2"></i> Host Server Disk Space
-                    </h5>
-                    <div class="d-flex justify-content-between text-secondary small fw-bold mb-2">
-                      <span>Used:
-                      <?php echo format_storage_bytes($disk_used); ?>
-                      </span> <span>Total:
-                      <?php echo format_storage_bytes($disk_total); ?> (<?php echo $disk_pct_css; ?>%)</span>
-                    </div>
-                    <div class="progress mb-4" style="height: 12px; background-color: #000; border: 1px solid #333;">
-                      <div class="progress-bar <?php echo $disk_pct > 85 ? 'bg-danger' : ($disk_pct > 60 ? 'bg-warning' : 'bg-info'); ?>" role="progressbar" style="width: <?php echo $disk_pct_css; ?>%;"></div>
-                    </div>
-                    <div class="text-end text-secondary small fw-bold mb-4">
-                      Free Space: <span class="text-success">
-                      <?php echo format_storage_bytes($disk_free); ?>
-                      </span>
-                    </div>
-                    <div class="mt-auto position-relative" style="height: 200px; width: 100%;">
-                      <canvas id="diskPieChart"></canvas>
-                    </div>
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-pie-chart-fill text-danger"></i> Storage Distribution
+                  </h5>
+                  <div class="position-relative flex-grow-1" style="min-height: 250px; width: 100%;">
+                    <canvas id="storageCompositionChart"></canvas>
                   </div>
                 </div>
               </div>
-              <!-- App Assets Stats -->
+
               <div class="col-12 col-xl-7">
-                <div class="card bg-dark border-secondary shadow-sm h-100">
-                  <div class="card-body p-4">
-                    <h5 class="fw-bold text-white mb-4">
-                      <i class="bi bi-music-note-list text-danger me-2"></i> App Assets
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-bar-chart-fill text-warning"></i> Top 10 Storage Consumers
                     </h5>
-                    <div class="row g-3">
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-file-music fs-3 text-danger mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo number_format($total_songs); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Music Tracks</div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-hdd-stack fs-3 text-danger mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($total_audio_size); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Music Storage</div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-cloud-arrow-up fs-3 text-warning mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo number_format($total_drive_files); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">User Drive Files</div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-hdd-rack fs-3 text-warning mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($total_drive_size); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">User Drive Storage</div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-database fs-3 text-info mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($db_size); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Database Size</div>
-                        </div>
-                      </div>
-                      <div class="col-6 col-md-4">
-                        <div class="p-3 bg-black rounded border border-secondary text-center h-100 d-flex flex-column justify-content-center">
-                          <i class="bi bi-files fs-3 text-success mb-2 d-block"></i>
-                          <div class="fs-5 fw-bold text-white"><?php echo format_storage_bytes($non_audio_size); ?></div>
-                          <div class="small text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Assets & Images</div>
-                        </div>
-                      </div>
-                    </div>
+                    <span class="admin-badge admin-badge-warning">Music vs Cloud Drive</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 250px; width: 100%;">
+                    <canvas id="topUsersStorageChart"></canvas>
                   </div>
                 </div>
               </div>
             </div>
-            <!-- Top Users Chart -->
-            <div class="card bg-dark border-secondary shadow-sm mb-4">
-              <div class="card-body p-4">
-                <h5 class="fw-bold text-white mb-4">
-                  <i class="bi bi-bar-chart-fill text-primary me-2"></i> Top Users by Storage
-                </h5>
-                <div class="position-relative" style="height: 250px; width: 100%;">
-                  <canvas id="usersBarChart"></canvas>
+
+            <!-- User Storage Breakdown Table with Actions -->
+            <div class="admin-card mb-4">
+              <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div>
+                  <h5 class="m-0 text-white fw-bold fs-6">User Storage Directory Matrix</h5>
+                  <div class="small text-secondary mt-1">Directly manage user song uploads and personal cloud drive folders</div>
                 </div>
+                <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-grow-1 justify-content-end" style="max-width: 580px;">
+                  <input type="hidden" name="access" value="admin">
+                  <input type="hidden" name="page" value="storage">
+                  <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                    <option value="total_desc" <?php echo $storage_sort === 'total_desc' ? 'selected' : ''; ?>>Total Size (High to Low)</option>
+                    <option value="total_asc" <?php echo $storage_sort === 'total_asc' ? 'selected' : ''; ?>>Total Size (Low to High)</option>
+                    <option value="music_desc" <?php echo $storage_sort === 'music_desc' ? 'selected' : ''; ?>>Music Library Size</option>
+                    <option value="drive_desc" <?php echo $storage_sort === 'drive_desc' ? 'selected' : ''; ?>>Cloud Drive Size</option>
+                    <option value="name_asc" <?php echo $storage_sort === 'name_asc' ? 'selected' : ''; ?>>Artist Name (A-Z)</option>
+                  </select>
+                  <div class="position-relative flex-grow-1">
+                    <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user, ID, email..." value="<?php echo htmlspecialchars($storage_search); ?>">
+                    <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                  </div>
+                  <?php if ($storage_search !== ''): ?>
+                    <a href="?access=admin&page=storage&sort=<?php echo urlencode($storage_sort); ?>" class="admin-btn-pill" style="height: 38px; padding: 0 0.85rem;">Clear</a>
+                  <?php endif; ?>
+                </form>
               </div>
-            </div>
-            <!-- User Breakdown Table -->
-            <div class="admin-card">
-              <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex align-items-center gap-2">
-                <i class="bi bi-people-fill text-danger"></i>
-                <h5 class="m-0 text-white fw-bold fs-6">User Storage Footprint (Music + Cloud Drive)</h5>
-              </div>
+
               <div class="table-responsive">
-                <table class="admin-table">
+                <table class="admin-table text-nowrap align-middle">
                   <thead>
                     <tr>
-                      <th style="width: 60px;">#</th>
-                      <th>Artist / User</th>
-                      <th>Email</th>
-                      <th class="text-center">Music Tracks</th>
-                      <th class="text-center">Cloud Drive</th>
-                      <th class="text-end">Total Storage</th>
+                      <th style="width: 60px;">ID</th>
+                      <th>Artist Account</th>
+                      <th>Music Footprint</th>
+                      <th>Cloud Drive (2GB Limit)</th>
+                      <th>Trash Size</th>
+                      <th>Total Disk</th>
+                      <th class="text-end" style="width: 260px;">Management Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <?php $rank = $storage_offset + 1; foreach ($paged_artist_stats as $stat): ?>
-                    <tr>
-                      <td class="text-secondary fw-bold font-monospace"><?php echo $rank++; ?></td>
-                      <td class="fw-bold text-info"><?php echo htmlspecialchars($stat['name']); ?></td>
-                      <td class="text-secondary small"><?php echo htmlspecialchars($stat['email']); ?></td>
-                      <td class="text-center text-white font-monospace">
-                        <div><?php echo number_format($stat['count']); ?> files</div>
-                        <small class="text-secondary"><?php echo format_storage_bytes($stat['size']); ?></small>
-                      </td>
-                      <td class="text-center text-warning font-monospace">
-                        <div><?php echo number_format($stat['drive_count']); ?> files</div>
-                        <small class="text-secondary"><?php echo format_storage_bytes($stat['drive_size']); ?></small>
-                      </td>
-                      <td class="text-end text-white fw-bold font-monospace"><?php echo format_storage_bytes($stat['total_size']); ?></td>
-                    </tr>
-                    <?php endforeach; ?>
-                    <?php if(empty($paged_artist_stats)): ?>
-                    <tr><td colspan="6" class="text-center py-5 text-secondary">No users found.</td></tr>
-                    <?php endif; ?>
+                    <?php if (empty($paged_users)): ?>
+                      <tr><td colspan="7" class="text-center py-5 text-secondary">No user storage records found.</td></tr>
+                    <?php else: foreach ($paged_users as $usr): ?>
+                      <tr>
+                        <td class="text-secondary font-monospace small">#<?php echo $usr['id']; ?></td>
+                        <td>
+                          <div class="d-flex align-items-center gap-2">
+                            <span class="fw-bold text-white"><?php echo htmlspecialchars($usr['artist']); ?></span>
+                            <?php if ($usr['status'] === 'super_admin'): ?>
+                              <span class="admin-badge admin-badge-primary">Super Admin</span>
+                            <?php elseif ($usr['banned']): ?>
+                              <span class="admin-badge admin-badge-danger">Banned</span>
+                            <?php endif; ?>
+                          </div>
+                          <small class="text-secondary font-monospace" style="font-size: 0.75rem;"><?php echo htmlspecialchars($usr['email']); ?></small>
+                        </td>
+                        <td>
+                          <div class="text-white fw-medium"><?php echo format_admin_bytes($usr['music_bytes']); ?></div>
+                          <small class="text-secondary" style="font-size: 0.75rem;"><?php echo number_format($usr['music_count']); ?> song uploads</small>
+                        </td>
+                        <td>
+                          <?php
+                            $quota_max = 2 * 1024 * 1024 * 1024;
+                            $pct_used = min(100, round(($usr['drive_bytes'] / $quota_max) * 100, 1));
+                          ?>
+                          <div class="d-flex align-items-center gap-2">
+                            <div class="progress flex-grow-1" style="height: 6px; width: 80px; background: #050505;">
+                              <div class="progress-bar <?php echo $pct_used > 85 ? 'bg-danger' : 'bg-warning'; ?>" style="width: <?php echo $pct_used; ?>%;"></div>
+                            </div>
+                            <span class="small font-monospace text-white"><?php echo format_admin_bytes($usr['drive_bytes']); ?></span>
+                          </div>
+                          <small class="text-secondary" style="font-size: 0.75rem;"><?php echo number_format($usr['drive_count']); ?> files (<?php echo $pct_used; ?>% used)</small>
+                        </td>
+                        <td>
+                          <?php if ($usr['trash_bytes'] > 0): ?>
+                            <span class="text-danger font-monospace small fw-bold"><?php echo format_admin_bytes($usr['trash_bytes']); ?></span>
+                          <?php else: ?>
+                            <span class="text-secondary small">0 B</span>
+                          <?php endif; ?>
+                        </td>
+                        <td>
+                          <span class="fw-bold text-white font-monospace fs-6"><?php echo format_admin_bytes($usr['total_bytes']); ?></span>
+                        </td>
+                        <td class="text-end">
+                          <div class="d-flex align-items-center justify-content-end gap-1 flex-wrap">
+                            <!-- Direct Manage Songs Jumper -->
+                            <a href="?access=admin&page=songs&search=uid:<?php echo urlencode($usr['id']); ?>" class="admin-btn-pill" style="height: 30px; padding: 0 0.6rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="Manage Songs Uploaded by this User">
+                              <i class="bi bi-music-note-list"></i> Songs
+                            </a>
+                            
+                            <!-- Direct Manage User Drive Jumper -->
+                            <a href="?access=admin&page=drive&path=<?php echo urlencode('users_drive/user_' . $usr['id'] . '_folder'); ?>" class="admin-btn-pill" style="height: 30px; padding: 0 0.6rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Browse this User's Cloud Drive Folder">
+                              <i class="bi bi-folder2-open"></i> Drive
+                            </a>
+
+                            <!-- Empty User Trash Button -->
+                            <?php if ($usr['trash_bytes'] > 0): ?>
+                              <form method="POST" action="?access=admin&page=storage" class="m-0 d-inline" onsubmit="return confirm('Empty trash for User #<?php echo $usr['id']; ?>?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="target_user_id" value="<?php echo $usr['id']; ?>">
+                                <button type="submit" name="purge_user_drive_trash" class="admin-btn-pill" style="height: 30px; padding: 0 0.6rem; color: #f87171;" title="Empty User Trash">
+                                  <i class="bi bi-trash"></i> Empty
+                                </button>
+                              </form>
+                            <?php endif; ?>
+                          </div>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
                   </tbody>
                 </table>
               </div>
             </div>
-            
-            <?php if ($total_storage_pages > 1): ?>
-            <div class="admin-pagination mt-4">
-              <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $storage_page - 1; ?>">‹</a>
-              <?php
-                $start_p = max(1, $storage_page - 2);
-                $end_p = min($total_storage_pages, $start_p + 4);
-                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-              ?>
-              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-              <a class="admin-page-btn <?php echo ($storage_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-              <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $storage_page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&p=<?php echo $total_storage_pages; ?>">»</a>
-            </div>
-            <?php endif; ?>
 
-            <script>
-              (function() {
-                // Safely destroy existing charts if SPA navigates back to this page
-                if (window.diskPieChart instanceof Chart) window.diskPieChart.destroy();
-                if (window.usersBarChart instanceof Chart) window.usersBarChart.destroy();
-  
-                Chart.defaults.color = '#aaaaaa';
-                Chart.defaults.font.family = "'Roboto', sans-serif";
-  
-                const ctxPie = document.getElementById('diskPieChart').getContext('2d');
-                window.diskPieChart = new Chart(ctxPie, {
+            <!-- Pagination -->
+            <?php if ($total_storage_pages > 1): ?>
+              <div class="admin-pagination">
+                <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&search=<?php echo urlencode($storage_search); ?>&sort=<?php echo urlencode($storage_sort); ?>&p=1">«</a>
+                <a class="admin-page-btn <?php echo ($storage_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&search=<?php echo urlencode($storage_search); ?>&sort=<?php echo urlencode($storage_sort); ?>&p=<?php echo $storage_page - 1; ?>">‹</a>
+                <?php
+                  $start_p = max(1, $storage_page - 2);
+                  $end_p = min($total_storage_pages, $start_p + 4);
+                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                  for ($i = $start_p; $i <= $end_p; $i++):
+                ?>
+                  <a class="admin-page-btn <?php echo ($storage_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=storage&search=<?php echo urlencode($storage_search); ?>&sort=<?php echo urlencode($storage_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <?php endfor; ?>
+                <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&search=<?php echo urlencode($storage_search); ?>&sort=<?php echo urlencode($storage_sort); ?>&p=<?php echo $storage_page + 1; ?>">›</a>
+                <a class="admin-page-btn <?php echo ($storage_page >= $total_storage_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=storage&search=<?php echo urlencode($storage_search); ?>&sort=<?php echo urlencode($storage_sort); ?>&p=<?php echo $total_storage_pages; ?>">»</a>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Quick Maintenance Modal -->
+          <div class="modal fade" id="quickCleanModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-magic text-warning me-2"></i> Storage Maintenance Console</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-4 d-flex flex-column gap-3">
+                  <!-- Flush Thumbnail Cache -->
+                  <form method="POST" action="?access=admin&page=storage" class="m-0" onsubmit="return confirm('Purge generated thumbnail cache? They will regenerate on demand.');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <div class="p-3 rounded bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <div>
+                        <div class="fw-bold text-white">Flush Thumbnail Cache</div>
+                        <div class="small text-secondary">Free up <?php echo format_admin_bytes($cat_sizes['thumbnails_cache']); ?> of cached WebP images</div>
+                      </div>
+                      <button type="submit" name="clean_storage_cache" class="admin-btn-pill" style="color: #38bdf8;">Flush</button>
+                    </div>
+                  </form>
+
+                  <!-- Purge Temp Uploads & Chunks -->
+                  <form method="POST" action="?access=admin&page=storage" class="m-0" onsubmit="return confirm('Purge uncompleted chunks and staging buffers?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <div class="p-3 rounded bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <div>
+                        <div class="fw-bold text-white">Purge Temp Uploads &amp; Chunks</div>
+                        <div class="small text-secondary">Free up <?php echo format_admin_bytes($cat_sizes['temp_staging']); ?> of temporary staging chunks</div>
+                      </div>
+                      <button type="submit" name="clean_temp_uploads" class="admin-btn-pill" style="color: #fbbf24;">Purge</button>
+                    </div>
+                  </form>
+
+                  <!-- SQLite Database Compact -->
+                  <form method="POST" action="?access=admin&page=storage" class="m-0" onsubmit="return confirm('Execute SQLite VACUUM?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <div class="p-3 rounded bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <div>
+                        <div class="fw-bold text-white">Compact SQLite Database</div>
+                        <div class="small text-secondary">Reclaims fragmentation and compacts DB</div>
+                      </div>
+                      <button type="submit" name="vacuum_storage_db" class="admin-btn-pill admin-btn-primary">Vacuum</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            (function() {
+              if (window.storageCompositionChartInstance instanceof Chart) window.storageCompositionChartInstance.destroy();
+              if (window.topUsersStorageChartInstance instanceof Chart) window.topUsersStorageChartInstance.destroy();
+
+              Chart.defaults.color = '#aaaaaa';
+              Chart.defaults.font.family = "'Roboto', sans-serif";
+
+              const ctxComp = document.getElementById('storageCompositionChart');
+              if (ctxComp) {
+                window.storageCompositionChartInstance = new Chart(ctxComp.getContext('2d'), {
                   type: 'doughnut',
                   data: {
-                    labels: ['Music Tracks', 'User Cloud Drives', 'DB & Assets', 'Other Server Used', 'Free Space'],
+                    labels: ['Audio Tracks', 'Cloud Drives', 'Thumbnails', 'Artworks', 'SQLite DB', 'System Host'],
                     datasets: [{
-                      data: [<?php echo $total_audio_size; ?>, <?php echo $total_drive_size; ?>, <?php echo ($db_size + $non_audio_size); ?>, <?php echo $other_used; ?>, <?php echo $disk_free; ?>],
-                      backgroundColor: ['#ff3b30', '#ff0000', '#00bcd4', '#404040', '#198754'],
-                      borderColor: '#121212',
+                      data: [
+                        <?php echo $cat_sizes['music_audio']; ?>,
+                        <?php echo $cat_sizes['users_cloud_drive']; ?>,
+                        <?php echo $cat_sizes['thumbnails_cache']; ?>,
+                        <?php echo $cat_sizes['artworks']; ?>,
+                        <?php echo $cat_sizes['sqlite_database']; ?>,
+                        <?php echo $unmanaged_system_used; ?>
+                      ],
+                      backgroundColor: ['#ff0000', '#fbbf24', '#38bdf8', '#4ade80', '#c084fc', '#4b5563'],
+                      borderColor: '#101010',
                       borderWidth: 2
                     }]
                   },
@@ -21518,82 +23108,53 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                      legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } },
-                      tooltip: {
-                        callbacks: {
-                          label: function(context) {
-                            let val = context.raw;
-                            if (val === 0) return ' 0 B';
-                            const k = 1024;
-                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                            const i = Math.floor(Math.log(val) / Math.log(k));
-                            return ' ' + parseFloat((val / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-                          }
-                        }
-                      }
+                      legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } }
                     }
                   }
                 });
-  
-                <?php
-                  $top_users = array_slice($artist_stats, 0, 10);
-                  $user_labels = array_map(function($u) { return htmlspecialchars($u['name']); }, $top_users);
-                  $user_data = array_map(function($u) { return $u['total_size']; }, $top_users);
-                ?>
-  
-                const ctxBar = document.getElementById('usersBarChart').getContext('2d');
-                window.usersBarChart = new Chart(ctxBar, {
+              }
+
+              const ctxTopUsers = document.getElementById('topUsersStorageChart');
+              if (ctxTopUsers) {
+                window.topUsersStorageChartInstance = new Chart(ctxTopUsers.getContext('2d'), {
                   type: 'bar',
                   data: {
-                    labels: <?php echo json_encode($user_labels); ?>,
-                    datasets: [{
-                      label: 'Storage Used',
-                      data: <?php echo json_encode($user_data); ?>,
-                      backgroundColor: '#ff3b30',
-                      borderRadius: 4
-                    }]
+                    labels: <?php echo json_encode($top_user_names); ?>,
+                    datasets: [
+                      {
+                        label: 'Music (MB)',
+                        data: <?php echo json_encode($top_user_music_mb); ?>,
+                        backgroundColor: '#ff0000',
+                        borderRadius: 4
+                      },
+                      {
+                        label: 'Cloud Drive (MB)',
+                        data: <?php echo json_encode($top_user_drive_mb); ?>,
+                        backgroundColor: '#fbbf24',
+                        borderRadius: 4
+                      }
+                    ]
                   },
                   options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     scales: {
+                      x: { stacked: true, grid: { display: false } },
                       y: {
+                        stacked: true,
                         beginAtZero: true,
-                        grid: { color: '#333333' },
-                        ticks: {
-                          callback: function(val) {
-                            if (val === 0) return '0 B';
-                            const k = 1024;
-                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                            const i = Math.floor(Math.log(val) / Math.log(k));
-                            return parseFloat((val / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-                          }
-                        }
-                      },
-                      x: {
-                        grid: { display: false }
+                        grid: { color: 'rgba(255,255,255,0.06)' },
+                        ticks: { callback: function(val) { return val + ' MB'; } }
                       }
                     },
                     plugins: {
-                      legend: { display: false },
-                      tooltip: {
-                        callbacks: {
-                          label: function(context) {
-                            let val = context.raw;
-                            if (val === 0) return ' 0 B';
-                            const k = 1024;
-                            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-                            const i = Math.floor(Math.log(val) / Math.log(k));
-                            return ' ' + parseFloat((val / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-                          }
-                        }
-                      }
+                      legend: { position: 'top', labels: { color: '#ffffff', boxWidth: 12 } }
                     }
                   }
                 });
-              })();
-            </script>
-          </div>
+              }
+            })();
+          </script>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
           <div class="page-header admin-toolbar-wrap">
             <div>
@@ -40605,240 +42166,323 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </script>
 
         <?php else: ?>
-          <!-- Drive-Themed User Management UI -->
-          <div class="page-header admin-toolbar-wrap">
-            <div>
+          <?php
+            $db = get_db();
+            $search = $_GET['search'] ?? ''; 
+            $sort_admin = $_GET['sort'] ?? 'newest';
+            $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+            $offset = ($page - 1) * ADMIN_PAGE_SIZE;
+
+            // Global KPI Summary Metrics
+            // Global KPI Summary Metrics
+            $total_all_users = (int)($db->query("SELECT COUNT(id) FROM users")->fetchColumn() ?: 0);
+            $total_verified_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE verified = 'yes'")->fetchColumn() ?: 0);
+            $total_admin_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE is_admin = 1 OR status = 'super_admin'")->fetchColumn() ?: 0);
+            $total_banned_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE banned = 1")->fetchColumn() ?: 0);
+
+            $where_clauses = [];
+            $params = [];
+            if ($search !== '') {
+              if (preg_match('/^(?:uid|user|id):(\d+)$/i', $search, $m_id)) {
+                $where_clauses[] = "id = ?";
+                $params[] = (int)$m_id[1];
+              } elseif (is_numeric($search)) {
+                $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
+                $params[] = (int)$search;
+                $params[] = "%$search%";
+                $params[] = "%$search%";
+              } else {
+                $where_clauses[] = "(email LIKE ? OR artist LIKE ?)";
+                $params[] = ["%$search%", "%$search%"];
+              }
+            }
+            if ($sort_admin === 'pending') $where_clauses[] = "verified = 'pending'";
+            if ($sort_admin === 'reset_req') $where_clauses[] = "reset_requested = 1";
+            if ($sort_admin === 'verified') $where_clauses[] = "verified = 'yes'";
+            if ($sort_admin === 'unverified') $where_clauses[] = "verified = 'no'";
+            if ($sort_admin === 'banned') $where_clauses[] = "banned = 1";
+            if ($sort_admin === 'not_banned') $where_clauses[] = "banned = 0";
+            
+            $where = count($where_clauses) > 0 ? ("WHERE " . implode(' AND ', $where_clauses)) : "";
+            
+            $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
+            $total_users_stmt->execute($params);
+            $total_users = (int)$total_users_stmt->fetchColumn();
+            $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
+            
+            $admin_sort_map = [
+              'newest' => 'ORDER BY id DESC',
+              'oldest' => 'ORDER BY id ASC',
+              'pending' => "ORDER BY id DESC",
+              'verified' => "ORDER BY verified DESC, id ASC",
+              'unverified' => "ORDER BY verified ASC, id ASC",
+              'banned' => "ORDER BY banned DESC, id ASC",
+              'not_banned' => "ORDER BY banned ASC, id ASC",
+            ];
+            $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
+            
+            $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes, settings, status FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+            $stmt = $db->prepare($sql);
+            $param_index = 1;
+            foreach ($params as $p_val) {
+              $stmt->bindValue($param_index++, $p_val);
+            }
+            $stmt->bindValue($param_index++, (int)ADMIN_PAGE_SIZE, PDO::PARAM_INT);
+            $stmt->bindValue($param_index++, (int)$offset, PDO::PARAM_INT);
+            $stmt->execute();
+            $users = $stmt->fetchAll();
+          ?>
+
+          <!-- Drive-Themed User Management Studio Header -->
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
               <div class="d-flex align-items-center gap-3">
-                <h1 class="content-title m-0 fw-bold">User Management</h1>
+                <h1 class="content-title m-0 fw-bold text-white">User Directory &amp; Accounts</h1>
                 <form method="POST" action="" class="m-0">
                   <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
                   <button type="submit" name="reset_opcache" class="admin-btn-pill" style="height: 32px; font-size: 0.78rem; color: #fbbf24; border-color: color-mix(in srgb, #ff0000 30%, transparent);" title="Clear PHP OPcache"><i class="bi bi-lightning-charge-fill"></i> Reset OPcache</button>
                 </form>
               </div>
-              <div class="small text-secondary mt-1">Manage accounts, upload privileges, permissions, and roles</div>
+              <div class="small text-secondary mt-1">Manage artist identities, storage quotas, role authorizations, and ban controls</div>
             </div>
-            <?php $search = $_GET['search'] ?? ''; ?>
-            <?php $sort_admin = $_GET['sort'] ?? 'newest'; ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
+            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
               <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest Accounts</option>
+                <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
                 <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
                 <option value="reset_req" <?php echo $sort_admin === 'reset_req' ? 'selected' : ''; ?>>Reset Requests</option>
-                <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified</option>
+                <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified Only</option>
                 <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
-                <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned</option>
-                <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Not Banned</option>
+                <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned Accounts</option>
+                <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Active Accounts</option>
               </select>
               <div class="position-relative flex-grow-1">
                 <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search artist, email, ID..." value="<?php echo htmlspecialchars($search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
               </div>
             </form>
           </div>
+
           <div class="content-area-wrapper">
-            <div class="user-list">
-              <div class="user-list-header">
-                <div><i class="bi bi-pencil-square"></i></div><div>ID</div><div>Pic</div><div>Email</div><div>Artist</div><div>Status</div><div>Last Up</div><div>Count</div><div>Action</div>
-              </div>
-              <?php
-                $db = get_db();
-                $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-                $offset = ($page - 1) * ADMIN_PAGE_SIZE;
-                
-                $where_clauses = [];
-                $params = [];
-                if ($search !== '') {
-                  $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
-                  $params = [$search, "%$search%", "%$search%"];
-                }
-                if ($sort_admin === 'pending') {
-                  $where_clauses[] = "verified = 'pending'";
-                }
-                if ($sort_admin === 'reset_req') {
-                  $where_clauses[] = "reset_requested = 1";
-                }
-                
-                $where = '';
-                if (count($where_clauses) > 0) {
-                  $where = "WHERE " . implode(' AND ', $where_clauses);
-                }
-                
-                $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
-                $total_users_stmt->execute($params);
-                $total_users = $total_users_stmt->fetchColumn();
-                $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
-                
-                $admin_sort_map = [
-                  'newest' => 'ORDER BY id DESC',
-                  'oldest' => 'ORDER BY id ASC',
-                  'pending' => "ORDER BY id DESC",
-                  'verified' => "ORDER BY verified DESC, id ASC",
-                  'unverified' => "ORDER BY verified ASC, id ASC",
-                  'banned' => "ORDER BY banned DESC, id ASC",
-                  'not_banned' => "ORDER BY banned ASC, id ASC",
-                ];
-                $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
-                
-                $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes, settings FROM users $where $admin_order_by LIMIT ? OFFSET ?";
-                $stmt = $db->prepare($sql);
-                $param_index = 1;
-                if ($search !== '') {
-                  $stmt->bindValue($param_index++, $search);
-                  $stmt->bindValue($param_index++, "%$search%");
-                  $stmt->bindValue($param_index++, "%$search%");
-                }
-                $stmt->bindValue($param_index++, (int)ADMIN_PAGE_SIZE, PDO::PARAM_INT);
-                $stmt->bindValue($param_index++, (int)$offset, PDO::PARAM_INT);
-                $stmt->execute();
-                
-                $users = $stmt->fetchAll();
-                foreach ($users as $user):
-                  $user_payload = $user;
-                  $user_payload['csrf_token'] = $_SESSION['admin_csrf_token'];
-                  $user_payload['current_page'] = $page;
-                  $user_payload['current_search'] = $search;
-                  $user_payload['current_sort'] = $sort_admin;
-                  $json_data = htmlspecialchars(json_encode($user_payload), ENT_QUOTES, 'UTF-8');
-              ?>
-              <div class="user-item">
-                <div class="user-item-edit-desktop">
-                  <button class="btn btn-sm border-0 btn-outline-secondary rounded-circle" title="Edit Properties" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
-                    <i class="bi bi-pencil-fill"></i>
-                  </button>
-                </div>
-                <div class="user-item-id"><?php echo htmlspecialchars($user['id']); ?></div>
-                <div class="user-item-avatar"><img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 36px; height: 36px; object-fit: cover; border: 1px solid var(--ytm-surface-2);"></div>
-                <div class="user-item-email-desktop text-truncate text-secondary"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-                <div class="user-item-artist-desktop text-truncate fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
-                <div class="user-item-verified-desktop d-flex flex-wrap gap-1">
-                  <?php if ($user['reset_requested'] == 1): ?>
-                    <span class="badge bg-warning text-dark"><i class="bi bi-key-fill"></i> RESET REQ</span>
-                  <?php endif; ?>
-                  <?php if ($user['is_admin'] == 1 || $user['status'] === 'super_admin'): ?>
-                    <span class="badge bg-primary"><i class="bi bi-shield-lock-fill"></i> ADMIN</span>
-                  <?php endif; ?>
-                  <?php if ($user['verified'] === 'yes'): ?>
-                    <span class="badge bg-success"><i class="bi bi-patch-check-fill"></i> VERIFIED</span>
-                  <?php elseif ($user['verified'] === 'pending'): ?>
-                    <span class="badge bg-info text-dark fw-bold"><i class="bi bi-hourglass-split"></i> PENDING</span>
-                  <?php endif; ?>
-                  <?php if ($user['banned'] && abs($user['rhythm_strikes']) < 3): ?>
-                    <span class="badge bg-danger"><i class="bi bi-slash-circle-fill"></i> BANNED</span>
-                  <?php endif; ?>
-                  <?php if ($user['rhythm_strikes'] > 0 && !$user['banned']): ?>
-                    <span class="badge bg-warning text-dark"><i class="bi bi-controller"></i> GAME BANNED (<?php echo $user['rhythm_strikes']; ?>/3)</span>
-                  <?php elseif (abs($user['rhythm_strikes']) > 0 && !$user['banned']): ?>
-                    <span class="badge bg-secondary text-white"><i class="bi bi-controller"></i> STRIKES (<?php echo abs($user['rhythm_strikes']); ?>/3)</span>
-                  <?php elseif (abs($user['rhythm_strikes']) >= 3 && $user['banned']): ?>
-                    <span class="badge bg-danger"><i class="bi bi-slash-circle-fill"></i> 3/3 RHYTHM BAN</span>
-                  <?php endif; ?>
-                </div>
-                <div class="user-item-last-up-desktop text-secondary small fw-medium"><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></div>
-                <div class="user-item-count-desktop text-secondary small fw-bold"><?php echo htmlspecialchars($user['daily_upload_count'] ?? '0'); ?></div>
-                <div class="user-item-main">
-                  <div class="user-id-mobile">ID: <?php echo htmlspecialchars($user['id']); ?></div>
-                  <div class="user-artist text-truncate fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
-                  <div class="user-email text-truncate text-secondary"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></div>
-                </div>
-                <div class="user-item-action d-flex justify-content-end gap-2">
-                  <button class="btn btn-sm border-0 btn-outline-info rounded-circle d-lg-none" title="Edit Properties" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
-                    <i class="bi bi-pencil-fill"></i>
-                  </button>
-                  <div class="dropdown">
-                    <button class="btn btn-sm border-0 btn-outline-secondary border-0 rounded-circle d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" aria-expanded="false" style="width: 36px; height: 36px;">
-                      <i class="bi bi-three-dots-vertical fs-6"></i>
-                    </button>
-                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary">
-                      <li>
-                        <form method="POST" action="?access=admin&page=<?php echo $page; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">
-                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                          <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                          
-                          <button type="submit" name="generate_reset_link" class="dropdown-item d-flex align-items-center gap-3 text-info fw-bold">
-                            <i class="bi bi-envelope-check"></i> Generate Reset Link
-                          </button>
-                          
-                          <button type="submit" name="toggle_verify" class="dropdown-item d-flex align-items-center gap-3 text-white">
-                            <i class="bi bi-patch-check text-success"></i> 
-                            <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
-                          </button>
-                          
-                          <?php if ($user['status'] !== 'super_admin'): ?>
-                            <button type="submit" name="toggle_admin" class="dropdown-item d-flex align-items-center gap-3 text-white">
-                              <i class="bi bi-shield-lock text-warning"></i> 
-                              <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
-                            </button>
-                            
-                            <?php if ($user['is_admin'] == 1): ?>
-                              <?php
-                                $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                $u_perms = $u_settings['admin_permissions'] ?? ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage'];
-                                $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
-                              ?>
-                              <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
-                                <i class="bi bi-ui-checks"></i> Manage Permissions
-                              </button>
-                            <?php endif; ?>
-                            
-                            <button type="submit" name="toggle_ban" class="dropdown-item d-flex align-items-center gap-3 text-white">
-                              <i class="bi bi-slash-circle" style="color: orange;"></i> 
-                              <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
-                            </button>
-                            
-                            <?php if (abs($user['rhythm_strikes']) >= 3): ?>
-                              <button type="submit" name="reset_rhythm_history" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
-                                <i class="bi bi-arrow-counterclockwise"></i> Reset Rhythm History & Unban
-                              </button>
-                            <?php else: ?>
-                              <button type="submit" name="toggle_rhythm_ban" class="dropdown-item d-flex align-items-center gap-3 text-white">
-                                <i class="bi bi-controller text-warning"></i> 
-                                <?php echo $user['rhythm_strikes'] > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'; ?> (<?php echo abs($user['rhythm_strikes']); ?>/3)
-                              </button>
-                            <?php endif; ?>
-                            
-                            <li><hr class="dropdown-divider border-secondary opacity-50"></li>
-                            <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
-                              <i class="bi bi-person-fill-x"></i> Soft Delete User
-                            </button>
-                            
-                            <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-3 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
-                              <i class="bi bi-trash2-fill"></i> Permanent Delete
-                            </button>
-                          <?php endif; ?>
-                          <li><hr class="dropdown-divider border-secondary opacity-50"></li>
-                          <button type="button" class="dropdown-item d-flex align-items-center gap-3 text-info fw-bold" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
-                            <i class="bi bi-controller"></i> View Rhythm History
-                          </button>
-                        </form>
-                      </li>
-                    </ul>
+            <!-- Metrics KPI Cards Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Users</span>
+                    <span class="text-danger"><i class="bi bi-people-fill fs-5"></i></span>
                   </div>
-                </div>
-                <div class="user-item-stats">
-                  <div>
-                    <span class="label">Status</span>
-                    <span class="badge <?php echo $user['banned'] ? 'bg-danger' : 'bg-success'; ?>"><?php echo $user['banned'] ? 'BANNED' : 'ACTIVE'; ?></span>
-                  </div>
-                  <div>
-                    <span class="label">Verified</span>
-                    <span class="badge <?php echo $user['verified'] === 'yes' ? 'bg-success' : ($user['verified'] === 'pending' ? 'bg-info text-dark' : 'bg-secondary'); ?>"><?php echo htmlspecialchars(strtoupper($user['verified'])); ?></span>
-                  </div>
-                  <div>
-                    <span class="label">Last Upload</span>
-                    <span><?php echo htmlspecialchars($user['last_upload_date'] ?? 'N/A'); ?></span>
-                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_all_users); ?></div>
+                  <small class="text-secondary"><?php echo number_format($total_users); ?> matching active filter</small>
                 </div>
               </div>
-              <?php endforeach; ?>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Verified Artists</span>
+                    <span class="text-success"><i class="bi bi-patch-check-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_verified_users); ?></div>
+                  <small class="text-secondary">Approved for music uploads</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Administrators</span>
+                    <span class="text-primary"><i class="bi bi-shield-lock-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_admin_users); ?></div>
+                  <small class="text-secondary">Elevated staff & super admins</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Banned &amp; Restricted</span>
+                    <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_users); ?></div>
+                  <small class="text-secondary">Account / rhythm game suspensions</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Modern Table Layout -->
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table text-nowrap align-middle">
+                  <thead>
+                    <tr>
+                      <th style="width: 50px;">Avatar</th>
+                      <th style="width: 70px;">ID</th>
+                      <th>Artist Account</th>
+                      <th>Account Badges</th>
+                      <th>Daily Uploads</th>
+                      <th>Fast Jumpers</th>
+                      <th class="text-end" style="width: 140px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php if (empty($users)): ?>
+                      <tr><td colspan="7" class="text-center py-5 text-secondary">No user records found matching your query.</td></tr>
+                    <?php else: foreach ($users as $user): 
+                      $user_payload = $user;
+                      $user_payload['csrf_token'] = $_SESSION['admin_csrf_token'];
+                      $user_payload['current_page'] = $page;
+                      $user_payload['current_search'] = $search;
+                      $user_payload['current_sort'] = $sort_admin;
+                      $json_data = htmlspecialchars(json_encode($user_payload), ENT_QUOTES, 'UTF-8');
+                    ?>
+                      <tr>
+                        <td>
+                          <img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 38px; height: 38px; object-fit: cover; background: #000; border: 1px solid var(--drive-border);" alt="">
+                        </td>
+                        <td class="text-secondary font-monospace small">#<?php echo $user['id']; ?></td>
+                        <td>
+                          <div class="fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
+                          <small class="text-secondary font-monospace" style="font-size: 0.75rem;"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></small>
+                        </td>
+                        <td>
+                          <div class="d-flex flex-wrap gap-1 align-items-center">
+                            <?php if ($user['status'] === 'super_admin'): ?>
+                              <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-shaded"></i> Super Admin</span>
+                            <?php elseif ($user['is_admin'] == 1): ?>
+                              <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-lock-fill"></i> Admin</span>
+                            <?php endif; ?>
+
+                            <?php if ($user['reset_requested'] == 1): ?>
+                              <span class="admin-badge admin-badge-warning"><i class="bi bi-key-fill"></i> Reset Req</span>
+                            <?php endif; ?>
+
+                            <?php if ($user['verified'] === 'yes'): ?>
+                              <span class="admin-badge admin-badge-success"><i class="bi bi-patch-check-fill"></i> Verified</span>
+                            <?php elseif ($user['verified'] === 'pending'): ?>
+                              <span class="admin-badge admin-badge-info"><i class="bi bi-hourglass-split"></i> Pending</span>
+                            <?php endif; ?>
+
+                            <?php if ($user['banned'] && abs($user['rhythm_strikes']) < 3): ?>
+                              <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> Banned</span>
+                            <?php endif; ?>
+
+                            <?php if ($user['rhythm_strikes'] > 0 && !$user['banned']): ?>
+                              <span class="admin-badge admin-badge-warning"><i class="bi bi-controller"></i> Game Ban (<?php echo $user['rhythm_strikes']; ?>/3)</span>
+                            <?php elseif (abs($user['rhythm_strikes']) > 0 && !$user['banned']): ?>
+                              <span class="admin-badge admin-badge-secondary"><i class="bi bi-controller"></i> Strikes (<?php echo abs($user['rhythm_strikes']); ?>/3)</span>
+                            <?php elseif (abs($user['rhythm_strikes']) >= 3 && $user['banned']): ?>
+                              <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> 3/3 Game Ban</span>
+                            <?php endif; ?>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="text-white fw-bold font-monospace"><?php echo (int)($user['daily_upload_count'] ?? 0); ?> / 10</div>
+                          <small class="text-secondary font-monospace" style="font-size: 0.72rem;">Last: <?php echo htmlspecialchars($user['last_upload_date'] ?? 'Never'); ?></small>
+                        </td>
+                        <td>
+                          <div class="d-flex align-items-center gap-1">
+                            <a href="?access=admin&page=songs&search=uid:<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="View Songs Uploaded by User">
+                              <i class="bi bi-music-note-list"></i> Songs
+                            </a>
+                            <a href="?access=admin&page=drive&path=<?php echo urlencode('users_drive/user_' . $user['id'] . '_folder'); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Browse User Personal Drive">
+                              <i class="bi bi-folder2-open"></i> Drive
+                            </a>
+                            <a href="?access=admin&page=storage&search=<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" title="Inspect Storage Quota">
+                              <i class="bi bi-hdd-network"></i> Quota
+                            </a>
+                          </div>
+                        </td>
+                        <td class="text-end">
+                          <div class="d-flex align-items-center justify-content-end gap-2">
+                            <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
+                              <i class="bi bi-pencil-fill"></i> Edit
+                            </button>
+                            <div class="dropdown">
+                              <button class="admin-btn-pill p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" style="width: 30px; height: 30px;">
+                                <i class="bi bi-three-dots-vertical"></i>
+                              </button>
+                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: #181818;">
+                                <li>
+                                  <form method="POST" action="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="m-0">
+                                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                    
+                                    <button type="submit" name="generate_reset_link" class="dropdown-item d-flex align-items-center gap-2 text-info fw-bold">
+                                      <i class="bi bi-envelope-check"></i> Generate Reset Link
+                                    </button>
+                                    
+                                    <button type="submit" name="toggle_verify" class="dropdown-item d-flex align-items-center gap-2 text-white">
+                                      <i class="bi bi-patch-check text-success"></i> 
+                                      <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
+                                    </button>
+                                    
+                                    <?php if ($user['status'] !== 'super_admin'): ?>
+                                      <button type="submit" name="toggle_admin" class="dropdown-item d-flex align-items-center gap-2 text-white">
+                                        <i class="bi bi-shield-lock text-warning"></i> 
+                                        <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
+                                      </button>
+                                      
+                                      <?php if ($user['is_admin'] == 1): ?>
+                                        <?php
+                                          $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
+                                          $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                                          $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
+                                        ?>
+                                        <button type="button" class="dropdown-item d-flex align-items-center gap-2 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
+                                          <i class="bi bi-ui-checks"></i> Manage Permissions
+                                        </button>
+                                      <?php endif; ?>
+                                      
+                                      <button type="submit" name="toggle_ban" class="dropdown-item d-flex align-items-center gap-2 text-white">
+                                        <i class="bi bi-slash-circle text-warning"></i> 
+                                        <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
+                                      </button>
+                                      
+                                      <?php if (abs($user['rhythm_strikes']) >= 3): ?>
+                                        <button type="submit" name="reset_rhythm_history" class="dropdown-item d-flex align-items-center gap-2 text-danger fw-bold" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
+                                          <i class="bi bi-arrow-counterclockwise"></i> Reset Rhythm History & Unban
+                                        </button>
+                                      <?php else: ?>
+                                        <button type="submit" name="toggle_rhythm_ban" class="dropdown-item d-flex align-items-center gap-2 text-white">
+                                          <i class="bi bi-controller text-warning"></i> 
+                                          <?php echo $user['rhythm_strikes'] > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'; ?> (<?php echo abs($user['rhythm_strikes']); ?>/3)
+                                        </button>
+                                      <?php endif; ?>
+                                      
+                                      <li><hr class="dropdown-divider border-secondary opacity-50"></li>
+                                      <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-2 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
+                                        <i class="bi bi-person-fill-x"></i> Soft Delete User
+                                      </button>
+                                      
+                                      <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-2 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
+                                        <i class="bi bi-trash2-fill"></i> Permanent Delete
+                                      </button>
+                                    <?php endif; ?>
+                                    <li><hr class="dropdown-divider border-secondary opacity-50"></li>
+                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2 text-info fw-bold" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
+                                      <i class="bi bi-controller"></i> View Rhythm History
+                                    </button>
+                                  </form>
+                                </li>
+                              </ul>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
             </div>
             
             <div class="modal fade" id="user-details-modal" tabindex="-1">
               <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
                 <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
                   <div class="modal-header border-0 pb-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-person-lines-fill text-info me-2"></i> User Properties & Preferences</h5>
+                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-person-lines-fill text-info me-2"></i> User Properties &amp; Preferences</h5>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                   </div>
                   <div class="modal-body p-4" id="user-details-modal-body">
@@ -40852,7 +42496,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const userData = JSON.parse(btn.getAttribute('data-user'));
                 const modalBody = document.getElementById('user-details-modal-body');
                 
-                let u_perms = ['users', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground', 'storage'];
+                let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
                 try {
                   const settings = JSON.parse(userData.settings || '{}');
                   if (settings.admin_permissions) u_perms = settings.admin_permissions;
@@ -40862,11 +42506,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isSuperAdmin = userData.status === 'super_admin';
                 
                 let actionsHtml = `
-                  <form method="POST" action="?access=admin&page=${userData.current_page}&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
+                  <form method="POST" action="?access=admin&page=users&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
                     <input type="hidden" name="csrf_token" value="${userData.csrf_token}">
                     <input type="hidden" name="user_id" value="${userData.id}">
                     
                     <div class="d-flex flex-column gap-2 mt-3">
+                      <div class="d-flex gap-2 mb-2">
+                        <a href="?access=admin&page=songs&search=uid:${encodeURIComponent(userData.id)}" class="btn btn-sm btn-outline-info flex-grow-1 fw-bold">
+                          <i class="bi bi-music-note-list me-1"></i> User Songs
+                        </a>
+                        <a href="?access=admin&page=drive&path=${encodeURIComponent('users_drive/user_' + userData.id + '_folder')}" class="btn btn-sm btn-outline-warning flex-grow-1 fw-bold">
+                          <i class="bi bi-folder2-open me-1"></i> User Drive
+                        </a>
+                      </div>
+
                       <button type="submit" name="generate_reset_link" class="btn border-0 btn-outline-info text-start fw-bold d-flex align-items-center gap-2">
                         <i class="bi bi-envelope-check"></i> Generate Reset Link
                       </button>
@@ -40950,8 +42603,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </script>
             <?php if ($total_pages > 1): ?>
             <div class="admin-pagination mt-4">
-              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=1&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">«</a>
-              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $page - 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">‹</a>
+              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=1">«</a>
+              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page - 1; ?>">‹</a>
               <?php
                 $start_page = max(1, $page - 2);
                 $end_page = min($total_pages, $start_page + 4);
@@ -40960,10 +42613,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
               ?>
               <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
-                <a class="admin-page-btn <?php echo ($page == $i) ? 'active' : ''; ?>" href="?access=admin&page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>"><?php echo $i; ?></a>
+                <a class="admin-page-btn <?php echo ($page == $i) ? 'active' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
               <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $page + 1; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">›</a>
-              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=<?php echo $total_pages; ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>">»</a>
+              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page + 1; ?>">›</a>
+              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $total_pages; ?>">»</a>
             </div>
             <?php endif; ?>
           </div>
@@ -41044,6 +42697,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="playground" id="perm-playground">
                     <label class="form-check-label text-white fw-medium" for="perm-playground">API Playground</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="analytics" id="perm-analytics">
+                    <label class="form-check-label text-white fw-medium" for="perm-analytics">Traffic Analytics</label>
                   </div>
                 </div>
                 <div class="col-12 col-md-6">
@@ -41683,7 +43342,80 @@ if (isset($_GET['share_type'])) {
   }
 }
 
+function ensure_all_user_drives($db) {
+  $users_drive_base = MUSIC_DIR . '/users_drive';
+  if (!is_dir($users_drive_base)) {
+    @mkdir($users_drive_base, 0755, true);
+  }
+  try {
+    $stmt = $db->query("SELECT id FROM users");
+    while ($uid = $stmt->fetchColumn()) {
+      $user_folder = $users_drive_base . '/user_' . $uid . '_folder';
+      if (!is_dir($user_folder)) {
+        @mkdir($user_folder, 0755, true);
+      }
+      foreach (['.gallery_cache', '.drive_trash_bin', '.file_version'] as $sub) {
+        $subDir = $user_folder . '/' . $sub;
+        if (!is_dir($subDir)) {
+          @mkdir($subDir, 0777, true);
+          @file_put_contents($subDir . '/.htaccess', "Order Deny,Allow\nDeny from all");
+        }
+      }
+    }
+  } catch (Exception $e) {}
+}
+
 function init_db($db) {
+  ensure_all_user_drives($db);
+  // 1. Core Analytics & Daily Visitor Schema
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS daily_visitor_stats (
+      visit_date TEXT PRIMARY KEY,
+      total_hits INTEGER DEFAULT 0,
+      unique_visitors INTEGER DEFAULT 0,
+      registered_visitors INTEGER DEFAULT 0,
+      guest_visitors INTEGER DEFAULT 0,
+      desktop_hits INTEGER DEFAULT 0,
+      mobile_hits INTEGER DEFAULT 0,
+      tablet_hits INTEGER DEFAULT 0,
+      bot_hits INTEGER DEFAULT 0,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS site_analytics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      visit_date TEXT NOT NULL,
+      visit_time TEXT NOT NULL,
+      ip_hash TEXT NOT NULL,
+      ip_address TEXT DEFAULT NULL,
+      user_id INTEGER DEFAULT 0,
+      user_agent TEXT,
+      browser TEXT DEFAULT 'Unknown',
+      browser_version TEXT DEFAULT '',
+      os TEXT DEFAULT 'Unknown',
+      device_type TEXT DEFAULT 'Desktop',
+      referer TEXT DEFAULT NULL,
+      request_uri TEXT DEFAULT NULL,
+      is_unique_daily INTEGER DEFAULT 0,
+      is_bot INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS storage_cleanup_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      admin_email TEXT,
+      action_type TEXT,
+      reclaimed_bytes INTEGER DEFAULT 0,
+      details TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_analytics_date ON site_analytics(visit_date);
+    CREATE INDEX IF NOT EXISTS idx_analytics_ip_date ON site_analytics(visit_date, ip_hash);
+    CREATE INDEX IF NOT EXISTS idx_analytics_user ON site_analytics(user_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_created ON site_analytics(created_at);
+  ");
+
   $users_columns = $db->query("PRAGMA table_info(users);")->fetchAll(PDO::FETCH_COLUMN, 1);
   $users_table_exists = !empty($users_columns);
 
@@ -41716,6 +43448,12 @@ function init_db($db) {
     if (!in_array('backup_key', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN backup_key TEXT;");
     if (!in_array('banned', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
     if (!in_array('rhythm_strikes', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;");
+    if (!in_array('created_at', $users_columns)) {
+      try {
+        $db->exec("ALTER TABLE users ADD COLUMN created_at DATETIME;");
+        $db->exec("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL;");
+      } catch (Exception $e) {}
+    }
     if (!in_array('status', $users_columns)) {
       $db->exec("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'user';");
       // Migrate existing admins
@@ -42562,7 +44300,7 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev'])) {
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_art_image', 'get_status_media', 'get_message_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev'])) {
       // Media and Admin Scanner routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
@@ -48081,21 +49819,49 @@ HTML;
       http_response_code(404); exit;
 
     case 'get_art_image':
+      while (ob_get_level() > 0) { @ob_end_clean(); }
       header('Cache-Control: public, max-age=31536000, immutable');
-      $path = $_GET['path'] ?? '';
+      header('Pragma: cache');
+      header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
+
+      $raw_path = $_GET['path'] ?? '';
+      $path = ltrim(str_replace('\\', '/', urldecode($raw_path)), '/');
       $file_path = MUSIC_DIR . '/' . $path;
-      // Secure traversal prevention and enforce arts directory
+
+      // Fallback: If thumbnail is missing on disk, resolve original file
+      if (!file_exists($file_path) && strpos(basename($path), 'thumb_') !== false) {
+        $fallback_path = dirname($path) . '/' . str_replace('thumb_', '', basename($path));
+        if (file_exists(MUSIC_DIR . '/' . $fallback_path)) {
+          $file_path = MUSIC_DIR . '/' . $fallback_path;
+        }
+      }
+
+      // Fallback: If original image is referenced, resolve thumbnail
+      if (!file_exists($file_path) && strpos(basename($path), 'thumb_') === false) {
+        $fallback_path = dirname($path) . '/thumb_' . basename($path);
+        if (file_exists(MUSIC_DIR . '/' . $fallback_path)) {
+          $file_path = MUSIC_DIR . '/' . $fallback_path;
+        }
+      }
+
       if ($path && (strpos($path, 'uploads/arts/') === 0 || strpos($path, 'phpshares/') === 0) && strpos($path, '..') === false && file_exists($file_path)) {
         $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         $mime = 'image/jpeg';
         if ($ext === 'png') $mime = 'image/png';
         elseif ($ext === 'gif') $mime = 'image/gif';
         elseif ($ext === 'webp') $mime = 'image/webp';
+        elseif ($ext === 'avif') $mime = 'image/avif';
+        elseif ($ext === 'svg') $mime = 'image/svg+xml';
         header('Content-Type: ' . $mime);
+        header('Content-Length: ' . filesize($file_path));
         readfile($file_path);
         exit;
       }
-      http_response_code(404); exit;
+
+      // Clean SVG fallback placeholder
+      header('Content-Type: image/svg+xml');
+      echo '<?xml version="1.0" encoding="utf-8"?><svg width="200" height="200" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="4" fill="#121212"/><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" fill="#444444"/></svg>';
+      exit;
 
     case 'create_chat_group':
       if (!$user_id) { http_response_code(403); exit; }
