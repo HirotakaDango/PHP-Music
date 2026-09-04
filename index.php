@@ -684,7 +684,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.6');
+define('APP_VERSION', '10.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1192,7 +1192,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'user') {
   $current_user = null;
 
   if ($user_id > 0) {
-    $stmt_u = $db->prepare("SELECT id, email, artist, password_hash, banned FROM users WHERE id = ?");
+    $stmt_u = $db->prepare("SELECT id, email, artist, password_hash, banned, drive_quota FROM users WHERE id = ?");
     $stmt_u->execute([$user_id]);
     $current_user = $stmt_u->fetch();
 
@@ -1323,7 +1323,8 @@ HTACCESS;
     'thumb_quality'      => 85,
     'memory_limit'       => '512M',
     'max_upload_size'    => 100 * 1024 * 1024,
-    'max_storage_size'   => 2 * 1024 * 1024 * 1024, // 2 GB Storage Quota
+    'max_storage_size'   => (isset($current_user['drive_quota']) && (int)$current_user['drive_quota'] <= 0) ? 0 : (!empty($current_user['drive_quota']) ? (float)$current_user['drive_quota'] : (2 * 1024 * 1024 * 1024)),
+    'is_unlimited_quota' => (isset($current_user['drive_quota']) && (int)$current_user['drive_quota'] <= 0),
     'allow_upload'       => true,
     'allow_delete'       => true,
     'allow_rename'       => true,
@@ -2623,12 +2624,14 @@ HTACCESS;
 
     if ($action === 'storage_info') {
       $usedStorage = getUserStorageUsage($config);
+      $isUnlim = !empty($config['is_unlimited_quota']);
       jsonResponse([
-        'used_bytes'  => $usedStorage,
-        'total_bytes' => $config['max_storage_size'],
-        'used_fmt'    => formatBytes($usedStorage),
-        'total_fmt'   => formatBytes($config['max_storage_size']),
-        'pct'         => min(100, round(($usedStorage / $config['max_storage_size']) * 100, 1))
+        'used_bytes'   => $usedStorage,
+        'total_bytes'  => $isUnlim ? 0 : $config['max_storage_size'],
+        'used_fmt'     => formatBytes($usedStorage),
+        'total_fmt'    => $isUnlim ? 'Unlimited' : formatBytes($config['max_storage_size']),
+        'pct'          => $isUnlim ? 0 : min(100, round(($usedStorage / max(1, $config['max_storage_size'])) * 100, 1)),
+        'is_unlimited' => $isUnlim
       ]);
     }
 
@@ -4193,8 +4196,8 @@ HTACCESS;
     if ($action === 'fetch_url') {
       if (!$config['allow_upload']) jsonResponse(['error' => 'Upload disabled'], 403);
       $currentUsage = getUserStorageUsage($config);
-      if ($currentUsage >= $config['max_storage_size']) {
-        jsonResponse(['error' => 'Storage quota exceeded (2 GB maximum limit reached). Please delete files to free up space.'], 400);
+      if (!$config['is_unlimited_quota'] && $currentUsage >= $config['max_storage_size']) {
+        jsonResponse(['error' => 'Storage quota exceeded (' . formatBytes($config['max_storage_size']) . ' maximum limit reached). Please delete files to free up space.'], 400);
       }
       $url = trim($_POST['url'] ?? '');
       $customName = trim($_POST['custom_name'] ?? '');
@@ -20380,6 +20383,85 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // 7. Update Single User Drive Quota (Custom Units: MB, GB, TB & Unlimited)
+    if (isset($_POST['update_single_user_quota']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $target_uid = (int)$_POST['user_id'];
+      $op = $_POST['quota_op'] ?? 'set';
+      $amount_unit = $_POST['amount_unit'] ?? 'GB';
+      $raw_amount = floatval($_POST['quota_amount'] ?? 0);
+
+      $multiplier = 1073741824;
+      if ($amount_unit === 'MB') $multiplier = 1048576;
+      elseif ($amount_unit === 'TB') $multiplier = 1099511627776;
+
+      $delta_bytes = (int)round($raw_amount * $multiplier);
+      $curr_quota = (int)($db->query("SELECT drive_quota FROM users WHERE id = {$target_uid}")->fetchColumn() ?: 2147483648);
+      $new_quota = $curr_quota;
+
+      if ($op === 'unlimited') {
+        $new_quota = 0; // 0 = Unlimited Quota
+      } elseif ($op === 'reset') {
+        $new_quota = 2147483648; // 2 GB default
+      } elseif ($op === 'increase') {
+        $new_quota = ($curr_quota <= 0) ? 0 : ($curr_quota + $delta_bytes);
+      } elseif ($op === 'decrease') {
+        $new_quota = ($curr_quota <= 0) ? 0 : max(104857600, $curr_quota - $delta_bytes);
+      } else {
+        $new_quota = ($raw_amount <= 0) ? 0 : max(104857600, $delta_bytes);
+      }
+
+      $db->prepare("UPDATE users SET drive_quota = ? WHERE id = ?")->execute([$new_quota, $target_uid]);
+      $label = ($new_quota <= 0) ? 'Unlimited' : format_admin_bytes($new_quota);
+      log_admin_activity($db, $_SESSION['admin_email'], "Customized User #{$target_uid} drive quota to {$label}", $target_uid);
+      $_SESSION['admin_flash_msg'] = "User #{$target_uid} storage quota updated to {$label}.";
+      header('Location: ?access=admin&page=user_drive_management');
+      exit;
+    }
+
+    // 8. Mass Adjust User Drive Quotas (Custom Values, Units & Unlimited)
+    if (isset($_POST['mass_update_user_quota']) && isset($_POST['user_ids']) && is_array($_POST['user_ids'])) {
+      $db = get_db();
+      $target_ids = array_map('intval', $_POST['user_ids']);
+      $op = $_POST['mass_op'] ?? 'increase';
+      $amount_unit = $_POST['mass_amount_unit'] ?? 'GB';
+      $raw_amount = floatval($_POST['mass_amount'] ?? 1);
+
+      $multiplier = 1073741824;
+      if ($amount_unit === 'MB') $multiplier = 1048576;
+      elseif ($amount_unit === 'TB') $multiplier = 1099511627776;
+
+      $delta_bytes = (int)round($raw_amount * $multiplier);
+
+      if (!empty($target_ids)) {
+        $placeholders = implode(',', array_fill(0, count($target_ids), '?'));
+
+        if ($op === 'unlimited') {
+          $stmt_mass = $db->prepare("UPDATE users SET drive_quota = 0 WHERE id IN ({$placeholders})");
+          $stmt_mass->execute($target_ids);
+          $log_text = "Bulk set " . count($target_ids) . " users to Unlimited Quota";
+        } elseif ($op === 'increase') {
+          $stmt_mass = $db->prepare("UPDATE users SET drive_quota = CASE WHEN drive_quota <= 0 THEN 0 ELSE drive_quota + ? END WHERE id IN ({$placeholders})");
+          $stmt_mass->execute(array_merge([$delta_bytes], $target_ids));
+          $log_text = "Bulk increased " . count($target_ids) . " users by {$raw_amount} {$amount_unit}";
+        } elseif ($op === 'decrease') {
+          $stmt_mass = $db->prepare("UPDATE users SET drive_quota = CASE WHEN drive_quota <= 0 THEN 0 ELSE MAX(104857600, drive_quota - ?) END WHERE id IN ({$placeholders})");
+          $stmt_mass->execute(array_merge([$delta_bytes], $target_ids));
+          $log_text = "Bulk decreased " . count($target_ids) . " users by {$raw_amount} {$amount_unit}";
+        } elseif ($op === 'set') {
+          $set_val = ($raw_amount <= 0) ? 0 : max(104857600, $delta_bytes);
+          $stmt_mass = $db->prepare("UPDATE users SET drive_quota = ? WHERE id IN ({$placeholders})");
+          $stmt_mass->execute(array_merge([$set_val], $target_ids));
+          $log_text = "Bulk set " . count($target_ids) . " users to " . (($set_val <= 0) ? 'Unlimited' : "{$raw_amount} {$amount_unit}");
+        }
+
+        log_admin_activity($db, $_SESSION['admin_email'], $log_text, 0);
+        $_SESSION['admin_flash_msg'] = $log_text . " successfully.";
+      }
+      header('Location: ?access=admin&page=user_drive_management');
+      exit;
+    }
+
     // log_admin_activity defined globally above
 
     if (isset($_POST['generate_reset_link']) && isset($_POST['user_id'])) {
@@ -20529,23 +20611,85 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_POST['soft_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
       $del_uid = (int)$_POST['user_id'];
-      
+
+      // 1. Delete Personal Cloud Drive from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/users_drive/user_' . $del_uid . '_folder');
+      $db->prepare("DELETE FROM drive_shares WHERE owner_id = ? OR target_user_id = ?")->execute([$del_uid, $del_uid]);
+
+      // 2. Delete Artworks (PHPShares) Files from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/phpshares/uid_' . $del_uid);
+      $stmt_art_files = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)");
+      $stmt_art_files->execute([$del_uid]);
+      while ($af = $stmt_art_files->fetch()) {
+        if (!empty($af['file_path']) && file_exists(MUSIC_DIR . '/' . $af['file_path'])) @unlink(MUSIC_DIR . '/' . $af['file_path']);
+        if (!empty($af['thumb_path']) && file_exists(MUSIC_DIR . '/' . $af['thumb_path'])) @unlink(MUSIC_DIR . '/' . $af['thumb_path']);
+      }
+      $db->prepare("DELETE FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM art_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?))")->execute([$del_uid, $del_uid, $del_uid]);
+      $db->prepare("DELETE FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM art_favorites WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM arts WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM art_series WHERE user_id = ?")->execute([$del_uid]);
+
+      // 3. Delete Image Editor Projects & Categories
+      $db->prepare("DELETE FROM imageditor_projects WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM imageditor_categories WHERE user_id = ?")->execute([$del_uid]);
+
+      // 4. Delete Notes, Tasks, Blogs & Categories
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blog_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?))")->execute([$del_uid, $del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blog_reactions WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$del_uid]);
+
+      // 5. Delete Collaborative Projects, Groups, and Playlists
+      $db->prepare("DELETE FROM project_presence WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM project_invites WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM project_members WHERE user_id = ? OR project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM projects WHERE owner_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_group_invites WHERE group_id IN (SELECT id FROM chat_groups WHERE owner_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_group_members WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_groups WHERE owner_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_invites WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_songs WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$del_uid]);
+
+      // 6. Delete Social, Player States & Messaging
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM message_reactions WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$del_uid]);
-      
-      $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
-      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1 WHERE id = ?")->execute([$new_email, $del_uid]);
+      $db->prepare("DELETE FROM user_song_settings WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM song_invites WHERE song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM song_collaborators WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM api_keys WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM password_resets WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM ban_appeals WHERE user_id = ?")->execute([$del_uid]);
 
-      log_admin_activity($db, $_SESSION['admin_email'], 'Soft Deleted User', $del_uid);
+      // 7. Flush Cached Storage Audit
+      $storage_cache = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+      if (file_exists($storage_cache)) @unlink($storage_cache);
+
+      // 8. Anonymize and Ban User Account Row
+      $new_email = 'deleted_' . $del_uid . '_' . time() . '@mail.com';
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1, drive_quota = 0 WHERE id = ?")->execute([$new_email, $del_uid]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Soft Deleted User (Purged Drive, Artworks & Private Assets)', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
@@ -20598,6 +20742,32 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if ($transfer_user_id) {
           $updates[] = "user_id = ?";
           $params[] = $transfer_user_id;
+
+          // Relocate physical audio files to the target user ID folder
+          $new_shard = substr(md5((string)$transfer_user_id), 0, 2);
+          $new_user_folder = MUSIC_DIR . '/uploads/' . $new_shard . '/user_' . $transfer_user_id;
+          if (!is_dir($new_user_folder)) {
+            @mkdir($new_user_folder, 0755, true);
+          }
+
+          foreach ($_POST['song_ids'] as $sid_to_move) {
+            $stmt_f = $db->prepare("SELECT file FROM music WHERE id = ?");
+            $stmt_f->execute([(int)$sid_to_move]);
+            $curr_file = $stmt_f->fetchColumn();
+            if ($curr_file) {
+              $src_path = $curr_file;
+              if (!file_exists($src_path)) {
+                $dyn = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($curr_file))) . '/' . basename(dirname($curr_file)) . '/' . basename($curr_file);
+                if (file_exists($dyn)) $src_path = $dyn;
+              }
+              if (file_exists($src_path)) {
+                $dest_file = $new_user_folder . '/' . basename($src_path);
+                if ($src_path !== $dest_file && @rename($src_path, $dest_file)) {
+                  $db->prepare("UPDATE music SET file = ? WHERE id = ?")->execute([$dest_file, (int)$sid_to_move]);
+                }
+              }
+            }
+          }
         } else {
           $_SESSION['admin_flash_msg'] = "Transfer failed: User ID or Email not found.";
           header('Location: ' . $_SERVER['REQUEST_URI']);
@@ -20837,17 +21007,97 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_POST['permanent_delete_user']) && isset($_POST['user_id'])) {
       $db = get_db();
       $del_uid = (int)$_POST['user_id'];
+
+      // 1. Permanently Delete All Physical Music Files & User Music Directory on Disk
       $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
       $stmt->execute([$del_uid]);
       while ($row = $stmt->fetch()) {
         if ($row['file'] && file_exists($row['file'])) @unlink($row['file']);
       }
+      $user_shard = substr(md5((string)$del_uid), 0, 2);
+      delete_directory_recursive(MUSIC_DIR . '/uploads/' . $user_shard . '/user_' . $del_uid);
+
+      // 2. Permanently Delete Personal Cloud Drive from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/users_drive/user_' . $del_uid . '_folder');
+      $db->prepare("DELETE FROM drive_shares WHERE owner_id = ? OR target_user_id = ?")->execute([$del_uid, $del_uid]);
+
+      // 3. Permanently Delete Artworks (PHPShares) Files from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/phpshares/uid_' . $del_uid);
+      $stmt_art_files = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)");
+      $stmt_art_files->execute([$del_uid]);
+      while ($af = $stmt_art_files->fetch()) {
+        if (!empty($af['file_path']) && file_exists(MUSIC_DIR . '/' . $af['file_path'])) @unlink(MUSIC_DIR . '/' . $af['file_path']);
+        if (!empty($af['thumb_path']) && file_exists(MUSIC_DIR . '/' . $af['thumb_path'])) @unlink(MUSIC_DIR . '/' . $af['thumb_path']);
+      }
+      $db->prepare("DELETE FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM art_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?))")->execute([$del_uid, $del_uid, $del_uid]);
+      $db->prepare("DELETE FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM art_favorites WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM arts WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM art_series WHERE user_id = ?")->execute([$del_uid]);
+
+      // 4. Permanently Delete Image Editor, Blogs, Notes, Tasks & Collaborative Projects
+      $db->prepare("DELETE FROM imageditor_projects WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM imageditor_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blog_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?))")->execute([$del_uid, $del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blog_reactions WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?))")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM project_presence WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM project_invites WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM project_members WHERE user_id = ? OR project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM projects WHERE owner_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_group_invites WHERE group_id IN (SELECT id FROM chat_groups WHERE owner_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_group_members WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM chat_groups WHERE owner_id = ?")->execute([$del_uid]);
+
+      // 5. Permanently Delete Music Tables, Playlists, Play Counts & Settings
+      $db->prepare("DELETE FROM song_collaborators WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM song_invites WHERE song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM user_song_settings WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM song_comments WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM song_reactions WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM comment_reactions WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_invites WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlist_songs WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$del_uid]);
+      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM favorites WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM offline_songs WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM listen_later WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM history WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM play_counts WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$del_uid]);
+
+      // 6. Delete Social, Messages & Administrative Tables
+      $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM message_reactions WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$del_uid]);
       $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM community_posts WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM community_reactions WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$del_uid, $del_uid]);
+      $db->prepare("DELETE FROM api_keys WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM password_resets WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM ban_appeals WHERE user_id = ?")->execute([$del_uid]);
+      $db->prepare("DELETE FROM user_reports WHERE reporter_id = ? OR reported_id = ?")->execute([$del_uid, $del_uid]);
+
+      // 7. Flush Storage Audit Cache & Delete User Row Completely
+      $storage_cache = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+      if (file_exists($storage_cache)) @unlink($storage_cache);
+
       $db->prepare("DELETE FROM users WHERE id = ?")->execute([$del_uid]);
-      log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User', $del_uid);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Permanently Deleted User (Complete Wipe)', $del_uid);
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
@@ -20938,7 +21188,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -20980,6 +21230,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $page_titles = [
     'analytics' => 'Daily Traffic & Visitor Analytics',
     'storage' => 'Storage Management & Cleanup',
+    'user_drive_management' => 'User Drive Quota & Capacity Management',
     'users' => 'User Management',
     'songs' => 'Song Management',
     'artworks' => 'Artwork Management',
@@ -21970,6 +22221,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
             <a href="?access=admin&page=storage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('user_drive_management', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=user_drive_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
             <a href="?access=admin&page=users" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && ($_GET['page'] ?? '') !== 'analytics' && ($_GET['page'] ?? '') !== 'storage') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
@@ -23002,6 +23256,483 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             })();
           </script>
 
+        <?php elseif (($_GET['page'] ?? '') === 'user_drive_management'): ?>
+          <?php
+            $db = get_db();
+            $udm_search = trim($_GET['search'] ?? '');
+            $udm_sort = $_GET['sort'] ?? 'quota_desc';
+            $udm_page = max(1, (int)($_GET['p'] ?? 1));
+            $udm_limit = 25;
+            $udm_offset = ($udm_page - 1) * $udm_limit;
+
+            $users_drive_base = MUSIC_DIR . '/users_drive';
+
+            // Gather live disk usage per user folder
+            $user_usage = [];
+            if (is_dir($users_drive_base)) {
+              foreach (glob($users_drive_base . '/user_*_folder', GLOB_ONLYDIR) as $uFolder) {
+                if (preg_match('/user_(\d+)_folder$/', $uFolder, $m)) {
+                  $uid = (int)$m[1];
+                  $size = 0;
+                  $cacheReal = realpath($uFolder . '/.gallery_cache');
+                  $queue = [$uFolder];
+                  while (!empty($queue)) {
+                    $cur = array_shift($queue);
+                    $dh = @opendir($cur);
+                    if (!$dh) continue;
+                    while (($e = @readdir($dh)) !== false) {
+                      if ($e === '.' || $e === '..') continue;
+                      $full = $cur . DIRECTORY_SEPARATOR . $e;
+                      if ($cacheReal && strpos($full, $cacheReal) === 0) continue;
+                      if (is_dir($full)) {
+                        $queue[] = $full;
+                      } else {
+                        $sz = @filesize($full);
+                        if ($sz !== false) $size += (int)$sz;
+                      }
+                    }
+                    @closedir($dh);
+                  }
+                  $user_usage[$uid] = $size;
+                }
+              }
+            }
+
+            // Global KPI metrics
+            $total_users_count = (int)($db->query("SELECT COUNT(id) FROM users")->fetchColumn() ?: 0);
+            $total_allocated_quota = (int)($db->query("SELECT SUM(CASE WHEN drive_quota <= 0 THEN 0 ELSE COALESCE(drive_quota, 2147483648) END) FROM users")->fetchColumn() ?: 0);
+            $total_used_drive_space = array_sum($user_usage);
+            $unlimited_users_count = (int)($db->query("SELECT COUNT(id) FROM users WHERE drive_quota <= 0")->fetchColumn() ?: 0);
+
+            // Fetch user list
+            $where_clauses = [];
+            $params = [];
+            if ($udm_search !== '') {
+              if (is_numeric($udm_search)) {
+                $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
+                $params = [(int)$udm_search, "%$udm_search%", "%$udm_search%"];
+              } else {
+                $where_clauses[] = "(email LIKE ? OR artist LIKE ?)";
+                $params = ["%$udm_search%", "%$udm_search%"];
+              }
+            }
+            $where_sql = !empty($where_clauses) ? ("WHERE " . implode(' AND ', $where_clauses)) : "";
+
+            $sort_map = [
+              'quota_desc' => 'ORDER BY (CASE WHEN drive_quota <= 0 THEN 99999999999999 ELSE COALESCE(drive_quota, 2147483648) END) DESC, id ASC',
+              'quota_asc'  => 'ORDER BY (CASE WHEN drive_quota <= 0 THEN 99999999999999 ELSE COALESCE(drive_quota, 2147483648) END) ASC, id ASC',
+              'id_desc'    => 'ORDER BY id DESC',
+              'id_asc'     => 'ORDER BY id ASC',
+              'name_asc'   => 'ORDER BY artist COLLATE NOCASE ASC',
+            ];
+            $order_sql = $sort_map[$udm_sort] ?? 'ORDER BY id DESC';
+
+            $count_stmt = $db->prepare("SELECT COUNT(id) FROM users {$where_sql}");
+            $count_stmt->execute($params);
+            $total_records = (int)$count_stmt->fetchColumn();
+            $total_pages = ceil($total_records / $udm_limit);
+
+            $stmt_users = $db->prepare("SELECT id, artist, email, COALESCE(drive_quota, 2147483648) as drive_quota, banned, status FROM users {$where_sql} {$order_sql} LIMIT ? OFFSET ?");
+            $p_idx = 1;
+            foreach ($params as $pv) {
+              $stmt_users->bindValue($p_idx++, $pv);
+            }
+            $stmt_users->bindValue($p_idx++, (int)$udm_limit, PDO::PARAM_INT);
+            $stmt_users->bindValue($p_idx++, (int)$udm_offset, PDO::PARAM_INT);
+            $stmt_users->execute();
+            $users_list = $stmt_users->fetchAll();
+
+            function format_quota_pill($bytes) {
+              if ($bytes <= 0) return '<span class="admin-badge admin-badge-success fs-6 font-monospace" style="padding: 3px 10px;"><i class="bi bi-infinity me-1"></i> Unlimited</span>';
+              if ($bytes >= 1099511627776) return '<span class="admin-badge admin-badge-primary fs-6 font-monospace" style="padding: 3px 10px;">' . number_format($bytes / 1099511627776, 2) . ' TB</span>';
+              if ($bytes >= 1073741824) return '<span class="admin-badge admin-badge-primary fs-6 font-monospace" style="padding: 3px 10px;">' . number_format($bytes / 1073741824, 2) . ' GB</span>';
+              return '<span class="admin-badge admin-badge-primary fs-6 font-monospace" style="padding: 3px 10px;">' . number_format($bytes / 1048576, 1) . ' MB</span>';
+            }
+          ?>
+
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">User Drive Quota Management</h1>
+              <div class="small text-secondary mt-1">Set completely custom quotas in MB, GB, TB, or Unlimited, with mass bulk operations</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
+              <button class="admin-btn-pill admin-btn-primary text-nowrap" data-bs-toggle="modal" data-bs-target="#massQuotaModal">
+                <i class="bi bi-sliders"></i> Bulk Custom Quota
+              </button>
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-grow-1 justify-content-end">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="user_drive_management">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="quota_desc" <?php echo $udm_sort === 'quota_desc' ? 'selected' : ''; ?>>Highest Quota</option>
+                  <option value="quota_asc" <?php echo $udm_sort === 'quota_asc' ? 'selected' : ''; ?>>Lowest Quota</option>
+                  <option value="id_desc" <?php echo $udm_sort === 'id_desc' ? 'selected' : ''; ?>>Newest Users</option>
+                  <option value="name_asc" <?php echo $udm_sort === 'name_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
+                </select>
+                <div class="position-relative flex-grow-1">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user ID, email..." value="<?php echo htmlspecialchars($udm_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metric KPI Summary Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Metered Quota</span>
+                    <span class="text-danger"><i class="bi bi-pie-chart-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_allocated_quota / 1073741824, 2); ?> <span class="fs-6 text-secondary fw-normal">GB</span></div>
+                  <small class="text-secondary"><?php echo number_format($total_users_count); ?> registered user accounts</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Disk Space Used</span>
+                    <span class="text-warning"><i class="bi bi-hdd-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_used_drive_space / 1073741824, 2); ?> <span class="fs-6 text-secondary fw-normal">GB</span></div>
+                  <small class="text-secondary">Actual physical storage consumed</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Unlimited Accounts</span>
+                    <span class="text-success"><i class="bi bi-infinity fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($unlimited_users_count); ?> <span class="fs-6 text-secondary fw-normal">users</span></div>
+                  <small class="text-secondary">Have completely unconstrained storage</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Capacity Mode</span>
+                    <span class="text-info"><i class="bi bi-shield-check fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white mt-1">Custom &amp; Dynamic</div>
+                  <small class="text-secondary">No fixed limits; full TB/GB/MB control</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- User Quota Table Console -->
+            <form method="POST" action="?access=admin&page=user_drive_management" id="udm-mass-form">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <input type="hidden" name="mass_update_user_quota" value="1">
+              <input type="hidden" name="mass_op" id="udm-mass-op" value="increase">
+              <input type="hidden" name="mass_amount" id="udm-mass-amount" value="1">
+              <input type="hidden" name="mass_amount_unit" id="udm-mass-unit" value="GB">
+
+              <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.udm-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                <button type="button" class="admin-btn-pill text-success" style="border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="triggerQuickMass('increase', 1, 'GB')"><i class="bi bi-plus-circle"></i> +1 GB</button>
+                <button type="button" class="admin-btn-pill text-warning" style="border-color: color-mix(in srgb, #f59e0b 30%, transparent);" onclick="triggerQuickMass('decrease', 1, 'GB')"><i class="bi bi-dash-circle"></i> -1 GB</button>
+                <button type="button" class="admin-btn-pill text-info" style="border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="triggerQuickMass('unlimited', 0, 'GB')"><i class="bi bi-infinity"></i> Set Unlimited</button>
+                <button type="button" class="admin-btn-pill admin-btn-primary" onclick="openMassQuotaModalPrefilled()"><i class="bi bi-sliders"></i> Enter Custom Quota...</button>
+              </div>
+
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th style="width: 40px;" class="text-center"></th>
+                        <th style="width: 70px;">ID</th>
+                        <th>User Account</th>
+                        <th>Drive Usage</th>
+                        <th>Current Quota</th>
+                        <th>Quick Adjustments</th>
+                        <th class="text-end" style="width: 220px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($users_list)): ?>
+                        <tr><td colspan="7" class="text-center py-5 text-secondary">No user records found.</td></tr>
+                      <?php else: foreach ($users_list as $u):
+                        $used_bytes = (int)($user_usage[$u['id']] ?? 0);
+                        $quota_bytes = (int)($u['drive_quota'] ?? 2147483648);
+                        $is_unlim = ($quota_bytes <= 0);
+                        $pct_used = $is_unlim ? 0 : min(100, round(($used_bytes / max(1, $quota_bytes)) * 100, 1));
+                      ?>
+                        <tr>
+                          <td class="text-center">
+                            <input type="checkbox" name="user_ids[]" value="<?php echo $u['id']; ?>" class="form-check-input udm-cb" style="cursor:pointer; transform: scale(1.1);">
+                          </td>
+                          <td class="text-secondary font-monospace small">#<?php echo $u['id']; ?></td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <img src="?access=api&action=get_profile_picture&id=<?php echo $u['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 34px; height: 34px; object-fit: cover; background: #000; border: 1px solid var(--drive-border);" alt="">
+                              <div>
+                                <div class="fw-bold text-white"><?php echo htmlspecialchars($u['artist']); ?></div>
+                                <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($u['email'] ?? 'Anonymous'); ?></small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <?php if ($is_unlim): ?>
+                              <div class="text-success font-monospace small fw-bold"><i class="bi bi-infinity me-1"></i><?php echo number_format($used_bytes / 1048576, 1); ?> MB used</div>
+                              <small class="text-secondary" style="font-size: 0.72rem;">No storage ceiling enforced</small>
+                            <?php else: ?>
+                              <div class="d-flex align-items-center gap-2">
+                                <div class="progress flex-grow-1" style="height: 6px; width: 90px; background: #050505;">
+                                  <div class="progress-bar <?php echo $pct_used > 85 ? 'bg-danger' : ($pct_used > 60 ? 'bg-warning' : 'bg-info'); ?>" style="width: <?php echo $pct_used; ?>%;"></div>
+                                </div>
+                                <span class="small font-monospace text-white"><?php echo number_format($used_bytes / 1048576, 1); ?> MB</span>
+                              </div>
+                              <small class="text-secondary" style="font-size: 0.72rem;"><?php echo $pct_used; ?>% used</small>
+                            <?php endif; ?>
+                          </td>
+                          <td>
+                            <?php echo format_quota_pill($quota_bytes); ?>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-1">
+                              <form method="POST" action="?access=admin&page=user_drive_management" class="m-0 d-inline">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="update_single_user_quota" value="1">
+                                <input type="hidden" name="user_id" value="<?php echo $u['id']; ?>">
+                                <input type="hidden" name="quota_op" value="increase">
+                                <input type="hidden" name="quota_amount" value="1">
+                                <input type="hidden" name="amount_unit" value="GB">
+                                <button type="submit" class="admin-btn-pill" style="height: 28px; padding: 0 0.55rem; font-size: 0.72rem; color: #38bdf8;" title="Increase quota by +1 GB">+1GB</button>
+                              </form>
+
+                              <form method="POST" action="?access=admin&page=user_drive_management" class="m-0 d-inline">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="update_single_user_quota" value="1">
+                                <input type="hidden" name="user_id" value="<?php echo $u['id']; ?>">
+                                <input type="hidden" name="quota_op" value="decrease">
+                                <input type="hidden" name="quota_amount" value="1">
+                                <input type="hidden" name="amount_unit" value="GB">
+                                <button type="submit" class="admin-btn-pill" style="height: 28px; padding: 0 0.55rem; font-size: 0.72rem; color: #fbbf24;" title="Decrease quota by -1 GB">-1GB</button>
+                              </form>
+
+                              <form method="POST" action="?access=admin&page=user_drive_management" class="m-0 d-inline">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="update_single_user_quota" value="1">
+                                <input type="hidden" name="user_id" value="<?php echo $u['id']; ?>">
+                                <input type="hidden" name="quota_op" value="unlimited">
+                                <button type="submit" class="admin-btn-pill" style="height: 28px; padding: 0 0.55rem; font-size: 0.72rem; color: #4ade80;" title="Grant Unlimited Storage"><i class="bi bi-infinity"></i></button>
+                              </form>
+                            </div>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-1">
+                              <a href="?access=admin&page=drive&path=<?php echo urlencode('users_drive/user_' . $u['id'] . '_folder'); ?>" class="admin-btn-pill" style="height: 30px; padding: 0 0.65rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Browse this User's Cloud Drive Folder in Drive">
+                                <i class="bi bi-folder2-open"></i> Drive
+                              </a>
+                              <button type="button" class="admin-btn-pill admin-btn-primary" style="height: 30px; padding: 0 0.75rem;" onclick="openSingleQuotaModal(<?php echo $u['id']; ?>, '<?php echo addslashes(htmlspecialchars($u['artist'])); ?>', <?php echo $quota_bytes; ?>)">
+                                <i class="bi bi-pencil-square"></i> Custom
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Pagination -->
+              <?php if ($total_pages > 1): ?>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($udm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=user_drive_management&search=<?php echo urlencode($udm_search); ?>&sort=<?php echo urlencode($udm_sort); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($udm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=user_drive_management&search=<?php echo urlencode($udm_search); ?>&sort=<?php echo urlencode($udm_sort); ?>&p=<?php echo $udm_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $udm_page - 2);
+                    $end_p = min($total_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($udm_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=user_drive_management&search=<?php echo urlencode($udm_search); ?>&sort=<?php echo urlencode($udm_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($udm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=user_drive_management&search=<?php echo urlencode($udm_search); ?>&sort=<?php echo urlencode($udm_sort); ?>&p=<?php echo $udm_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($udm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=user_drive_management&search=<?php echo urlencode($udm_search); ?>&sort=<?php echo urlencode($udm_sort); ?>&p=<?php echo $total_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+            </form>
+          </div>
+
+          <!-- Single User Custom Quota Modal -->
+          <div class="modal fade" id="singleQuotaModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-sliders text-danger me-2"></i> Custom Quota Setup</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=user_drive_management">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="update_single_user_quota" value="1">
+                  <input type="hidden" name="user_id" id="single-quota-uid" value="">
+                  <div class="modal-body p-4 text-start">
+                    <div class="mb-3">
+                      <span class="text-secondary small fw-bold">USER ACCOUNT</span>
+                      <div class="fw-bold text-white fs-6 mt-1" id="single-quota-name">User</div>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">OPERATION TYPE</label>
+                      <select name="quota_op" id="single-quota-op" class="admin-pill-select w-100" onchange="toggleSingleQuotaInput(this.value)">
+                        <option value="set">Set Exact Custom Quota</option>
+                        <option value="increase">Increase Capacity (+)</option>
+                        <option value="decrease">Decrease Capacity (-)</option>
+                        <option value="unlimited">Set to Unlimited (No Limit)</option>
+                        <option value="reset">Reset to Default (2 GB)</option>
+                      </select>
+                    </div>
+
+                    <div class="mb-3" id="single-quota-amount-group">
+                      <label class="form-label text-secondary small fw-bold mb-1">CAPACITY / VALUE</label>
+                      <div class="d-flex gap-2">
+                        <input type="number" step="any" min="0.01" name="quota_amount" id="single-quota-amount" class="admin-pill-input flex-grow-1" value="2.0">
+                        <select name="amount_unit" id="single-quota-unit" class="admin-pill-select" style="width: auto; min-width: 95px;">
+                          <option value="TB">TB</option>
+                          <option value="GB" selected>GB</option>
+                          <option value="MB">MB</option>
+                        </select>
+                      </div>
+                      <small class="text-secondary d-block mt-1">Enter any fractional or whole custom number (e.g. 500 MB, 2.5 GB, 1.2 TB).</small>
+                    </div>
+
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center mt-3 py-2">
+                      Apply Custom Quota
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mass Bulk Custom Quota Modal -->
+          <div class="modal fade" id="massQuotaModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-sliders text-warning me-2"></i> Bulk Custom Quota Adjustment</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-4 text-start">
+                  <p class="text-secondary small mb-3">Adjust storage capacity for all selected accounts to any custom arbitrary value.</p>
+
+                  <div class="mb-3">
+                    <label class="form-label text-secondary small fw-bold mb-1">OPERATION TYPE</label>
+                    <select id="modal-mass-op" class="admin-pill-select w-100" onchange="toggleMassQuotaInput(this.value)">
+                      <option value="set">Set Exact Custom Capacity</option>
+                      <option value="increase">Increase Capacity (+)</option>
+                      <option value="decrease">Decrease Capacity (-)</option>
+                      <option value="unlimited">Set to Unlimited (No Quota Ceiling)</option>
+                    </select>
+                  </div>
+
+                  <div class="mb-4" id="modal-mass-amount-group">
+                    <label class="form-label text-secondary small fw-bold mb-1">AMOUNT</label>
+                    <div class="d-flex gap-2">
+                      <input type="number" step="any" min="0.01" id="modal-mass-amount" class="admin-pill-input flex-grow-1" value="5.0">
+                      <select id="modal-mass-unit" class="admin-pill-select" style="width: auto; min-width: 95px;">
+                        <option value="TB">TB</option>
+                        <option value="GB" selected>GB</option>
+                        <option value="MB">MB</option>
+                      </select>
+                    </div>
+                    <small class="text-secondary d-block mt-1">Specify any custom amount (e.g. 750 MB, 10 GB, 2 TB).</small>
+                  </div>
+
+                  <button type="button" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2" onclick="submitMassQuotaModal()">
+                    Apply Custom Changes to Selected
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function openSingleQuotaModal(uid, artist, bytes) {
+              document.getElementById('single-quota-uid').value = uid;
+              document.getElementById('single-quota-name').textContent = artist + ' (#' + uid + ')';
+
+              if (bytes <= 0) {
+                document.getElementById('single-quota-op').value = 'unlimited';
+                toggleSingleQuotaInput('unlimited');
+              } else {
+                document.getElementById('single-quota-op').value = 'set';
+                toggleSingleQuotaInput('set');
+
+                let amount = bytes / 1073741824;
+                let unit = 'GB';
+                if (bytes >= 1099511627776) {
+                  amount = bytes / 1099511627776;
+                  unit = 'TB';
+                } else if (bytes < 1073741824) {
+                  amount = bytes / 1048576;
+                  unit = 'MB';
+                }
+                document.getElementById('single-quota-amount').value = parseFloat(amount.toFixed(2));
+                document.getElementById('single-quota-unit').value = unit;
+              }
+
+              new bootstrap.Modal(document.getElementById('singleQuotaModal')).show();
+            }
+
+            function openMassQuotaModalPrefilled() {
+              const checked = document.querySelectorAll('.udm-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one user from the table.');
+                return;
+              }
+              new bootstrap.Modal(document.getElementById('massQuotaModal')).show();
+            }
+
+            function toggleSingleQuotaInput(op) {
+              const grp = document.getElementById('single-quota-amount-group');
+              if (grp) grp.style.display = (op === 'reset' || op === 'unlimited') ? 'none' : 'block';
+            }
+
+            function toggleMassQuotaInput(op) {
+              const grp = document.getElementById('modal-mass-amount-group');
+              if (grp) grp.style.display = (op === 'unlimited') ? 'none' : 'block';
+            }
+
+            function triggerQuickMass(op, amount, unit) {
+              const checked = document.querySelectorAll('.udm-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one user from the list.');
+                return;
+              }
+              const label = (op === 'unlimited') ? 'Unlimited' : (amount + ' ' + unit);
+              if (confirm('Apply ' + op + ' (' + label + ') to ' + checked.length + ' selected user(s)?')) {
+                document.getElementById('udm-mass-op').value = op;
+                document.getElementById('udm-mass-amount').value = amount;
+                document.getElementById('udm-mass-unit').value = unit;
+                document.getElementById('udm-mass-form').submit();
+              }
+            }
+
+            function submitMassQuotaModal() {
+              const checked = document.querySelectorAll('.udm-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one user from the table behind this modal.');
+                return;
+              }
+              const op = document.getElementById('modal-mass-op').value;
+              const amount = document.getElementById('modal-mass-amount').value;
+              const unit = document.getElementById('modal-mass-unit').value;
+
+              document.getElementById('udm-mass-op').value = op;
+              document.getElementById('udm-mass-amount').value = amount;
+              document.getElementById('udm-mass-unit').value = unit;
+              document.getElementById('udm-mass-form').submit();
+            }
+          </script>
         <?php elseif (($_GET['page'] ?? '') === 'reports'): ?>
           <?php 
             $rep_search = trim($_GET['search'] ?? '');
@@ -23499,8 +24230,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <span class="text-white fw-bold font-monospace"><?php echo number_format($s['plays']); ?></span>
                           </td>
                           <td>
-                            <div class="d-flex align-items-center gap-1">
+                            <div class="d-flex align-items-center gap-1 flex-wrap">
                               <a href="?access=admin&page=storage&search=<?php echo urlencode($s['user_id']); ?>" class="text-white small fw-bold text-decoration-none" title="Inspect User Storage">UID #<?php echo $s['user_id']; ?></a>
+                              <?php
+                                $u_shard = substr(md5((string)$s['user_id']), 0, 2);
+                                $u_folder_rel = 'uploads/' . $u_shard . '/user_' . $s['user_id'];
+                              ?>
+                              <a href="?access=admin&page=drive&path=<?php echo urlencode($u_folder_rel); ?>" class="admin-badge admin-badge-warning text-decoration-none" style="font-size: 0.68rem; padding: 2px 7px;" title="Browse user_<?php echo $s['user_id']; ?> folder in Drive">
+                                <i class="bi bi-folder-fill text-warning me-1"></i>user_<?php echo $s['user_id']; ?>
+                              </a>
                             </div>
                             <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($s['email'] ?? 'System / Local'); ?></small>
                           </td>
@@ -44480,6 +45218,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <label class="form-check-label text-white fw-medium" for="perm-storage">Storage Stats</label>
                   </div>
                 </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="user_drive_management" id="perm-user-drive">
+                    <label class="form-check-label text-white fw-medium" for="perm-user-drive">User Drive Quota</label>
+                  </div>
+                </div>
               </div>
               
               <div class="d-flex justify-content-end gap-2">
@@ -45230,6 +45974,7 @@ function init_db($db) {
       $db->exec("UPDATE users SET status = 'admin' WHERE is_admin = 1 AND status != 'super_admin'");
     }
     if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
+    if (!in_array('drive_quota', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN drive_quota INTEGER DEFAULT 2147483648;");
     if (!in_array('bio', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;");
     if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
     if (!in_array('profile_background_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background_type TEXT;");
@@ -45845,6 +46590,25 @@ function calculatePhpLevel($notes, $duration, $difficulty = 'medium', $density_m
   $final_level = round($level) + $variance;
 
   return max(1, (int)$final_level);
+}
+
+function delete_directory_recursive($dir) {
+  if (!is_dir($dir)) {
+    if (file_exists($dir)) @unlink($dir);
+    return;
+  }
+  $items = @scandir($dir);
+  if (!$items) return;
+  foreach ($items as $item) {
+    if ($item === '.' || $item === '..') continue;
+    $path = $dir . DIRECTORY_SEPARATOR . $item;
+    if (is_dir($path) && !is_link($path)) {
+      delete_directory_recursive($path);
+    } else {
+      @unlink($path);
+    }
+  }
+  @rmdir($dir);
 }
 
 function sanitize_for_path($string) {
@@ -47377,33 +48141,93 @@ HTML;
 
     case 'delete_account_all':
       if (!$user_id) { http_response_code(403); exit; }
+
+      // 1. Delete Physical Music Files & Songs Directory on Disk
       $stmt = $db->prepare("SELECT file FROM music WHERE user_id = ?");
       $stmt->execute([$user_id]);
       while ($row = $stmt->fetch()) { if ($row['file'] && file_exists($row['file'])) @unlink($row['file']); }
-      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
+      $u_shard = substr(md5((string)$user_id), 0, 2);
+      delete_directory_recursive(MUSIC_DIR . '/uploads/' . $u_shard . '/user_' . $user_id);
+
+      // 2. Delete Personal Cloud Drive from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/users_drive/user_' . $user_id . '_folder');
+      $db->prepare("DELETE FROM drive_shares WHERE owner_id = ? OR target_user_id = ?")->execute([$user_id, $user_id]);
+
+      // 3. Delete Artworks (PHPShares) Files from Disk & Database
+      delete_directory_recursive(MUSIC_DIR . '/phpshares/uid_' . $user_id);
+      $stmt_art_files = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)");
+      $stmt_art_files->execute([$user_id]);
+      while ($af = $stmt_art_files->fetch()) {
+        if (!empty($af['file_path']) && file_exists(MUSIC_DIR . '/' . $af['file_path'])) @unlink(MUSIC_DIR . '/' . $af['file_path']);
+        if (!empty($af['thumb_path']) && file_exists(MUSIC_DIR . '/' . $af['thumb_path'])) @unlink(MUSIC_DIR . '/' . $af['thumb_path']);
+      }
+      $db->prepare("DELETE FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$user_id]);
+      $db->prepare("DELETE FROM art_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?))")->execute([$user_id, $user_id, $user_id]);
+      $db->prepare("DELETE FROM art_comments WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM art_favorites WHERE user_id = ? OR art_id IN (SELECT id FROM arts WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM arts WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM art_series WHERE user_id = ?")->execute([$user_id]);
+
+      // 4. Delete Image Editor Projects, Collaborative Projects & Chat Groups
+      $db->prepare("DELETE FROM imageditor_projects WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM imageditor_categories WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM project_presence WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM project_invites WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$user_id]);
+      $db->prepare("DELETE FROM project_members WHERE user_id = ? OR project_id IN (SELECT id FROM projects WHERE owner_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM projects WHERE owner_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM chat_group_invites WHERE group_id IN (SELECT id FROM chat_groups WHERE owner_id = ?)")->execute([$user_id]);
+      $db->prepare("DELETE FROM chat_group_members WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM chat_groups WHERE owner_id = ?")->execute([$user_id]);
+
+      // 5. Delete Notes, Tasks, Blogs & Categories
       $db->prepare("DELETE FROM personal_notes WHERE user_id = ?")->execute([$user_id]);
-      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$user_id]);
-      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM note_categories WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM tasks WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM task_categories WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM blog_comment_reactions WHERE user_id = ? OR comment_id IN (SELECT id FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?))")->execute([$user_id, $user_id, $user_id]);
+      $db->prepare("DELETE FROM blog_comments WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM blog_reactions WHERE user_id = ? OR blog_id IN (SELECT id FROM blogs WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM blogs WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM blog_categories WHERE user_id = ?")->execute([$user_id]);
+
+      // 6. Delete Music, Social, Messages, and Playlists
+      $db->prepare("DELETE FROM song_collaborators WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM song_invites WHERE song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$user_id]);
+      $db->prepare("DELETE FROM user_song_settings WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM song_comments WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM song_reactions WHERE user_id = ? OR song_id IN (SELECT id FROM music WHERE user_id = ?)")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM comment_reactions WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM music WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM history WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM play_counts WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM favorites WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM offline_songs WHERE user_id = ?")->execute([$user_id]);
-      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM playlist_invites WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$user_id]);
       $db->prepare("DELETE FROM playlist_collaborators WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM playlist_songs WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)")->execute([$user_id]);
+      $db->prepare("DELETE FROM playlists WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM follows WHERE follower_id = ? OR following_id = ?")->execute([$user_id, $user_id]);
       $db->prepare("DELETE FROM listen_later WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM activity_feed WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?")->execute([$user_id, $user_id]);
+      $db->prepare("DELETE FROM message_reactions WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM starred_messages WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM user_statuses WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?")->execute([$user_id, $user_id]);
       $db->prepare("DELETE FROM rhythm_scores WHERE user_id = ?")->execute([$user_id]);
       $db->prepare("DELETE FROM rhythm_favorites WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM api_keys WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM password_resets WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM ban_appeals WHERE user_id = ?")->execute([$user_id]);
+      $db->prepare("DELETE FROM user_reports WHERE reporter_id = ? OR reported_id = ?")->execute([$user_id, $user_id]);
+
+      // 7. Flush Storage Audit Cache
+      $storage_cache = MUSIC_DIR . '/.gallery_cache/storage_audit.json';
+      if (file_exists($storage_cache)) @unlink($storage_cache);
 
       $new_email = 'deleted_' . $user_id . '_' . time() . '@mail.com';
-      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL WHERE id = ?")->execute([$new_email, $user_id]);
-      
+      $db->prepare("UPDATE users SET email = ?, artist = 'Deleted User', bio = NULL, password_hash = NULL, backup_key = NULL, profile_picture = NULL, profile_background = NULL, profile_background_type = NULL, banned = 1, drive_quota = 0 WHERE id = ?")->execute([$new_email, $user_id]);
+
       session_destroy();
       send_json(['status' => 'success']);
       break;
@@ -47723,10 +48547,9 @@ HTML;
           }
         }
         
-        $main_artist = trim(preg_split('/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+)\s*|\s*,\s*(?!(?:the|a|an|jr|sr)\b)/i', $artist)[0] ?? '');
-        $artist_path = sanitize_for_path($main_artist);
-        $shard = substr(md5($artist_path), 0, 2);
-        $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . $artist_path;
+        $user_folder = 'user_' . $user_id;
+        $shard = substr(md5((string)$user_id), 0, 2);
+        $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . $user_folder;
         if (!is_dir($upload_dir)) {
           mkdir($upload_dir, 0755, true);
         }
@@ -47923,8 +48746,9 @@ HTML;
             if (file_exists($dynamic_path)) $audioPath = $dynamic_path;
           }
         } else {
-          $shard = substr(md5($artist), 0, 2);
-          $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . sanitize_for_path($artist);
+          $user_folder = 'user_' . $user_id;
+          $shard = substr(md5((string)$user_id), 0, 2);
+          $upload_dir = MUSIC_DIR . '/uploads/' . $shard . '/' . $user_folder;
           if (!is_dir($upload_dir)) mkdir($upload_dir, 0755, true);
           $filename = uniqid('ae_') . '.' . $ext;
           $audioPath = $upload_dir . '/' . $filename;
@@ -63438,7 +64262,7 @@ function perform_cover_scan($db) {
 
           <hr class="text-secondary">
           
-<div class="logged-in-only">
+          <div class="logged-in-only">
             <!-- Library & Social -->
             <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library &amp; Social</h6>
             <a href="#" class="nav-link" data-view="get_recommendations">
@@ -63488,7 +64312,8 @@ function perform_cover_scan($db) {
             </a>
 
             <!-- Platforms -->
-            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Platforms</h6>
+            <hr class="text-secondary">
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Platforms</h6>
             <a href="?access=user&page=drive" target="_blank" rel="noopener noreferrer" class="nav-link">
               <i class="bi bi-hdd-rack-fill"></i>
               <span>My Drive</span>
