@@ -684,7 +684,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.5');
+define('APP_VERSION', '10.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1187,94 +1187,87 @@ if (isset($_GET['access']) && $_GET['access'] === 'user') {
     exit;
   }
 
-  if (empty($_SESSION['user_id'])) {
-    ?>
-    <!DOCTYPE html>
-    <html lang="en" data-bs-theme="dark">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Login - User Drive</title>
-        <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-          body { background-color: #050505; color: #fff; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: 'Roboto', sans-serif; margin: 0; }
-          .login-card { background: #101010; border: 1px solid #222; border-radius: 20px; padding: 2.5rem; max-width: 400px; width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,0.8); text-align: center; }
-          .form-control { background-color: #0a0a0a !important; border: 1px solid #333 !important; color: #fff !important; border-radius: 12px; padding: 0.75rem 1rem; }
-          .form-control:focus { border-color: #ff0000 !important; box-shadow: 0 0 0 3px rgba(255,0,0,0.2) !important; }
-          .btn-danger { background-color: #ff0000; border: none; border-radius: 12px; padding: 0.75rem 1rem; font-weight: bold; width: 100%; transition: 0.2s; }
-          .btn-danger:hover { background-color: #cc0000; }
-        </style>
-      </head>
-      <body>
-        <div class="login-card">
-          <svg viewBox="0 0 24 24" style="width: 48px; height: 48px; fill: #ff0000; margin-bottom: 1rem;"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
-          <h4 class="fw-bold mb-1">User Drive</h4>
-          <p class="text-secondary small mb-4">Please log in to access your personal cloud storage.</p>
-          <form id="drive-login-form">
-            <div class="mb-3 text-start">
-              <label class="form-label text-secondary small fw-bold mb-1">EMAIL ADDRESS</label>
-              <input type="email" id="drive-email" class="form-control" required placeholder="your@email.com">
-            </div>
-            <div class="mb-4 text-start">
-              <label class="form-label text-secondary small fw-bold mb-1">PASSWORD</label>
-              <input type="password" id="drive-password" class="form-control" required placeholder="••••••••">
-            </div>
-            <button type="submit" class="btn btn-danger" id="drive-login-btn">Secure Login</button>
-          </form>
-          <div id="drive-login-alert" class="alert alert-danger mt-3 d-none p-2 small fw-bold border-danger"></div>
-        </div>
-        <script>
-          document.getElementById('drive-login-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const btn = document.getElementById('drive-login-btn');
-            const alertBox = document.getElementById('drive-login-alert');
-            btn.disabled = true; btn.innerText = 'Authenticating...'; alertBox.classList.add('d-none');
-            try {
-              const res = await fetch('?action=login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  email: document.getElementById('drive-email').value,
-                  password: document.getElementById('drive-password').value
-                })
-              });
-              const data = await res.json();
-              if (data.status === 'success') {
-                window.location.reload();
-              } else {
-                alertBox.innerText = data.message || 'Invalid credentials';
-                alertBox.classList.remove('d-none');
-                btn.disabled = false; btn.innerText = 'Secure Login';
-              }
-            } catch (err) {
-              alertBox.innerText = 'Network error during login';
-              alertBox.classList.remove('d-none');
-              btn.disabled = false; btn.innerText = 'Secure Login';
-            }
-          });
-        </script>
-      </body>
-    </html>
-    <?php
-    exit;
-  }
-
   $db = get_db();
-  $user_id = (int)$_SESSION['user_id'];
-  $stmt_u = $db->prepare("SELECT id, email, artist, password_hash, banned FROM users WHERE id = ?");
-  $stmt_u->execute([$user_id]);
-  $current_user = $stmt_u->fetch();
+  $user_id = (int)($_SESSION['user_id'] ?? 0);
+  $current_user = null;
 
-  if (!$current_user || !empty($current_user['banned'])) {
-    session_destroy();
-    header('Location: ./');
-    exit;
+  if ($user_id > 0) {
+    $stmt_u = $db->prepare("SELECT id, email, artist, password_hash, banned FROM users WHERE id = ?");
+    $stmt_u->execute([$user_id]);
+    $current_user = $stmt_u->fetch();
+
+    if (!$current_user || !empty($current_user['banned'])) {
+      session_destroy();
+      header('Location: ./');
+      exit;
+    }
+  } else {
+    // Treat as Guest / Public Browser
+    $current_user = ['id' => 0, 'email' => 'guest@local', 'artist' => 'Guest'];
   }
 
   $users_drive_base = MUSIC_DIR . '/users_drive';
   if (!is_dir($users_drive_base)) {
     @mkdir($users_drive_base, 0755, true);
+  }
+
+  // === ADVANCED TABLE HEALER START ===
+  try {
+    // 1. Disable constraints temporarily to bypass any SQLite locks
+    $db->exec("PRAGMA foreign_keys = OFF;");
+    
+    // 2. Fetch existing columns
+    $cols = $db->query("PRAGMA table_info(drive_shares)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    
+    // 3. If table exists but is missing critical columns (like 'id', 'owner_id', 'target_email'), quarantine it
+    if (!empty($cols) && (!in_array('id', $cols) || !in_array('owner_id', $cols) || !in_array('target_email', $cols))) {
+      $quarantine_name = "drive_shares_corrupted_" . time();
+      $db->exec("ALTER TABLE drive_shares RENAME TO {$quarantine_name}");
+    }
+    
+    // 4. Re-enable constraints
+    $db->exec("PRAGMA foreign_keys = ON;");
+  } catch (Exception $e) {}
+
+  try {
+    // 5. Build the flawless, complete table structure
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS drive_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id INTEGER NOT NULL DEFAULT 0,
+        target_user_id INTEGER DEFAULT 0,
+        target_email TEXT DEFAULT '',
+        path TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL DEFAULT '',
+        is_dir INTEGER DEFAULT 0,
+        is_public INTEGER DEFAULT 0,
+        permission TEXT DEFAULT 'read',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(owner_id, path, target_email, is_public) ON CONFLICT REPLACE
+      )
+    ");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_drive_shares_pub ON drive_shares(is_public)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_drive_shares_tgt ON drive_shares(target_user_id, target_email)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_drive_shares_own ON drive_shares(owner_id, path)");
+  } catch (Exception $e) {}
+  // === ADVANCED TABLE HEALER END ===
+
+  function resolveDriveCrossUserPath($users_drive_base, $db, $reqPath, $ownerId, $currentUserId, $currentUserEmail) {
+    if (!$ownerId || $ownerId == $currentUserId) return false;
+    $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $reqPath), '/');
+    $checkStmt = $db->prepare("
+      SELECT id FROM drive_shares 
+      WHERE owner_id = ? 
+        AND (path = ? OR ? LIKE (path || '/%')) 
+        AND (is_public = 1 OR target_user_id = ? OR target_email = ?) 
+      LIMIT 1
+    ");
+    $checkStmt->execute([$ownerId, $cleanRel, $cleanRel, $currentUserId, $currentUserEmail]);
+    if ($checkStmt->fetch()) {
+      $ownerRoot = $users_drive_base . '/user_' . $ownerId . '_folder';
+      return safePath($ownerRoot, $cleanRel);
+    }
+    return false;
   }
 
   // Auto-generate strict security lockdown in users_drive/.htaccess to prevent code execution
@@ -1443,6 +1436,7 @@ HTACCESS;
   }
 
   function jsonResponse($data, $status = 200) {
+    while (ob_get_level() > 0) @ob_end_clean();
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -2190,16 +2184,361 @@ HTACCESS;
     session_write_close();
   }
 
-  $isAdmin = true; // Unlocks full features for the logged-in user
+  $isAdmin = true;
   $isDemo = false;
 
+  // Check if requested directory or file is part of a public share
+  $is_requested_public = false;
+  $req_target_path = trim(str_replace(['\\', '..'], ['/', ''], $_GET['dir'] ?? ($_GET['f'] ?? ($_POST['dir'] ?? ''))), '/');
+  if ($req_target_path !== '') {
+    $pub_chk = $db->prepare("
+      SELECT id FROM drive_shares 
+      WHERE is_public = 1 AND (? = path OR ? LIKE (path || '/%'))
+      LIMIT 1
+    ");
+    $pub_chk->execute([$req_target_path, $req_target_path]);
+    if ($pub_chk->fetchColumn()) {
+      $is_requested_public = true;
+    }
+  }
+
+  // Allow guests to execute safe background actions without throwing 401 errors
+  $public_allowed_actions = [
+    'public_list', 'search', 'thumb', 'raw', 'file', 'download', 
+    'icon', 'app_icon', 'og_image', 'tree', 'starred_list', 'storage_info'
+  ];
+  if (empty($_SESSION['user_id']) && !empty($action)) {
+    if (!in_array($action, $public_allowed_actions) && !($action === 'list' && $is_requested_public)) {
+      jsonResponse(['error' => 'Login required to access this resource.', 'login_required' => true], 401);
+    }
+  }
+
   if ($action) {
+    // Search users for sharing menu auto-suggest
+    if ($action === 'search_users') {
+      $q = trim($_GET['q'] ?? '');
+      if (empty($q)) {
+        jsonResponse(['users' => []]);
+      }
+      $stmt = $db->prepare("
+        SELECT id, artist, email 
+        FROM users 
+        WHERE id != ? AND banned = 0 AND (artist LIKE ? OR email LIKE ?)
+        ORDER BY artist COLLATE NOCASE ASC
+        LIMIT 8
+      ");
+      $stmt->execute([$user_id, "%$q%", "%$q%"]);
+      jsonResponse(['users' => $stmt->fetchAll()]);
+    }
+    // 1. Get Public Files & Folders Across All Users
+    if ($action === 'public_list') {
+      $stmt = $db->prepare("
+        SELECT s.*, u.artist as owner_artist, u.email as owner_email 
+        FROM drive_shares s
+        JOIN users u ON s.owner_id = u.id
+        WHERE s.is_public = 1
+        ORDER BY s.created_at DESC
+      ");
+      $stmt->execute();
+      $shares = $stmt->fetchAll();
+
+      $folders = [];
+      $files = [];
+      $totalSize = 0;
+
+      foreach ($shares as $s) {
+        $ownerRoot = $users_drive_base . '/user_' . $s['owner_id'] . '_folder';
+        $fullPath = safePath($ownerRoot, $s['path']);
+        if (!$fullPath || !file_exists($fullPath)) continue;
+
+        $mtime = @filemtime($fullPath);
+        if ($s['is_dir'] || is_dir($fullPath)) {
+          $validCount = 0;
+          foreach (@scandir($fullPath) ?: [] as $sub) {
+            if ($sub[0] !== '.') $validCount++;
+          }
+          $folders[] = [
+            'name'         => $s['name'],
+            'path'         => $s['path'],
+            'owner_id'     => (int)$s['owner_id'],
+            'owner_artist' => $s['owner_artist'],
+            'mtime'        => $mtime,
+            'items_count'  => $validCount,
+            'is_public'    => 1,
+            'thumb_image'  => getFolderPreviewImage($fullPath, $s['path'], $config)
+          ];
+        } else {
+          $size = @filesize($fullPath);
+          $totalSize += $size;
+          $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+          $files[] = [
+            'name'         => $s['name'],
+            'path'         => $s['path'],
+            'owner_id'     => (int)$s['owner_id'],
+            'owner_artist' => $s['owner_artist'],
+            'size'         => $size,
+            'size_fmt'     => formatBytes($size),
+            'mtime'        => $mtime,
+            'ext'          => $ext,
+            'type'         => getFileType($ext, $config),
+            'is_public'    => 1
+          ];
+        }
+      }
+
+      jsonResponse([
+        'folders' => $folders,
+        'files'   => $files,
+        'stats'   => [
+          'folders'    => count($folders),
+          'files'      => count($files),
+          'total_size' => formatBytes($totalSize)
+        ]
+      ]);
+    }
+
+    // 2. Full Gallery-Compatible Shared Items
+    if ($action === 'shared_list') {
+      $myEmail = $current_user['email'] ?? '';
+      
+      $stmtIn = $db->prepare("
+        SELECT s.*, u.artist as owner_artist, u.email as owner_email 
+        FROM drive_shares s
+        JOIN users u ON s.owner_id = u.id
+        WHERE s.is_public = 0 AND (s.target_user_id = ? OR s.target_email = ?)
+        ORDER BY s.created_at DESC
+      ");
+      $stmtIn->execute([$user_id, $myEmail]);
+      $inRows = $stmtIn->fetchAll();
+
+      $folders = [];
+      $files = [];
+      $totalSize = 0;
+
+      foreach ($inRows as $s) {
+        $ownerRoot = $users_drive_base . '/user_' . $s['owner_id'] . '_folder';
+        $fullPath = safePath($ownerRoot, $s['path']);
+        if (!$fullPath || !file_exists($fullPath)) continue;
+
+        $mtime = @filemtime($fullPath);
+        $isDir = $s['is_dir'] || is_dir($fullPath);
+        $perm = $s['permission'] ?: 'read';
+
+        if ($isDir) {
+          $validCount = 0;
+          foreach (@scandir($fullPath) ?: [] as $sub) {
+            if ($sub[0] !== '.') $validCount++;
+          }
+          $folders[] = [
+            'name'         => $s['name'],
+            'path'         => $s['path'],
+            'owner_id'     => (int)$s['owner_id'],
+            'owner_artist' => $s['owner_artist'],
+            'mtime'        => $mtime,
+            'items_count'  => $validCount,
+            'is_public'    => 0,
+            'permission'   => $perm,
+            'thumb_image'  => getFolderPreviewImage($fullPath, $s['path'], $config)
+          ];
+        } else {
+          $size = @filesize($fullPath);
+          $totalSize += $size;
+          $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+          $files[] = [
+            'name'         => $s['name'],
+            'path'         => $s['path'],
+            'owner_id'     => (int)$s['owner_id'],
+            'owner_artist' => $s['owner_artist'],
+            'size'         => $size,
+            'size_fmt'     => formatBytes($size),
+            'mtime'        => $mtime,
+            'ext'          => $ext,
+            'type'         => getFileType($ext, $config),
+            'is_public'    => 0,
+            'permission'   => $perm
+          ];
+        }
+      }
+
+      jsonResponse([
+        'folders' => $folders,
+        'files'   => $files,
+        'stats'   => [
+          'folders'    => count($folders),
+          'files'      => count($files),
+          'total_size' => formatBytes($totalSize)
+        ]
+      ]);
+    }
+
+    // 3. Toggle Public Access
+    if ($action === 'toggle_public') {
+      $path = trim($_POST['path'] ?? '');
+      $isPublic = !empty($_POST['is_public']) ? 1 : 0;
+      $fullPath = safePath($config['root_dir'], $path);
+      if (!$fullPath || !file_exists($fullPath)) jsonResponse(['error' => 'Item not found'], 404);
+
+      $name = basename($fullPath);
+      $isDir = is_dir($fullPath) ? 1 : 0;
+
+      // Clean existing public record first to avoid constraint conflicts
+      $db->prepare("DELETE FROM drive_shares WHERE owner_id = ? AND path = ? AND is_public = 1")->execute([$user_id, $path]);
+
+      if ($isPublic) {
+        $stmt = $db->prepare("
+          INSERT INTO drive_shares (owner_id, target_user_id, target_email, path, name, is_dir, is_public, permission)
+          VALUES (?, 0, '', ?, ?, ?, 1, 'read')
+        ");
+        $stmt->execute([$user_id, $path, $name, $isDir]);
+        logDriveActivity($config['meta_file'], 'modified', $path, 'Adjusted permission to Public');
+      } else {
+        logDriveActivity($config['meta_file'], 'modified', $path, 'Adjusted permission to Private');
+      }
+
+      jsonResponse(['success' => true, 'is_public' => $isPublic]);
+    }
+
+    // 4. Share with a Specific User
+    if ($action === 'share_to_user') {
+      $path = trim($_POST['path'] ?? '');
+      $targetEmail = strtolower(trim($_POST['target_email'] ?? ''));
+      $perm = ($_POST['permission'] ?? 'read') === 'write' ? 'write' : 'read';
+
+      if (empty($targetEmail) || !filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
+        jsonResponse(['error' => 'Please provide a valid recipient email address'], 400);
+      }
+      if ($targetEmail === strtolower($current_user['email'] ?? '')) {
+        jsonResponse(['error' => 'You cannot share items with your own account'], 400);
+      }
+
+      $fullPath = safePath($config['root_dir'], $path);
+      if (!$fullPath || !file_exists($fullPath)) jsonResponse(['error' => 'Item not found'], 404);
+
+      $targetStmt = $db->prepare("SELECT id, artist FROM users WHERE LOWER(email) = ?");
+      $targetStmt->execute([$targetEmail]);
+      $targetUser = $targetStmt->fetch();
+      if (!$targetUser) {
+        jsonResponse(['error' => "No user found with email '{$targetEmail}'"], 404);
+      }
+
+      $name = basename($fullPath);
+      $isDir = is_dir($fullPath) ? 1 : 0;
+
+      // Clean existing entry for this recipient to prevent constraint violations
+      $db->prepare("DELETE FROM drive_shares WHERE owner_id = ? AND path = ? AND target_email = ? AND is_public = 0")
+         ->execute([$user_id, $path, $targetEmail]);
+
+      $stmt = $db->prepare("
+        INSERT INTO drive_shares (owner_id, target_user_id, target_email, path, name, is_dir, is_public, permission)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+      ");
+      $stmt->execute([$user_id, (int)$targetUser['id'], $targetEmail, $path, $name, $isDir, $perm]);
+
+      logDriveActivity($config['meta_file'], 'modified', $path, "Shared with {$targetEmail} ({$perm})");
+      jsonResponse(['success' => true, 'recipient' => $targetUser['artist'] ?: $targetEmail]);
+    }
+
+    // 5. Revoke User Share
+    if ($action === 'unshare_user') {
+      $shareId = (int)($_POST['share_id'] ?? 0);
+      $stmt = $db->prepare("DELETE FROM drive_shares WHERE id = ? AND owner_id = ?");
+      $stmt->execute([$shareId, $user_id]);
+      jsonResponse(['success' => true]);
+    }
+
+    // 5b. Update Shared User Permission ('read' <-> 'write')
+    if ($action === 'update_share_permission') {
+      $shareId = (int)($_POST['share_id'] ?? 0);
+      $perm = ($_POST['permission'] ?? 'read') === 'write' ? 'write' : 'read';
+      $stmt = $db->prepare("UPDATE drive_shares SET permission = ? WHERE id = ? AND owner_id = ?");
+      $stmt->execute([$perm, $shareId, $user_id]);
+      logDriveActivity($config['meta_file'], 'modified', '', "Updated share permission to {$perm}");
+      jsonResponse(['success' => true, 'permission' => $perm]);
+    }
+
+    // 6. Get Item Permissions State
+    if ($action === 'get_item_permissions') {
+      $path = trim($_GET['path'] ?? '');
+      try {
+        $pubStmt = $db->prepare("SELECT COUNT(*) FROM drive_shares WHERE owner_id = ? AND path = ? AND is_public = 1");
+        $pubStmt->execute([$user_id, $path]);
+        $isPublic = (int)$pubStmt->fetchColumn() > 0;
+
+        $usersStmt = $db->prepare("
+          SELECT s.id, s.target_email, s.permission, u.artist as target_artist 
+          FROM drive_shares s
+          LEFT JOIN users u ON s.target_user_id = u.id
+          WHERE s.owner_id = ? AND s.path = ? AND s.is_public = 0
+        ");
+        $usersStmt->execute([$user_id, $path]);
+        $sharedUsers = $usersStmt->fetchAll() ?: [];
+
+        jsonResponse([
+          'is_public'    => $isPublic,
+          'shared_users' => $sharedUsers
+        ]);
+      } catch (Exception $e) {
+        jsonResponse([
+          'is_public'    => false,
+          'shared_users' => [],
+          'error'        => $e->getMessage()
+        ], 500);
+      }
+    }
+
     if ($action === 'list') {
       $dir = $_GET['dir'] ?? '';
-      $fullPath = safePath($config['root_dir'], $dir);
+      $reqSection = $_GET['section'] ?? '';
+      $cleanDir = trim(str_replace(['\\', '..'], ['/', ''], $dir), '/');
+      $activeRootDir = $config['root_dir'];
+      $publicOwnerId = null;
+      $publicOwnerArtist = null;
+      $itemPermission = 'write';
+      $shareRow = null;
+
+      // Independent resolution: strictly query public shares if requested from Public section
+      if ($cleanDir !== '') {
+        if ($reqSection === 'public' || empty($_SESSION['user_id'])) {
+          $shareStmt = $db->prepare("
+            SELECT s.owner_id, s.path, s.permission, s.is_public, u.artist as owner_artist 
+            FROM drive_shares s
+            JOIN users u ON s.owner_id = u.id
+            WHERE (? = s.path OR ? LIKE (s.path || '/%'))
+              AND s.is_public = 1
+            ORDER BY LENGTH(s.path) DESC
+            LIMIT 1
+          ");
+          $shareStmt->execute([$cleanDir, $cleanDir]);
+        } else {
+          $shareStmt = $db->prepare("
+            SELECT s.owner_id, s.path, s.permission, s.is_public, u.artist as owner_artist 
+            FROM drive_shares s
+            JOIN users u ON s.owner_id = u.id
+            WHERE (? = s.path OR ? LIKE (s.path || '/%'))
+              AND (s.is_public = 1 OR s.target_user_id = ? OR s.target_email = ?)
+            ORDER BY (CASE WHEN s.permission = 'write' THEN 0 ELSE 1 END) ASC, (CASE WHEN s.is_public = 0 THEN 0 ELSE 1 END) ASC, LENGTH(s.path) DESC
+            LIMIT 1
+          ");
+          $shareStmt->execute([$cleanDir, $cleanDir, $user_id, $current_user['email'] ?? '']);
+        }
+        $shareRow = $shareStmt->fetch();
+
+        if ($shareRow) {
+          if ($shareRow['owner_id'] != $user_id) {
+            $publicOwnerId = (int)$shareRow['owner_id'];
+            $publicOwnerArtist = $shareRow['owner_artist'];
+            $itemPermission = $shareRow['permission'] ?? 'read';
+            $activeRootDir = $users_drive_base . '/user_' . $publicOwnerId . '_folder';
+          } else {
+            $itemPermission = 'write';
+          }
+        }
+      }
+
+      $fullPath = safePath($activeRootDir, $cleanDir);
       if (!$fullPath || !is_dir($fullPath)) jsonResponse(['error' => 'Directory not found'], 404);
 
-      $relDir = ltrim(str_replace(['\\', '//'], '/', substr($fullPath, strlen(realpath($config['root_dir'])))), '/');
+      $relDir = ltrim(str_replace(['\\', '//'], '/', substr($fullPath, strlen(realpath($activeRootDir)))), '/');
       $scanned = @scandir($fullPath) ?: [];
       $folders = [];
       $files = [];
@@ -2223,11 +2562,14 @@ HTACCESS;
             $validItems++;
           }
           $folders[] = [
-            'name'        => $item,
-            'path'        => $itemRel,
-            'mtime'       => $mtime,
-            'items_count' => $validItems,
-            'thumb_image' => getFolderPreviewImage($itemPath, $itemRel, $config),
+            'name'         => $item,
+            'path'         => $itemRel,
+            'mtime'        => $mtime,
+            'items_count'  => $validItems,
+            'thumb_image'  => getFolderPreviewImage($itemPath, $itemRel, $config),
+            'owner_id'     => $publicOwnerId,
+            'owner_artist' => $publicOwnerArtist,
+            'permission'   => $itemPermission
           ];
         } else {
           $size = @filesize($itemPath);
@@ -2236,15 +2578,18 @@ HTACCESS;
           $type = getFileType($ext, $config);
 
           $files[] = [
-            'name'     => $item,
-            'path'     => $itemRel,
-            'size'     => $size,
-            'size_fmt' => formatBytes($size),
-            'mtime'    => $mtime,
-            'ext'      => $ext,
-            'type'     => $type,
-            'width'    => 0,
-            'height'   => 0,
+            'name'         => $item,
+            'path'         => $itemRel,
+            'size'         => $size,
+            'size_fmt'     => formatBytes($size),
+            'mtime'        => $mtime,
+            'ext'          => $ext,
+            'type'         => $type,
+            'width'        => 0,
+            'height'       => 0,
+            'owner_id'     => $publicOwnerId,
+            'owner_artist' => $publicOwnerArtist,
+            'permission'   => $itemPermission
           ];
         }
       }
@@ -2254,21 +2599,25 @@ HTACCESS;
 
       $usedStorage = getUserStorageUsage($config);
       jsonResponse([
-        'path'       => $relDir,
-        'folders'    => $folders,
-        'files'      => $files,
-        'stats'      => [
+        'path'         => $relDir,
+        'folders'      => $folders,
+        'files'        => $files,
+        'stats'        => [
           'folders'    => count($folders),
           'files'      => count($files),
           'total_size' => formatBytes($totalSize),
         ],
-        'storage'    => [
+        'storage'      => [
           'used_bytes'  => $usedStorage,
           'total_bytes' => $config['max_storage_size'],
           'used_fmt'    => formatBytes($usedStorage),
           'total_fmt'   => formatBytes($config['max_storage_size']),
           'pct'         => min(100, round(($usedStorage / $config['max_storage_size']) * 100, 1))
-        ]
+        ],
+        'owner_id'     => $publicOwnerId,
+        'owner_artist' => $publicOwnerArtist,
+        'permission'   => $itemPermission,
+        'share_type'   => ($reqSection === 'public' || !empty($shareRow['is_public'])) ? 'public' : (($publicOwnerId && $publicOwnerId != $user_id) ? 'shared' : 'home')
       ]);
     }
 
@@ -2285,6 +2634,7 @@ HTACCESS;
 
     if ($action === 'search') {
       $dir = $_GET['dir'] ?? '';
+      $cleanDir = trim(str_replace(['\\', '..'], ['/', ''], $dir), '/');
       $query = trim($_GET['q'] ?? '');
       $extFilter = strtolower(trim($_GET['ext'] ?? ''));
       $typeFilter = strtolower(trim($_GET['type'] ?? ''));
@@ -2292,9 +2642,165 @@ HTACCESS;
       $dateTo = !empty($_GET['date_to']) ? strtotime($_GET['date_to'] . ' 23:59:59') : 0;
       $sizeMin = (isset($_GET['size_min']) && $_GET['size_min'] !== '') ? floatval($_GET['size_min']) : -1;
       $sizeMax = (isset($_GET['size_max']) && $_GET['size_max'] !== '') ? floatval($_GET['size_max']) : -1;
-
-      $fullPath = safePath($config['root_dir'], $dir);
+      $allowedExts = array_filter(array_map('trim', explode(',', str_replace('.', '', $extFilter))));
       $hasAdv = ($extFilter !== '' || $typeFilter !== '' || $dateFrom > 0 || $dateTo > 0 || $sizeMin >= 0 || $sizeMax >= 0);
+
+      // Search across all Public Shares if guest or searching root Public directory
+      if ($cleanDir === '' && empty($_SESSION['user_id'])) {
+        $stmt = $db->prepare("
+          SELECT s.*, u.artist as owner_artist 
+          FROM drive_shares s
+          JOIN users u ON s.owner_id = u.id
+          WHERE s.is_public = 1
+          ORDER BY s.created_at DESC
+        ");
+        $stmt->execute();
+        $publicShares = $stmt->fetchAll();
+
+        $foundFolders = [];
+        $foundFiles = [];
+        $count = 0;
+        $maxResults = 300;
+
+        foreach ($publicShares as $s) {
+          if ($count >= $maxResults) break;
+          $ownerRoot = $users_drive_base . '/user_' . $s['owner_id'] . '_folder';
+          $targetPath = safePath($ownerRoot, $s['path']);
+          if (!$targetPath || !file_exists($targetPath)) continue;
+
+          if (is_file($targetPath)) {
+            $name = basename($targetPath);
+            if ($query === '' || stripos($name, $query) !== false) {
+              $size = (float)@filesize($targetPath);
+              $ext = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
+              $type = getFileType($ext, $config);
+
+              if (!empty($allowedExts) && !in_array($ext, $allowedExts)) continue;
+              if ($typeFilter !== '' && $typeFilter !== 'all' && $type !== $typeFilter) continue;
+              if ($dateFrom > 0 && @filemtime($targetPath) < $dateFrom) continue;
+              if ($dateTo > 0 && @filemtime($targetPath) > $dateTo) continue;
+              if ($sizeMin >= 0 && $size < $sizeMin) continue;
+              if ($sizeMax >= 0 && $size > $sizeMax) continue;
+
+              $foundFiles[] = [
+                'name'         => $name,
+                'path'         => $s['path'],
+                'size'         => $size,
+                'size_fmt'     => formatBytes($size),
+                'mtime'        => @filemtime($targetPath),
+                'ext'          => $ext,
+                'type'         => $type,
+                'owner_id'     => (int)$s['owner_id'],
+                'owner_artist' => $s['owner_artist'],
+                'is_public'    => 1
+              ];
+              $count++;
+            }
+          } elseif (is_dir($targetPath)) {
+            $folderName = basename($targetPath);
+            if ($query === '' || stripos($folderName, $query) !== false) {
+              if (empty($allowedExts) && ($typeFilter === '' || $typeFilter === 'all')) {
+                $foundFolders[] = [
+                  'name'         => $folderName,
+                  'path'         => $s['path'],
+                  'mtime'        => @filemtime($targetPath),
+                  'items_count'  => count(array_diff(@scandir($targetPath) ?: [], ['.', '..'])),
+                  'owner_id'     => (int)$s['owner_id'],
+                  'owner_artist' => $s['owner_artist'],
+                  'is_public'    => 1
+                ];
+                $count++;
+              }
+            }
+
+            // Recursive sub-search within public folder
+            $rootLen = strlen(realpath($ownerRoot));
+            $dirIterator = new RecursiveDirectoryIterator($targetPath, FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS);
+            $filterIterator = new RecursiveCallbackFilterIterator($dirIterator, function ($curr) {
+              return $curr->getFilename()[0] !== '.';
+            });
+            $iterator = new RecursiveIteratorIterator($filterIterator, RecursiveIteratorIterator::SELF_FIRST);
+            $iterator->setMaxDepth(6);
+
+            foreach ($iterator as $item) {
+              if ($count >= $maxResults) break;
+              $name = $item->getFilename();
+              if ($query !== '' && stripos($name, $query) === false) continue;
+
+              $itemPath = $item->getPathname();
+              $rel = ltrim(str_replace(['\\', '//'], '/', substr($itemPath, $rootLen)), '/');
+              $mtime = $item->getMTime();
+
+              if ($item->isDir()) {
+                if (!empty($allowedExts) || ($typeFilter !== '' && $typeFilter !== 'all')) continue;
+                $foundFolders[] = [
+                  'name'         => $name,
+                  'path'         => $rel,
+                  'mtime'        => $mtime,
+                  'items_count'  => 0,
+                  'owner_id'     => (int)$s['owner_id'],
+                  'owner_artist' => $s['owner_artist'],
+                  'is_public'    => 1
+                ];
+                $count++;
+              } else {
+                $size = (float)$item->getSize();
+                $ext = strtolower($item->getExtension());
+                $type = getFileType($ext, $config);
+
+                if (!empty($allowedExts) && !in_array($ext, $allowedExts)) continue;
+                if ($typeFilter !== '' && $typeFilter !== 'all' && $type !== $typeFilter) continue;
+                if ($dateFrom > 0 && $mtime < $dateFrom) continue;
+                if ($dateTo > 0 && $mtime > $dateTo) continue;
+                if ($sizeMin >= 0 && $size < $sizeMin) continue;
+                if ($sizeMax >= 0 && $size > $sizeMax) continue;
+
+                $foundFiles[] = [
+                  'name'         => $name,
+                  'path'         => $rel,
+                  'size'         => $size,
+                  'size_fmt'     => formatBytes($size),
+                  'mtime'        => $mtime,
+                  'ext'          => $ext,
+                  'type'         => $type,
+                  'owner_id'     => (int)$s['owner_id'],
+                  'owner_artist' => $s['owner_artist'],
+                  'is_public'    => 1
+                ];
+                $count++;
+              }
+            }
+          }
+        }
+
+        usort($foundFolders, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+        usort($foundFiles, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
+
+        jsonResponse([
+          'folders' => $foundFolders,
+          'files'   => $foundFiles,
+          'query'   => $query,
+          'count'   => $count
+        ]);
+      }
+
+      $activeRootDir = $config['root_dir'];
+      if ($cleanDir !== '') {
+        $shareStmt = $db->prepare("
+          SELECT s.owner_id, s.path 
+          FROM drive_shares s
+          WHERE (? = s.path OR ? LIKE (s.path || '/%'))
+            AND (s.is_public = 1 OR s.target_user_id = ? OR s.target_email = ?)
+          LIMIT 1
+        ");
+        $shareStmt->execute([$cleanDir, $cleanDir, $user_id, $current_user['email'] ?? '']);
+        $foundOwnerId = (int)$shareStmt->fetchColumn();
+        if ($foundOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $foundOwnerId . '_folder';
+        }
+      }
+
+      $fullPath = safePath($activeRootDir, $cleanDir);
 
       if (!$fullPath || !is_dir($fullPath) || ($query === '' && !$hasAdv)) {
         jsonResponse(['folders' => [], 'files' => [], 'query' => $query, 'count' => 0]);
@@ -2455,6 +2961,9 @@ HTACCESS;
     }
 
     if ($action === 'tree') {
+      if (empty($_SESSION['user_id'])) {
+        jsonResponse([]);
+      }
       if (!function_exists('user_buildTree')) {
         function user_buildTree($base, $currentRel = '', $depth = 0) {
           if ($depth > 3) return [];
@@ -2483,7 +2992,12 @@ HTACCESS;
 
     if ($action === 'thumb') {
       $file = $_GET['f'] ?? '';
-      $fullPath = safePath($config['root_dir'], $file);
+      $reqOwnerId = isset($_GET['owner_id']) ? (int)$_GET['owner_id'] : $user_id;
+      if ($reqOwnerId !== $user_id) {
+        $fullPath = resolveDriveCrossUserPath($users_drive_base, $db, $file, $reqOwnerId, $user_id, $current_user['email'] ?? '');
+      } else {
+        $fullPath = safePath($config['root_dir'], $file);
+      }
       if (!$fullPath || !is_file($fullPath)) {
         header('HTTP/1.0 404 Not Found');
         exit;
@@ -2550,7 +3064,12 @@ HTACCESS;
 
     if ($action === 'raw' || $action === 'file') {
       $file = $_GET['f'] ?? '';
-      $fullPath = safePath($config['root_dir'], $file);
+      $reqOwnerId = isset($_GET['owner_id']) ? (int)$_GET['owner_id'] : $user_id;
+      if ($reqOwnerId !== $user_id) {
+        $fullPath = resolveDriveCrossUserPath($users_drive_base, $db, $file, $reqOwnerId, $user_id, $current_user['email'] ?? '');
+      } else {
+        $fullPath = safePath($config['root_dir'], $file);
+      }
       if (!$fullPath || !is_file($fullPath)) {
         header('HTTP/1.0 404 Not Found');
         exit;
@@ -2615,7 +3134,12 @@ HTACCESS;
 
     if ($action === 'download') {
       $file = $_GET['f'] ?? '';
-      $fullPath = safePath($config['root_dir'], $file);
+      $reqOwnerId = isset($_GET['owner_id']) ? (int)$_GET['owner_id'] : $user_id;
+      if ($reqOwnerId !== $user_id) {
+        $fullPath = resolveDriveCrossUserPath($users_drive_base, $db, $file, $reqOwnerId, $user_id, $current_user['email'] ?? '');
+      } else {
+        $fullPath = safePath($config['root_dir'], $file);
+      }
       if (!$fullPath || !is_file($fullPath)) jsonResponse(['error' => 'File not found'], 404);
 
       $fn = basename($fullPath);
@@ -2721,11 +3245,27 @@ HTACCESS;
 
     if ($action === 'upload_chunk') {
       if (!$config['allow_upload']) jsonResponse(['error' => 'Upload disabled'], 403);
-      $currentUsage = getUserStorageUsage($config);
-      if ($currentUsage >= $config['max_storage_size']) {
-        jsonResponse(['error' => 'Storage quota exceeded (2 GB maximum limit reached). Please delete files to free up space.'], 400);
+      $reqUploadDir = $_POST['dir'] ?? '';
+      $cleanUploadRel = trim(str_replace(['\\', '..'], ['/', ''], $reqUploadDir), '/');
+      $targetDir = safePath($config['root_dir'], $reqUploadDir);
+
+      // Support uploading into write-shared folders owned by other users
+      if ((!$targetDir || !is_dir($targetDir)) && $cleanUploadRel !== '') {
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id, path FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanUploadRel, $cleanUploadRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $ownerRoot = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+          $targetDir = safePath($ownerRoot, $cleanUploadRel);
+        }
       }
-      $targetDir = safePath($config['root_dir'], $_POST['dir'] ?? '');
+
       if (!$targetDir || !is_dir($targetDir) || !is_writable($targetDir)) jsonResponse(['error' => 'Invalid upload directory'], 400);
 
       $uploadId = preg_replace('/[^\w\-]/', '', $_POST['upload_id'] ?? '');
@@ -2817,12 +3357,32 @@ HTACCESS;
     }
 
     if ($action === 'create') {
-      $parent = safePath($config['root_dir'], $_POST['dir'] ?? '');
+      $reqDir = $_POST['dir'] ?? '';
+      $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $reqDir), '/');
+      $activeRootDir = $config['root_dir'];
+
+      // Allow creating files/folders inside writable shared folders
+      if ($cleanRel !== '') {
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+        }
+      }
+
+      $parent = safePath($activeRootDir, $cleanRel);
       $name = trim($_POST['name'] ?? '');
       $type = $_POST['type'] ?? 'folder';
       if (!$parent || !is_dir($parent) || !$name) jsonResponse(['error' => 'Invalid parameters'], 400);
 
-      $name = preg_replace('/[^\w\s\d\.\-_~()[\]]/', '', $name);
+      $name = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $name);
       $dest = $parent . DIRECTORY_SEPARATOR . $name;
       if (file_exists($dest)) jsonResponse(['error' => 'Item already exists'], 400);
 
@@ -2834,13 +3394,204 @@ HTACCESS;
       jsonResponse(['success' => $ok]);
     }
 
+    if ($action === 'read_text') {
+      $file = $_GET['f'] ?? '';
+      $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $file), '/');
+      $activeRootDir = $config['root_dir'];
+
+      if ($cleanRel !== '') {
+        $shareStmt = $db->prepare("
+          SELECT owner_id FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND (is_public = 1 OR target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $shareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+        $foundOwnerId = (int)$shareStmt->fetchColumn();
+        if ($foundOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $foundOwnerId . '_folder';
+        }
+      }
+
+      $fullPath = findRealFile($activeRootDir, $cleanRel);
+      if (!$fullPath || !is_file($fullPath)) {
+        jsonResponse(['error' => 'File not found'], 404);
+      }
+      jsonResponse([
+        'content' => @file_get_contents($fullPath),
+        'real_file' => ltrim(str_replace(['\\', '//'], '/', substr(realpath($fullPath), strlen(realpath($activeRootDir)))), '/')
+      ]);
+    }
+
+    if ($action === 'save_text') {
+      if (!$config['allow_edit']) jsonResponse(['error' => 'Edit disabled'], 403);
+      $file = $_POST['f'] ?? '';
+      $content = $_POST['content'] ?? '';
+      $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $file), '/');
+      $activeRootDir = $config['root_dir'];
+
+      if ($cleanRel !== '') {
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+        }
+      }
+
+      $fullPath = findRealFile($activeRootDir, $cleanRel);
+      if (!$fullPath) {
+        $fullPath = safePath($activeRootDir, $cleanRel);
+        $parentDir = dirname($fullPath);
+        if (!is_dir($parentDir)) @mkdir($parentDir, 0777, true);
+      }
+
+      backupFileVersion($fullPath, $config);
+      $saved = @file_put_contents($fullPath, $content) !== false;
+      if ($saved) {
+        logDriveActivity($config['meta_file'], 'modified', $file, 'File edited and saved');
+      }
+      jsonResponse(['success' => $saved]);
+    }
+
+    if ($action === 'details') {
+      $items = $_POST['items'] ?? ($_GET['items'] ?? null);
+      $singleFile = $_GET['f'] ?? ($_POST['f'] ?? null);
+      $cleanSingleRel = trim(str_replace(['\\', '..'], ['/', ''], $singleFile ?? ''), '/');
+      $activeRootDir = $config['root_dir'];
+
+      if ($cleanSingleRel !== '') {
+        $shareStmt = $db->prepare("
+          SELECT owner_id FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND (is_public = 1 OR target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $shareStmt->execute([$cleanSingleRel, $cleanSingleRel, $user_id, $current_user['email'] ?? '']);
+        $foundOwnerId = (int)$shareStmt->fetchColumn();
+        if ($foundOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $foundOwnerId . '_folder';
+        }
+      }
+
+      if ($items && is_array($items)) {
+        $totalBytes = 0;
+        $fileCount = 0;
+        $folderCount = 0;
+        $types = [];
+
+        foreach ($items as $rel) {
+          $full = safePath($activeRootDir, $rel);
+          if (!$full || !file_exists($full)) continue;
+          if (is_dir($full)) {
+            $st = getFolderStats($full, $config['cache_dir']);
+            $folderCount += 1 + $st['folders'];
+            $fileCount += $st['files'];
+            $totalBytes += $st['size'];
+          } else {
+            $fileCount++;
+            $sz = filesize($full);
+            $totalBytes += $sz;
+            $ext = strtolower(pathinfo($full, PATHINFO_EXTENSION)) ?: 'other';
+            $types[$ext] = ($types[$ext] ?? 0) + 1;
+          }
+        }
+
+        jsonResponse([
+          'type'    => 'batch',
+          'title'   => count($items) . ' Selected Items',
+          'general' => [
+            'Total Elements' => count($items),
+            'Total Files'    => $fileCount,
+            'Total Folders'  => $folderCount,
+            'Combined Size'  => formatBytes($totalBytes),
+            'File Breakdown' => empty($types) ? 'None' : implode(', ', array_map(fn($k, $v) => "$k ($v)", array_keys($types), $types))
+          ]
+        ]);
+      }
+
+      $fullPath = safePath($activeRootDir, $cleanSingleRel);
+      if (!$fullPath || !file_exists($fullPath)) jsonResponse(['error' => 'Target not found'], 404);
+
+      $isDir = is_dir($fullPath);
+      $relPath = ltrim(str_replace(['\\', '//'], '/', substr($fullPath, strlen(realpath($activeRootDir)))), '/');
+
+      if ($isDir) {
+        $stats = getFolderStats($fullPath, $config['cache_dir']);
+        jsonResponse([
+          'type'    => 'folder',
+          'title'   => basename($fullPath) ?: 'Root Directory',
+          'general' => [
+            'Folder Name'   => basename($fullPath) ?: 'Root',
+            'Relative Path' => $relPath ?: '/',
+            'Total Files'   => $stats['files'],
+            'Subfolders'    => $stats['folders'],
+            'Total Size'    => formatBytes($stats['size']),
+            'Last Modified' => date('Y-m-d H:i:s', filemtime($fullPath)),
+            'Permissions'   => substr(sprintf('%o', fileperms($fullPath)), -4)
+          ]
+        ]);
+      }
+
+      $meta = getExifMetadata($fullPath);
+      $media = getMediaMetadata($fullPath);
+      $meta['type'] = 'file';
+      $meta['title'] = basename($fullPath);
+      $meta['media'] = [
+        'tags'      => $media['tags'] ?? [],
+        'cover_art' => $media['cover_art'] ?? null
+      ];
+      $meta['general'] = [
+        'File Name'     => basename($fullPath),
+        'Relative Path' => $relPath,
+        'File Size'     => formatBytes(filesize($fullPath)),
+        'Last Modified' => date('Y-m-d H:i:s', filemtime($fullPath)),
+        'MIME Type'     => mime_content_type($fullPath) ?: 'application/octet-stream',
+        'Permissions'   => substr(sprintf('%o', fileperms($fullPath)), -4)
+      ];
+
+      $img = @getimagesize($fullPath);
+      if ($img) {
+        $meta['general']['Dimensions'] = "{$img[0]} × {$img[1]} px";
+      }
+      jsonResponse($meta);
+    }
+
     if ($action === 'rename') {
       if (!$config['allow_rename']) jsonResponse(['error' => 'Rename disabled'], 403);
-      $item = safePath($config['root_dir'], $_POST['path'] ?? '');
-      $newName = trim($_POST['new_name'] ?? '');
-      if (!$item || !file_exists($item) || !$newName) jsonResponse(['error' => 'Invalid parameters'], 400);
+      $reqPath = trim($_POST['path'] ?? '');
+      $item = safePath($config['root_dir'], $reqPath);
 
-      $newName = preg_replace('/[^\w\s\d\.\-_~()[\]]/u', '', $newName);
+      // Check writable share permission if item belongs to another user
+      if ((!$item || !file_exists($item)) && $reqPath !== '') {
+        $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $reqPath), '/');
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id, path FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $ownerRoot = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+          $item = safePath($ownerRoot, $cleanRel);
+        }
+      }
+
+      $newName = trim($_POST['new_name'] ?? '');
+      if (!$item || !file_exists($item) || $newName === '') jsonResponse(['error' => 'Invalid parameters'], 400);
+
+      $newName = trim(preg_replace('/[\x00-\x1f\x7f\/:*?"<>|\\\\]/u', '', $newName));
+      if ($newName === '') jsonResponse(['error' => 'Invalid new name'], 400);
+
       $dest = dirname($item) . DIRECTORY_SEPARATOR . $newName;
       if (file_exists($dest)) jsonResponse(['error' => 'Destination already exists'], 400);
 
@@ -2848,7 +3599,7 @@ HTACCESS;
       if ($renamed) {
         logDriveActivity($config['meta_file'], 'renamed', $newName, 'Renamed from ' . basename($item));
       }
-      jsonResponse(['success' => $renamed]);
+      jsonResponse(['success' => (bool)$renamed]);
     }
 
     if ($action === 'batch_rename') {
@@ -2946,9 +3697,28 @@ HTACCESS;
       if (!$config['allow_edit']) jsonResponse(['error' => 'Editing disabled'], 403);
       $file = $_POST['f'] ?? '';
       $dataUrl = $_POST['image_data'] ?? '';
-      $saveMode = $_POST['save_mode'] ?? 'overwrite'; // 'overwrite' or 'copy'
-      $fullPath = findRealFile($config['root_dir'], $file);
-      if (!$fullPath) $fullPath = safePath($config['root_dir'], $file);
+      $saveMode = $_POST['save_mode'] ?? 'overwrite';
+      $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $file), '/');
+      $activeRootDir = $config['root_dir'];
+
+      // Support saving edited copies or overwriting inside writable shared folders
+      if ($cleanRel !== '') {
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id, path FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $activeRootDir = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+        }
+      }
+
+      $fullPath = findRealFile($activeRootDir, $cleanRel);
+      if (!$fullPath) $fullPath = safePath($activeRootDir, $cleanRel);
       if (!$fullPath || !is_file($fullPath)) jsonResponse(['error' => 'Image file not found'], 404);
 
       if (preg_match('/^data:image\/(png|jpeg|webp);base64,(.+)$/i', $dataUrl, $matches)) {
@@ -2998,16 +3768,38 @@ HTACCESS;
 
       foreach ($items as $rel) {
         $full = safePath($config['root_dir'], $rel);
+        $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
+        $itemOwnerId = 0;
+
+        // Allow trashing inside writable shared folders and track the true owner
+        if ((!$full || !file_exists($full)) && $cleanRel !== '') {
+          $writeShareStmt = $db->prepare("
+            SELECT owner_id, path FROM drive_shares 
+            WHERE (? = path OR ? LIKE (path || '/%'))
+              AND permission = 'write'
+              AND (target_user_id = ? OR target_email = ?)
+            LIMIT 1
+          ");
+          $writeShareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+          $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+          if ($writableOwnerId > 0) {
+            $itemOwnerId = $writableOwnerId;
+            $ownerRoot = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+            $full = safePath($ownerRoot, $cleanRel);
+          }
+        }
+
         if ($full && $full !== realpath($config['root_dir']) && file_exists($full)) {
           $trashId = uniqid('trash_') . '_' . basename($full);
           $dest = $config['trash_dir'] . DIRECTORY_SEPARATOR . $trashId;
           if (@rename($full, $dest)) {
             $meta['trash'][$trashId] = [
-              'trash_name'   => $trashId,
-              'original_rel' => $rel,
-              'original_name'=> basename($full),
-              'trashed_at'   => time(),
-              'is_dir'       => is_dir($dest)
+              'trash_name'    => $trashId,
+              'original_rel'  => $rel,
+              'original_name' => basename($full),
+              'trashed_at'    => time(),
+              'is_dir'        => is_dir($dest),
+              'owner_id'      => $itemOwnerId
             ];
             $trashed++;
           }
@@ -3033,7 +3825,13 @@ HTACCESS;
 
       $info = $meta['trash'][$trashId];
       $source = $config['trash_dir'] . DIRECTORY_SEPARATOR . $info['trash_name'];
-      $target = safePath($config['root_dir'], $info['original_rel']);
+
+      // Restore back into the shared folder if it belonged to another user
+      $restoreBase = (!empty($info['owner_id']) && $info['owner_id'] != $user_id)
+        ? ($users_drive_base . '/user_' . (int)$info['owner_id'] . '_folder')
+        : $config['root_dir'];
+
+      $target = safePath($restoreBase, $info['original_rel']);
 
       if (!file_exists($source)) {
         unset($meta['trash'][$trashId]);
@@ -3300,14 +4098,60 @@ HTACCESS;
     }
 
     if ($action === 'clipboard_paste') {
-      $targetDir = safePath($config['root_dir'], $_POST['target_dir'] ?? '');
+      $reqTargetDir = $_POST['target_dir'] ?? '';
+      $cleanTargetRel = trim(str_replace(['\\', '..'], ['/', ''], $reqTargetDir), '/');
+      $targetDir = safePath($config['root_dir'], $reqTargetDir);
+
+      // Support pasting into writable shared folders owned by other users
+      if ((!$targetDir || !is_dir($targetDir)) && $cleanTargetRel !== '') {
+        $writeShareStmt = $db->prepare("
+          SELECT owner_id, path FROM drive_shares 
+          WHERE (? = path OR ? LIKE (path || '/%'))
+            AND permission = 'write'
+            AND (target_user_id = ? OR target_email = ?)
+          LIMIT 1
+        ");
+        $writeShareStmt->execute([$cleanTargetRel, $cleanTargetRel, $user_id, $current_user['email'] ?? '']);
+        $writableOwnerId = (int)$writeShareStmt->fetchColumn();
+        if ($writableOwnerId > 0) {
+          $ownerRoot = $users_drive_base . '/user_' . $writableOwnerId . '_folder';
+          $targetDir = safePath($ownerRoot, $cleanTargetRel);
+        }
+      }
+
       $op = $_POST['operation'] ?? 'copy'; // 'copy' or 'cut'
       $items = $_POST['items'] ?? [];
       if (!$targetDir || !is_dir($targetDir) || !is_array($items)) jsonResponse(['error' => 'Invalid parameters'], 400);
 
       $processed = 0;
       foreach ($items as $rel) {
-        $src = safePath($config['root_dir'], $rel);
+        $cleanRel = trim(str_replace(['\\', '..'], ['/', ''], $rel), '/');
+        $src = safePath($config['root_dir'], $cleanRel);
+        $isCrossUser = false;
+
+        // If source item is not in current user's root, resolve from other owners via shared or public shares
+        if ((!$src || !file_exists($src)) && $cleanRel !== '') {
+          $shareStmt = $db->prepare("
+            SELECT owner_id, path, permission FROM drive_shares 
+            WHERE (? = path OR ? LIKE (path || '/%'))
+              AND (is_public = 1 OR target_user_id = ? OR target_email = ?)
+            LIMIT 1
+          ");
+          $shareStmt->execute([$cleanRel, $cleanRel, $user_id, $current_user['email'] ?? '']);
+          $shareRow = $shareStmt->fetch();
+          if ($shareRow) {
+            $sourceOwnerId = (int)$shareRow['owner_id'];
+            $ownerRoot = $users_drive_base . '/user_' . $sourceOwnerId . '_folder';
+            $src = safePath($ownerRoot, $cleanRel);
+            $isCrossUser = true;
+
+            // Prevent cutting (moving) other users' original files unless write permission is granted
+            if ($op === 'cut' && ($shareRow['permission'] ?? 'read') !== 'write') {
+              $op = 'copy';
+            }
+          }
+        }
+
         if (!$src || !file_exists($src)) continue;
         $name = basename($src);
         $dest = $targetDir . DIRECTORY_SEPARATOR . $name;
@@ -3322,11 +4166,11 @@ HTACCESS;
           }
         }
 
-        if ($op === 'cut') {
+        if ($op === 'cut' && !$isCrossUser) {
           if (@rename($src, $dest)) $processed++;
         } else {
           if (is_dir($src)) {
-            // Recursive copy
+            // Recursive folder copy
             $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
             @mkdir($dest, 0777, true);
             foreach ($it as $item) {
@@ -6034,7 +6878,6 @@ HTACCESS;
         .lightbox-media.reconstruct.ready {
           opacity: 1 !important;
           filter: none !important;
-          transform: translate3d(0, 0, 0) scale(1) !important;
         }
         .lightbox-audio-card {
           background: rgba(28, 25, 34, 0.85);
@@ -7570,22 +8413,141 @@ HTACCESS;
           display: flex;
           align-items: center;
           justify-content: center;
-          height: 100dvh;
           width: 100%;
-          padding: 1rem;
+          min-height: auto;
+          padding: 0;
         }
         .login-card {
-          background: var(--md-sys-color-surface-container);
-          border: 1px solid var(--md-sys-color-outline-variant);
-          border-radius: 28px;
-          padding: 2.2rem;
+          background: transparent;
+          border: none;
+          border-radius: 0;
+          padding: 0.5rem;
           width: 100%;
           max-width: 380px;
           display: flex;
           flex-direction: column;
-          gap: 1.2rem;
-          box-shadow: var(--md-elevation-2);
           text-align: center;
+          box-shadow: none;
+        }
+        @media (max-width: 768px) {
+          .modal-box#modal-login {
+            border: none !important;
+            box-shadow: none !important;
+            background: #080808 !important;
+          }
+          .login-container,
+          .login-card {
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            padding: 0.5rem 0 !important;
+          }
+        }
+    
+        /* Item Owner Indicator Pill */
+        .file-owner-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          background: rgba(14, 14, 14, 0.88);
+          border: 1px solid rgba(255, 0, 0, 0.45);
+          color: #ff5252;
+          border-radius: 6px;
+          padding: 1px 6px;
+          font-size: 0.68rem;
+          font-weight: 600;
+          width: fit-content;
+          max-width: 100%;
+          margin-top: 3px;
+          backdrop-filter: blur(4px);
+          -webkit-backdrop-filter: blur(4px);
+        }
+    
+        /* Share Modal Role Dropdown Centering */
+        #perm-user-role {
+          text-align: center;
+          text-align-last: center;
+          -moz-text-align-last: center;
+        }
+        #perm-user-role option {
+          text-align: left;
+          background-color: #181818;
+          color: #ffffff;
+        }
+    
+        /* Share Modal User Search List Container */
+        .perm-search-container {
+          background: #141414;
+          border: 1px solid #333333;
+          border-radius: 12px;
+          max-height: 150px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          margin-top: 0.2rem;
+          margin-bottom: 0.2rem;
+        }
+        .perm-search-item {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          padding: 0.55rem 0.8rem;
+          cursor: pointer;
+          transition: background 0.15s ease;
+          border-bottom: 1px solid #222222;
+        }
+        .perm-search-item:last-child {
+          border-bottom: none;
+        }
+        .perm-search-item:hover {
+          background: rgba(255, 0, 0, 0.18);
+        }
+        .perm-search-avatar {
+          width: 30px;
+          height: 30px;
+          border-radius: 50%;
+          object-fit: cover;
+          background: #252525;
+          border: 1px solid #444444;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 0.82rem;
+          color: #ffffff;
+          flex-shrink: 0;
+        }
+        .perm-search-info {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          overflow: hidden;
+        }
+        .perm-search-name {
+          font-size: 0.84rem;
+          font-weight: 600;
+          color: #ffffff;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .perm-search-email {
+          font-size: 0.72rem;
+          color: #aaaaaa;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .file-owner-pill svg {
+          width: 11px;
+          height: 11px;
+          fill: currentColor;
+          flex-shrink: 0;
+        }
+        .file-owner-pill span {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
     
         .desktop-only { display: flex; }
@@ -7686,6 +8648,12 @@ HTACCESS;
               <div class="filter-item active" id="nav-home" onclick="app.switchDriveSection('home')">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Home</span>
               </div>
+              <div class="filter-item" id="nav-public" onclick="app.switchDriveSection('public')">
+                <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg> Public</span>
+              </div>
+              <div class="filter-item" id="nav-shared" onclick="app.switchDriveSection('shared')">
+                <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg> Shared</span>
+              </div>
               <div class="filter-item" id="nav-gallery" onclick="app.switchDriveSection('gallery')">
                 <span style="display:flex;align-items:center;gap:0.5rem;"><svg viewBox="0 0 24 24"><path d="M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zm-11-4l2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z"/></svg> Gallery</span>
               </div>
@@ -7716,19 +8684,21 @@ HTACCESS;
             </div>
           </div>
 
-          <div class="sidebar-section">
-            <div class="sidebar-title">Storage Quota (2 GB)</div>
-            <div style="background:var(--md-sys-color-surface-container-high); border:1px solid var(--md-sys-color-outline-variant); border-radius:14px; padding:0.75rem 0.85rem;">
-              <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:600; color:var(--md-sys-color-on-surface); margin-bottom:0.4rem;">
-                <span id="storage-used-txt">0 B</span>
-                <span id="storage-total-txt">2 GB</span>
+          <?php if (!empty($_SESSION['user_id'])): ?>
+            <div class="sidebar-section">
+              <div class="sidebar-title">Storage Quota (2 GB)</div>
+              <div style="background:var(--md-sys-color-surface-container-high); border:1px solid var(--md-sys-color-outline-variant); border-radius:14px; padding:0.75rem 0.85rem;">
+                <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:600; color:var(--md-sys-color-on-surface); margin-bottom:0.4rem;">
+                  <span id="storage-used-txt">0 B</span>
+                  <span id="storage-total-txt">2 GB</span>
+                </div>
+                <div style="height:6px; width:100%; background:var(--md-sys-color-surface-container-lowest); border-radius:3px; overflow:hidden; margin-bottom:0.35rem;">
+                  <div id="storage-progress-bar" style="height:100%; width:0%; background:var(--md-sys-color-primary); transition:width 0.3s ease;"></div>
+                </div>
+                <div style="font-size:0.7rem; color:var(--md-sys-color-on-surface-variant); text-align:right;" id="storage-pct-txt">0% used</div>
               </div>
-              <div style="height:6px; width:100%; background:var(--md-sys-color-surface-container-lowest); border-radius:3px; overflow:hidden; margin-bottom:0.35rem;">
-                <div id="storage-progress-bar" style="height:100%; width:0%; background:var(--md-sys-color-primary); transition:width 0.3s ease;"></div>
-              </div>
-              <div style="font-size:0.7rem; color:var(--md-sys-color-on-surface-variant); text-align:right;" id="storage-pct-txt">0% used</div>
             </div>
-          </div>
+          <?php endif; ?>
 
           <div class="sidebar-section">
             <div class="sidebar-title">Categories</div>
@@ -8020,6 +8990,12 @@ HTACCESS;
             <div class="lightbox-title" id="lb-title">image.jpg</div>
           </div>
           <div style="display:flex; gap:0.4rem; align-items:center;">
+            <button class="btn-icon" id="btn-lb-zoom-out" title="Zoom Out (-)">
+              <svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+            </button>
+            <button class="btn-icon" id="btn-lb-zoom-in" title="Zoom In (+)">
+              <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            </button>
             <button class="btn-icon" id="btn-lb-slideshow" title="Play Slideshow (15s)">
               <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </button>
@@ -8077,6 +9053,56 @@ HTACCESS;
       </div>
     
       <div class="modal-backdrop" id="modal-backdrop">
+        <!-- Sharing & Permissions Modal -->
+        <div class="modal-box" id="modal-permissions" style="display:none; max-width: 480px;">
+          <div class="modal-header">
+            <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden;">
+              <svg viewBox="0 0 24 24" style="width:20px;height:20px;color:#ff0000;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>
+              <span id="perm-modal-filename" style="font-weight:700; font-size:1rem; color:#ffffff;">Sharing &amp; Permissions</span>
+            </div>
+            <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+          </div>
+          <div class="modal-content" style="padding: 1.2rem; display:flex; flex-direction:column; gap:1.2rem;">
+            <!-- Public Access Toggle Card -->
+            <div style="background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:16px; padding:1rem;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <div style="font-weight:700; color:#fff; font-size:0.92rem; display:flex; align-items:center; gap:0.4rem;">
+                    <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:#ff0000;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+                    Public Visibility
+                  </div>
+                  <div style="font-size:0.75rem; color:var(--md-sys-color-on-surface-variant); margin-top:0.2rem;">When public, everyone on the platform can see and access this item in the Public page.</div>
+                </div>
+                <input type="checkbox" id="perm-public-toggle" style="width:20px; height:20px; accent-color:#ff0000; cursor:pointer;">
+              </div>
+            </div>
+
+            <!-- Share with Specific User (Clean In-Flow Layout) -->
+            <div style="background:var(--md-sys-color-surface-container-low); border:1px solid var(--md-sys-color-outline-variant); border-radius:16px; padding:1rem; display:flex; flex-direction:column; gap:0.6rem;">
+              <div style="font-weight:700; color:#fff; font-size:0.92rem; display:flex; align-items:center; gap:0.4rem;">
+                <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:#ff0000;"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                Share with People
+              </div>
+              <div style="display:flex; gap:0.45rem; align-items:center;">
+                <input type="email" id="perm-user-email" class="form-input" placeholder="Search artist or enter email..." style="flex:1; min-width:0;" autocomplete="off">
+                <select id="perm-user-role" class="form-input" style="width:auto; min-width:115px; height:42px; padding:0 24px 0 14px; text-align:center; text-align-last:center; -moz-text-align-last:center; background-position:right 9px center; font-weight:600; cursor:pointer;">
+                  <option value="read">Can view</option>
+                  <option value="write">Can edit</option>
+                </select>
+                <button class="btn-primary" id="perm-add-user-btn" style="height:42px; padding:0 1.1rem; font-weight:700; flex-shrink:0;">Add</button>
+              </div>
+
+              <!-- In-Flow Search Results (Expands without overlapping) -->
+              <div id="perm-user-search-results" class="perm-search-container" style="display:none;"></div>
+
+              <!-- List of Shared Users -->
+              <div id="perm-shared-users-list" style="display:flex; flex-direction:column; gap:0.4rem;"></div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn-primary modal-close" style="padding:0 1.2rem;">Done</button>
+          </div>
+        </div>
         <!-- Share Modal -->
         <div class="modal-box" id="modal-share" style="display:none; max-width: 420px;">
           <div class="modal-header">
@@ -8108,24 +9134,41 @@ HTACCESS;
           </div>
         </div>
 
-        <!-- Admin Login Modal -->
-        <div class="modal-box" id="modal-login" style="display:none;">
+        <!-- User Drive Login Modal -->
+        <div class="modal-box" id="modal-login" style="display:none; max-width: 420px;">
           <div class="modal-header">
-            <span>Login as Admin</span>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+              <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:#ff0000;"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+              <span style="font-weight:700; font-size:1.05rem; color:#fff;">Sign In</span>
+            </div>
             <button class="btn-icon modal-close"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
           </div>
-          <form id="admin-login-form">
-            <div class="modal-content">
-              <div class="form-group">
-                <label class="form-label">Password</label>
-                <input type="password" class="form-input" id="admin-login-pass" placeholder="Enter admin password" required autocomplete="current-password">
+          <div class="modal-content" style="padding: 1.25rem 1.4rem;">
+            <div class="login-container">
+              <div class="login-card">
+                <div style="display:flex; justify-content:center; margin-bottom:0.75rem;">
+                  <svg viewBox="0 0 24 24" style="width:44px;height:44px;fill:#ff0000;"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+                </div>
+                <h4 style="font-weight:700; margin-bottom:0.35rem; color:#fff;">User Drive</h4>
+                <p style="color:var(--md-sys-color-on-surface-variant); font-size:0.85rem; margin-bottom:1.25rem;">Please sign in to access personal cloud storage.</p>
+                <form id="drive-login-modal-form" onsubmit="app.handleDriveLogin(event)">
+                  <div class="form-group" style="text-align:left; margin-bottom:1rem;">
+                    <label class="form-label">EMAIL ADDRESS</label>
+                    <input type="email" id="drive-modal-email" class="form-input" required placeholder="your@email.com">
+                  </div>
+                  <div class="form-group" style="text-align:left; margin-bottom:1.25rem;">
+                    <label class="form-label">PASSWORD</label>
+                    <input type="password" id="drive-modal-pass" class="form-input" required placeholder="••••••••">
+                  </div>
+                  <button type="submit" class="btn-primary" id="drive-modal-login-btn" style="width:100%; justify-content:center; height:42px; font-weight:700;">Login</button>
+                </form>
+                <div style="margin-top:1.25rem;">
+                  <span style="font-size:0.82rem; color:var(--md-sys-color-on-surface-variant);">Don't have an account? <a href="./" style="color:#ff0000; font-weight:700; text-decoration:none;">Register to PHPMusic</a></span>
+                </div>
+                <div id="drive-modal-alert" style="display:none; margin-top:1rem; padding:0.5rem; font-size:0.8rem; font-weight:700; border-radius:8px; background:rgba(239,68,68,0.2); color:#f87171; border:1px solid #ef4444;"></div>
               </div>
             </div>
-            <div class="modal-footer">
-              <button type="button" class="btn-icon modal-close" style="width:auto; padding:0 0.8rem;">Cancel</button>
-              <button type="submit" class="btn-primary" id="admin-login-submit">Login</button>
-            </div>
-          </form>
+          </div>
         </div>
 
         <!-- Advanced Batch Rename Modal -->
@@ -9260,6 +10303,16 @@ HTACCESS;
               this.close();
             });
 
+            document.getElementById('btn-lb-zoom-in')?.addEventListener('click', (e) => {
+              e.stopPropagation();
+              this.zoomIn();
+            });
+
+            document.getElementById('btn-lb-zoom-out')?.addEventListener('click', (e) => {
+              e.stopPropagation();
+              this.zoomOut();
+            });
+
             document.getElementById('btn-lb-slideshow')?.addEventListener('click', (e) => {
               e.stopPropagation();
               this.toggleSlideshow();
@@ -9357,6 +10410,15 @@ HTACCESS;
 
               if (e.key === 'Escape') {
                 this.close();
+              } else if (e.key === '+' || e.key === '=') {
+                e.preventDefault();
+                this.zoomIn();
+              } else if (e.key === '-' || e.key === '_') {
+                e.preventDefault();
+                this.zoomOut();
+              } else if (e.key === '0') {
+                e.preventDefault();
+                this.resetTransform(true);
               } else if (e.key === ' ' && (e.target === document.body || e.target === this.el || e.target === mediaEl)) {
                 if (mediaEl) {
                   e.preventDefault();
@@ -9470,11 +10532,14 @@ HTACCESS;
             });
 
             // Mobile Touch Handling (Tap Toggle, Double Tap Zoom, Pinch & Swipe)
+            this.isPinching = false;
+
             this.body.addEventListener('touchstart', (e) => {
               const isImg = !!this.body.querySelector('img.lightbox-media');
               if (e.target.closest('video, audio, .lightbox-audio-card, button, .lightbox-carousel-wrap, .lightbox-header, .lightbox-bottom-bar, .lightbox-arrow')) return;
 
               if (e.touches.length === 2 && isImg) {
+                this.isPinching = true;
                 this.isTouchPanning = false;
                 this.initialPinchDistance = Math.hypot(
                   e.touches[0].clientX - e.touches[1].clientX,
@@ -9482,6 +10547,7 @@ HTACCESS;
                 );
                 this.initialPinchScale = this.scale;
               } else if (e.touches.length === 1) {
+                this.isPinching = false;
                 this.touchStartX = e.touches[0].clientX;
                 this.touchStartY = e.touches[0].clientY;
                 this.touchStartTime = Date.now();
@@ -9500,6 +10566,7 @@ HTACCESS;
 
               if (e.touches.length === 2 && isImg) {
                 e.preventDefault();
+                this.isPinching = true;
                 const currDist = Math.hypot(
                   e.touches[0].clientX - e.touches[1].clientX,
                   e.touches[0].clientY - e.touches[1].clientY
@@ -9509,10 +10576,12 @@ HTACCESS;
                   if (this.scale === 1) {
                     this.panX = 0;
                     this.panY = 0;
+                  } else {
+                    this.clampPan();
                   }
                   this.applyTransform(false);
                 }
-              } else if (e.touches.length === 1) {
+              } else if (e.touches.length === 1 && !this.isPinching) {
                 const diffX = e.touches[0].clientX - this.touchStartX;
                 const diffY = e.touches[0].clientY - this.touchStartY;
 
@@ -9520,6 +10589,7 @@ HTACCESS;
                   e.preventDefault();
                   this.panX = this.initialPanX + diffX;
                   this.panY = this.initialPanY + diffY;
+                  this.clampPan();
                   this.applyTransform(false);
                 } else if (this.scale === 1) {
                   if (Math.abs(diffX) > 8 && Math.abs(diffX) > Math.abs(diffY)) {
@@ -9539,7 +10609,31 @@ HTACCESS;
               const isImg = !!this.body.querySelector('img.lightbox-media');
               this.lastTouchEndTime = Date.now();
 
+              if (e.touches.length === 1 && this.isPinching) {
+                this.isPinching = false;
+                this.touchStartX = e.touches[0].clientX;
+                this.touchStartY = e.touches[0].clientY;
+                this.initialPanX = this.panX;
+                this.initialPanY = this.panY;
+                if (this.scale > 1 && isImg) {
+                  this.isTouchPanning = true;
+                }
+                return;
+              }
+
               if (e.touches.length === 0) {
+                if (this.isPinching) {
+                  this.isPinching = false;
+                  this.isTouchPanning = false;
+                  if (this.scale <= 1) {
+                    this.resetTransform(true);
+                  } else {
+                    this.clampPan();
+                    this.applyTransform(true);
+                  }
+                  return;
+                }
+
                 if (this.scale > 1) {
                   this.isTouchPanning = false;
                   this.clampPan();
@@ -9552,7 +10646,6 @@ HTACCESS;
                 const diffY = touchEndY - this.touchStartY;
                 const duration = Date.now() - this.touchStartTime;
 
-                // Tap detection
                 if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && duration < 250) {
                   const now = Date.now();
                   if (now - this.lastTapTime < 300 && isImg) {
@@ -9562,11 +10655,8 @@ HTACCESS;
                       this.resetTransform(true);
                     } else {
                       this.scale = 2.5;
-                      const rect = this.body.getBoundingClientRect();
-                      const tapX = touchEndX - rect.left - rect.width / 2;
-                      const tapY = touchEndY - rect.top - rect.height / 2;
-                      this.panX = -tapX * 1.5;
-                      this.panY = -tapY * 1.5;
+                      this.panX = 0;
+                      this.panY = 0;
                       this.clampPan();
                       this.applyTransform(true);
                     }
@@ -9582,7 +10672,6 @@ HTACCESS;
                   return;
                 }
 
-                // Swipe between images when not zoomed
                 if (this.scale === 1) {
                   const img = this.body.querySelector('.lightbox-media');
                   if (Math.abs(this.swipeDeltaX) > 55) {
@@ -9606,6 +10695,27 @@ HTACCESS;
             });
           }
 
+          zoomIn(factor = 1.35) {
+            const img = this.body.querySelector('.lightbox-media');
+            if (!img || img.tagName !== 'IMG') return;
+            this.scale = Math.min(5, this.scale * factor);
+            this.clampPan();
+            this.applyTransform(true);
+          }
+
+          zoomOut(factor = 1.35) {
+            const img = this.body.querySelector('.lightbox-media');
+            if (!img || img.tagName !== 'IMG') return;
+            this.scale = Math.max(1, this.scale / factor);
+            if (this.scale === 1) {
+              this.panX = 0;
+              this.panY = 0;
+            } else {
+              this.clampPan();
+            }
+            this.applyTransform(true);
+          }
+
           clampPan() {
             const img = this.body.querySelector('.lightbox-media');
             if (!img || this.scale <= 1) {
@@ -9613,9 +10723,11 @@ HTACCESS;
               this.panY = 0;
               return;
             }
-            const rect = this.body.getBoundingClientRect();
-            const maxPanX = Math.max(0, (rect.width * this.scale - rect.width) / 2);
-            const maxPanY = Math.max(0, (rect.height * this.scale - rect.height) / 2);
+            const bodyRect = this.body.getBoundingClientRect();
+            const imgW = img.offsetWidth || bodyRect.width;
+            const imgH = img.offsetHeight || bodyRect.height;
+            const maxPanX = Math.max(0, (imgW * this.scale - bodyRect.width) / 2);
+            const maxPanY = Math.max(0, (imgH * this.scale - bodyRect.height) / 2);
             this.panX = Math.min(maxPanX, Math.max(-maxPanX, this.panX));
             this.panY = Math.min(maxPanY, Math.max(-maxPanY, this.panY));
           }
@@ -9625,7 +10737,7 @@ HTACCESS;
             if (!img) return;
             img.classList.toggle('smooth-zoom', smooth);
             img.classList.toggle('zoomed', this.scale > 1);
-            img.style.transform = `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.scale})`;
+            img.style.setProperty('transform', `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.scale})`, 'important');
           }
 
           resetTransform(smooth = false) {
@@ -9923,6 +11035,10 @@ HTACCESS;
             const isAudio = item.type === 'audio' || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'].includes(ext);
             const isVideo = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
 
+            const btnZoomIn = document.getElementById('btn-lb-zoom-in');
+            const btnZoomOut = document.getElementById('btn-lb-zoom-out');
+            if (btnZoomIn) btnZoomIn.style.display = isImage ? 'flex' : 'none';
+            if (btnZoomOut) btnZoomOut.style.display = isImage ? 'flex' : 'none';
             const btnSlideshow = document.getElementById('btn-lb-slideshow');
             if (btnSlideshow) btnSlideshow.style.display = isImage ? 'flex' : 'none';
             const btnSearchGoogle = document.getElementById('btn-lb-search-google');
@@ -9989,6 +11105,7 @@ HTACCESS;
               const onReady = () => {
                 requestAnimationFrame(() => {
                   img.classList.add('ready');
+                  img.classList.remove('reconstruct');
                   this.resetTransform(false);
                 });
               };
@@ -10059,12 +11176,15 @@ HTACCESS;
         const IS_ADMIN = <?= $isAdmin ? 'true' : 'false' ?>;
         const IS_DEMO = <?= $isDemo ? 'true' : 'false' ?>;
         const AUTH_ENABLED = <?= $config['auth_enabled'] ? 'true' : 'false' ?>;
+        const IS_LOGGED_IN = <?= !empty($_SESSION['user_id']) ? 'true' : 'false' ?>;
+        const CURRENT_USER_ID = <?= (int)($user_id ?? 0) ?>;
 
         class GalleryApp {
           constructor() {
             this.appTitle = '<?= addslashes(htmlspecialchars($config['app_title'])) ?>';
             this.isAdmin = IS_ADMIN;
             this.isDemo = IS_DEMO;
+            this.isLoggedIn = IS_LOGGED_IN;
             this.currentPath = null;
             this.data = { folders: [], files: [], stats: {} };
             this.filter = 'all';
@@ -10084,7 +11204,7 @@ HTACCESS;
             this.isSearching = false;
             this.advFilters = { ext: '', type: '', date_from: '', date_to: '', size_min: '', size_max: '' };
             this.starredSet = new Set();
-            this.currentSection = 'home';
+            this.currentSection = IS_LOGGED_IN ? 'home' : 'public';
             this.expandedTreeNodes = new Set(JSON.parse(localStorage.getItem('pg_tree_expanded') || '[]'));
             this.modalStack = [];
     
@@ -10331,7 +11451,9 @@ HTACCESS;
                 this.searchSeq++;
                 this.container.style.opacity = '1';
                 this.renderLimit = 25;
-                if (this.currentSection === 'activity') {
+                if (this.currentSection === 'public' || !this.isLoggedIn) {
+                  this.loadPublic();
+                } else if (this.currentSection === 'activity') {
                   this.renderActivityView();
                 } else if (this.currentSection === 'trash') {
                   this.renderTrashView();
@@ -10600,12 +11722,14 @@ HTACCESS;
             let dragCounter = 0;
             window.addEventListener('dragenter', (e) => {
               e.preventDefault();
+              if (!this.isLoggedIn) return;
               dragCounter++;
               document.getElementById('dropzone')?.classList.add('active');
             });
 
             window.addEventListener('dragleave', (e) => {
               e.preventDefault();
+              if (!this.isLoggedIn) return;
               dragCounter--;
               if (dragCounter <= 0) {
                 dragCounter = 0;
@@ -10621,6 +11745,11 @@ HTACCESS;
               e.preventDefault();
               dragCounter = 0;
               document.getElementById('dropzone')?.classList.remove('active');
+              if (!this.isLoggedIn) {
+                this.toast('Sign in required to upload files');
+                this.showLoginModal();
+                return;
+              }
               if (e.dataTransfer.items && e.dataTransfer.items.length) {
                 const items = await this.readDropData(e.dataTransfer.items);
                 if (items.length) uploadManager.enqueue(items, this.currentPath);
@@ -10631,12 +11760,20 @@ HTACCESS;
             });
     
             document.getElementById('btn-new-folder').addEventListener('click', () => {
+              if (!this.isLoggedIn) {
+                this.showLoginModal();
+                return;
+              }
               this.showInputModal('Create Folder', 'Folder Name', '', (name) => {
                 this.api('create', { dir: this.currentPath, name, type: 'folder' }, () => this.refresh());
               });
             });
     
             document.getElementById('btn-new-file').addEventListener('click', () => {
+              if (!this.isLoggedIn) {
+                this.showLoginModal();
+                return;
+              }
               this.showInputModal('Create Text File', 'File Name (e.g. notes.txt)', '', (name) => {
                 this.api('create', { dir: this.currentPath, name, type: 'file' }, () => this.refresh());
               });
@@ -10854,13 +11991,15 @@ HTACCESS;
           }
     
           updateControlsVisibility() {
+            const isGuest = !this.isLoggedIn;
             const isStarred = this.currentSection === 'starred';
             const isTrash = this.currentSection === 'trash';
             const isActivity = this.currentSection === 'activity';
             const isGallery = this.currentSection === 'gallery';
             const isRecents = this.currentSection === 'recents';
-            const hideUpload = isStarred || isTrash || isActivity || isGallery;
-            const hideNewItems = isStarred || isTrash || isActivity || isGallery;
+            const isSharedRoot = this.currentSection === 'shared' && !this.currentPath;
+            const hideUpload = isGuest || isStarred || isTrash || isActivity || isGallery || isSharedRoot;
+            const hideNewItems = isGuest || isStarred || isTrash || isActivity || isGallery || isSharedRoot;
             const hideManga = isTrash || isActivity || isStarred || isRecents;
 
             // Centralized Content Header & Toolbar Visibility
@@ -11083,7 +12222,14 @@ HTACCESS;
           }
 
           navigate(path) {
-            window.location.hash = '#/' + ltrim(path, '/');
+            const clean = ltrim(path, '/');
+            if (this.currentSection === 'public') {
+              window.location.hash = clean ? '#/@public/' + encodeURI(clean) : '#/@public';
+            } else if (this.currentSection === 'shared') {
+              window.location.hash = clean ? '#/@shared/' + encodeURI(clean) : '#/@shared';
+            } else {
+              window.location.hash = clean ? '#/' + encodeURI(clean) : '#/';
+            }
           }
     
           handleHashChange() {
@@ -11092,36 +12238,60 @@ HTACCESS;
             try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
             decoded = decoded.replace(/^\/+|\/+$/g, '').replace(/\.part$/i, '');
 
-            // Distinguish special virtual tabs (@gallery, @recents, etc.) from physical folders
+            let sectionPrefix = null;
+            let subPath = decoded;
+
+            // Handle dedicated @public/... and @shared/... independent paths
             if (decoded.startsWith('@')) {
-              const secName = decoded.substring(1).toLowerCase();
-              const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio', 'documents'];
-              if (specialSections.includes(secName)) {
-                if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
-                  lightbox.close(false);
+              const slashIdx = decoded.indexOf('/');
+              if (slashIdx === -1) {
+                const secName = decoded.substring(1).toLowerCase();
+                const specialSections = ['public', 'shared', 'recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio', 'documents'];
+                if (specialSections.includes(secName)) {
+                  if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
+                    lightbox.close(false);
+                  }
+                  this.switchDriveSection(secName, false);
+                  return;
                 }
-                this.switchDriveSection(secName, false);
-                return;
+              } else {
+                const secName = decoded.substring(1, slashIdx).toLowerCase();
+                if (secName === 'public' || secName === 'shared') {
+                  sectionPrefix = secName;
+                  subPath = decoded.substring(slashIdx + 1).replace(/^\/+|\/+$/g, '');
+                }
               }
             }
 
-            if (!decoded) {
+            if (!subPath) {
               if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
                 lightbox.close(false);
+              }
+              if (sectionPrefix === 'public' || !this.isLoggedIn) {
+                this.switchDriveSection('public', false);
+                return;
+              }
+              if (sectionPrefix === 'shared') {
+                this.switchDriveSection('shared', false);
+                return;
               }
               if (this.currentSection !== 'home' || this.currentPath !== '') {
                 this.switchDriveSection('home', false);
               }
               return;
             }
-    
-            const segments = decoded.split('/');
+
+            if (sectionPrefix) {
+              this.currentSection = sectionPrefix;
+            }
+
+            const segments = subPath.split('/');
             const lastSegment = segments[segments.length - 1];
             const isFilePath = !lastSegment.startsWith('.') && /\.[a-zA-Z0-9]{1,8}$/.test(lastSegment);
 
             if (isFilePath) {
               const dirPath = segments.slice(0, -1).join('/');
-              const targetFile = decoded.replace(/^\/+/, '');
+              const targetFile = subPath;
 
               const activeItem = (window.lightbox && lightbox.el && lightbox.el.classList.contains('active'))
                 ? (lightbox.mediaList ? lightbox.mediaList[lightbox.currentIndex] : null)
@@ -11133,7 +12303,7 @@ HTACCESS;
               }
 
               const specialSections = ['recents', 'starred', 'activity', 'trash', 'gallery', 'videos', 'audio', 'documents'];
-              if (this.currentSection && specialSections.includes(this.currentSection)) {
+              if (this.currentSection && specialSections.includes(this.currentSection) && !sectionPrefix) {
                 this.originSection = this.currentSection;
                 this.openFile(targetFile, false);
                 return;
@@ -11150,10 +12320,10 @@ HTACCESS;
               if (window.lightbox && lightbox.el && lightbox.el.classList.contains('active')) {
                 lightbox.close(false);
               }
-              if (this.currentPath !== decoded) {
-                this.loadDir(decoded);
+              if (this.currentPath !== subPath) {
+                this.loadDir(subPath);
               } else {
-                this.updateDocTitle(decoded ? decoded.split('/').pop() : '');
+                this.updateDocTitle(subPath ? subPath.split('/').pop() : '');
               }
             }
           }
@@ -11183,10 +12353,11 @@ HTACCESS;
     
           async loadDir(path, clearSearch = true) {
             const seq = ++this.navSeq;
-            this.currentSection = 'home';
-            this.updateControlsVisibility();
-            document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery').forEach(el => el.classList.remove('active'));
-            document.getElementById('nav-home')?.classList.add('active');
+            if (!this.isLoggedIn && !path) {
+              this.switchDriveSection('public', false);
+              return;
+            }
+
             this.currentPath = path;
             this.selectedItems.clear();
             this.updateBatchBar();
@@ -11202,7 +12373,6 @@ HTACCESS;
             this.sidebarBackdrop.classList.remove('active');
             this.updateTreeActive();
 
-            // Only wipe container with a short spinner if navigating to a new directory without saved scroll
             if (!this.savedScrollTop) {
               this.renderLimit = 25;
               this.container.style.opacity = '1';
@@ -11217,11 +12387,12 @@ HTACCESS;
             }
 
             try {
-              const res = await fetch(`?access=user&action=list&dir=${encodeURIComponent(path || '')}`);
+              const sectionParam = this.currentSection === 'public' ? '&section=public' : (this.currentSection === 'shared' ? '&section=shared' : '');
+              const res = await fetch(`?access=user&action=list&dir=${encodeURIComponent(path || '')}${sectionParam}`);
               if (seq !== this.navSeq) return;
               if (!res.ok) {
                 if (path && path !== '') {
-                  this.toast(`Folder "${path}" not found. Redirecting to Home...`);
+                  this.toast(`Folder "${path}" not found.`);
                   this.navigate('');
                   return;
                 }
@@ -11230,6 +12401,26 @@ HTACCESS;
               const freshData = await res.json();
               if (seq !== this.navSeq) return;
               this.data = freshData;
+
+              // Keep Public and Shared completely independent
+              if (this.currentSection === 'public' || freshData.share_type === 'public' || !this.isLoggedIn) {
+                this.currentSection = 'public';
+                this.currentOwnerId = freshData.owner_id;
+                this.currentOwnerArtist = freshData.owner_artist;
+              } else if (this.currentSection === 'shared' || freshData.share_type === 'shared') {
+                this.currentSection = 'shared';
+                this.currentOwnerId = freshData.owner_id;
+                this.currentOwnerArtist = freshData.owner_artist;
+              } else if (!path) {
+                this.currentSection = 'home';
+                this.currentOwnerId = null;
+                this.currentOwnerArtist = null;
+              }
+
+              this.updateControlsVisibility();
+              document.querySelectorAll('#nav-home, #nav-public, #nav-shared, #nav-gallery, #nav-videos, #nav-audio, #nav-documents, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
+              document.getElementById(`nav-${this.currentSection}`)?.classList.add('active');
+
               if (freshData.storage) this.updateStorageDisplay(freshData.storage);
               this.renderGallery(!!this.savedScrollTop);
               this.updateBreadcrumbs();
@@ -11257,7 +12448,8 @@ HTACCESS;
               this.isSearching = false;
               this.container.style.opacity = '1';
               this.renderLimit = 25;
-              if (this.currentSection === 'activity') this.renderActivityView();
+              if (this.currentSection === 'public' || !this.isLoggedIn) this.loadPublic();
+              else if (this.currentSection === 'activity') this.renderActivityView();
               else if (this.currentSection === 'trash') this.renderTrashView();
               else if (this.currentSection === 'starred') this.loadStarred();
               else if (this.currentSection === 'recents') this.loadRecents();
@@ -11385,9 +12577,16 @@ HTACCESS;
     
           async loadTree() {
             try {
+              const container = document.getElementById('tree-container');
+              if (!container) return;
+
+              if (!this.isLoggedIn) {
+                container.innerHTML = '';
+                return;
+              }
+
               const cacheKey = 'tree_cache';
               const cachedTree = window.opfsCache ? await window.opfsCache.getJSON(cacheKey) : null;
-              const container = document.getElementById('tree-container');
     
               if (this.currentPath) {
                 const parts = this.currentPath.split('/');
@@ -11399,51 +12598,55 @@ HTACCESS;
               }
     
               const renderNodes = (nodes) => {
-              let html = '';
-              nodes.forEach(n => {
-                const hasChildren = n.children && n.children.length > 0;
-                const isExpanded = this.expandedTreeNodes.has(n.path);
-                const isCollapsed = hasChildren && !isExpanded;
+                if (!Array.isArray(nodes)) return '';
+                let html = '';
+                nodes.forEach(n => {
+                  const hasChildren = n.children && n.children.length > 0;
+                  const isExpanded = this.expandedTreeNodes.has(n.path);
+                  const isCollapsed = hasChildren && !isExpanded;
 
-                html += `
-                  <div class="tree-branch ${isCollapsed ? 'collapsed' : ''}" data-branch="${n.path}">
-                    <div class="tree-node-row">
-                      ${hasChildren ? `
-                        <span class="tree-toggle" onclick="event.stopPropagation(); app.toggleTreeNode('${n.path}')">
-                          <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" fill="currentColor"/></svg>
-                        </span>
-                      ` : '<span class="tree-spacer"></span>'}
-                      <div class="tree-node ${n.path === (this.currentPath || '') ? 'active' : ''}" data-path="${n.path}" onclick="app.navigate('${n.path}')">
-                        <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
-                        <span>${n.name}</span>
+                  html += `
+                    <div class="tree-branch ${isCollapsed ? 'collapsed' : ''}" data-branch="${n.path}">
+                      <div class="tree-node-row">
+                        ${hasChildren ? `
+                          <span class="tree-toggle" onclick="event.stopPropagation(); app.toggleTreeNode('${n.path}')">
+                            <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" fill="currentColor"/></svg>
+                          </span>
+                        ` : '<span class="tree-spacer"></span>'}
+                        <div class="tree-node ${n.path === (this.currentPath || '') ? 'active' : ''}" data-path="${n.path}" onclick="app.navigate('${n.path}')">
+                          <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                          <span>${n.name}</span>
+                        </div>
                       </div>
+                      ${hasChildren ? `<div class="tree-children" style="padding-left:0.85rem;">${renderNodes(n.children)}</div>` : ''}
                     </div>
-                    ${hasChildren ? `<div class="tree-children" style="padding-left:0.85rem;">${renderNodes(n.children)}</div>` : ''}
-                  </div>
-                `;
-              });
-              return html;
-            };
+                  `;
+                });
+                return html;
+              };
 
-            const rootRow = `
-              <div class="tree-node-row">
-                <span class="tree-spacer"></span>
-                <div class="tree-node ${!this.currentPath ? 'active' : ''}" data-path="" onclick="app.navigate('')">
-                  <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
-                  <span>Root</span>
+              const rootRow = `
+                <div class="tree-node-row">
+                  <span class="tree-spacer"></span>
+                  <div class="tree-node ${!this.currentPath ? 'active' : ''}" data-path="" onclick="app.navigate('')">
+                    <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                    <span>Root</span>
+                  </div>
                 </div>
-              </div>
-            `;
+              `;
     
-              if (cachedTree) {
+              if (cachedTree && Array.isArray(cachedTree)) {
                 container.innerHTML = rootRow + renderNodes(cachedTree);
               }
     
               const res = await fetch('?access=user&action=tree');
+              if (!res.ok) return;
               const tree = await res.json();
-              if (window.opfsCache) window.opfsCache.setJSON(cacheKey, tree);
-              container.innerHTML = rootRow + renderNodes(tree);
-              this.updateTreeActive();
+              if (Array.isArray(tree)) {
+                if (window.opfsCache) window.opfsCache.setJSON(cacheKey, tree);
+                container.innerHTML = rootRow + renderNodes(tree);
+                this.updateTreeActive();
+              }
             } catch (e) {}
           }
     
@@ -11547,27 +12750,11 @@ HTACCESS;
               toolbar.style.display = 'flex';
             }
 
-            const scrollEl = document.getElementById('main-content');
-            const savedScroll = (preserveScroll || this.savedScrollTop) ? (this.savedScrollTop || (scrollEl ? scrollEl.scrollTop : 0)) : 0;
-            
-            // Lock minimum container height so the browser layout engine never collapses scroll to top during DOM refresh
-            if (savedScroll > 0) {
-              this.container.style.minHeight = (savedScroll + (scrollEl ? scrollEl.clientHeight : 800)) + 'px';
-              const estRowHeight = (this.layout === 'list') ? 56 : 140;
-              const cols = (this.layout === 'list') ? 1 : this.getMasonryColCount();
-              const neededRows = Math.ceil(savedScroll / estRowHeight) + 8;
-              const neededItems = Math.max(25, neededRows * cols);
-              if (neededItems > this.renderLimit) {
-                this.renderLimit = Math.min(this.filteredList.length, neededItems);
-              }
-            }
-
             const activeFilter = this.filter || 'all';
             let filteredFiles = (this.data.files || []).filter(f => activeFilter === 'all' || f.type === activeFilter);
             let filteredFolders = activeFilter === 'all' ? (this.data.folders || []) : [];
 
             if (this.currentSection === 'recents') {
-              // Strictly sort all items chronologically by newest modification timestamp
               this.filteredList = [
                 ...filteredFolders.map(f => ({ ...f, isDir: true })),
                 ...filteredFiles.map(f => ({ ...f, isDir: false }))
@@ -11582,8 +12769,26 @@ HTACCESS;
                 ...filteredFiles.map(f => ({ ...f, isDir: false }))
               ];
             }
+
+            const scrollEl = document.getElementById('main-content');
+            const savedScroll = (preserveScroll || this.savedScrollTop) ? (this.savedScrollTop || (scrollEl ? scrollEl.scrollTop : 0)) : 0;
+            
+            // Lock minimum container height so the browser layout engine never collapses scroll to top during DOM refresh
+            if (savedScroll > 0) {
+              this.container.style.minHeight = (savedScroll + (scrollEl ? scrollEl.clientHeight : 800)) + 'px';
+              const estRowHeight = (this.layout === 'list') ? 56 : 140;
+              const cols = (this.layout === 'list') ? 1 : this.getMasonryColCount();
+              const neededRows = Math.ceil(savedScroll / estRowHeight) + 8;
+              const neededItems = Math.max(25, neededRows * cols);
+              if (neededItems > this.renderLimit) {
+                this.renderLimit = Math.min(this.filteredList.length || 25, neededItems);
+              }
+            }
     
-            if (this.currentSection === 'starred') {
+            if (this.currentSection === 'public') {
+              this.dirTitle.innerText = 'Public Items';
+              this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
+            } else if (this.currentSection === 'starred') {
               this.dirTitle.innerText = 'Starred Items';
               this.dirStats.innerText = `${filteredFolders.length} Folders, ${filteredFiles.length} Files (${this.data.stats?.total_size || '0 B'})`;
             } else if (this.currentSection === 'recents') {
@@ -11625,14 +12830,22 @@ HTACCESS;
               }
             }
     
-            if (this.data.path && this.currentSection === 'home') {
+            if (this.data.path) {
               this.hasUpCard = true;
               const parts = this.data.path.split('/');
               parts.pop();
               const parent = parts.join('/');
               const upCard = document.createElement('div');
               upCard.className = 'file-card';
-              upCard.onclick = () => app.navigate(parent);
+              upCard.onclick = () => {
+                if (parent) {
+                  app.navigate(parent);
+                } else {
+                  if (this.currentSection === 'shared' || this.data?.share_type === 'shared') app.switchDriveSection('shared');
+                  else if (this.currentSection === 'public' || this.data?.share_type === 'public') app.switchDriveSection('public');
+                  else app.navigate('');
+                }
+              };
               const upRatio = this.layout === 'list' ? '' : 'style="aspect-ratio: 1 / 1; min-height: 140px;"';
               upCard.innerHTML = `
                 <div class="file-thumb" ${upRatio}>
@@ -11691,9 +12904,11 @@ HTACCESS;
                 ? '<svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
                 : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
 
+              const itemOwnerQuery = item.owner_id ? `&owner_id=${item.owner_id}` : '';
+
               if (item.isDir) {
                 const folderRatio = (this.layout === 'columns' || this.layout === 'list') ? '' : 'style="aspect-ratio: 1 / 1; min-height: 140px;"';
-                card.onclick = (e) => app.handleItemClick(e, 'folder', item.path);
+                card.onclick = (e) => app.handleItemClick(e, 'folder', item.path, item.owner_id, item.owner_artist);
                 card.oncontextmenu = (e) => app.showContextMenu(e, 'folder', item.path, item.name);
 
                 // Direct Folder Drag & Drop without opening the folder
@@ -11740,7 +12955,7 @@ HTACCESS;
                 if (item.thumb_image) card.classList.add('has-image');
 
                 let folderThumbHtml = item.thumb_image
-                  ? `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.thumb_image)}" alt="" loading="lazy" decoding="async">`
+                  ? `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.thumb_image)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async">`
                   : `<div class="type-icon type-folder"><svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg></div>`;
 
                 card.innerHTML = `
@@ -11752,6 +12967,12 @@ HTACCESS;
                       <span>${this.layout === 'list' && formattedDate ? formattedDate + ' • ' : ''}${item.items_count !== undefined ? item.items_count + ' items' : ''}</span>
                       <span>FOLDER</span>
                     </div>
+                    ${(this.currentSection !== 'home' && item.owner_artist && (!item.owner_id || item.owner_id != CURRENT_USER_ID)) ? `
+                      <div class="file-owner-pill" title="Owner: ${this.escapeHtml(item.owner_artist)}">
+                        <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                        <span>${this.escapeHtml(item.owner_artist)}</span>
+                      </div>
+                    ` : ''}
                   </div>
                   <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                   <div class="folder-drop-overlay">
@@ -11766,7 +12987,7 @@ HTACCESS;
 
                 if (item.type === 'image') {
                   card.classList.add('has-image');
-                  thumbHtml = `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }">`;
+                  thumbHtml = `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }">`;
                   if (this.layout === 'columns') {
                     thumbRatio = 'style="min-height:140px; height:auto;"';
                   }
@@ -11797,6 +13018,12 @@ HTACCESS;
                       <span>${this.layout === 'list' && formattedDate ? formattedDate + ' • ' : ''}${item.size_fmt || '0 B'}</span>
                       <span>${this.layout === 'list' ? ext.toUpperCase() : (item.width ? `${item.width}×${item.height}` : ext.toUpperCase())}</span>
                     </div>
+                    ${(this.currentSection !== 'home' && item.owner_artist && (!item.owner_id || item.owner_id != CURRENT_USER_ID)) ? `
+                      <div class="file-owner-pill" title="Owner: ${this.escapeHtml(item.owner_artist)}">
+                        <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                        <span>${this.escapeHtml(item.owner_artist)}</span>
+                      </div>
+                    ` : ''}
                   </div>
                   <div class="file-star-btn ${isStarred ? 'active' : ''}" title="${isStarred ? 'Unstar' : 'Star'}">${starSvg}</div>
                 `;
@@ -11829,13 +13056,15 @@ HTACCESS;
             this.renderedCount += toRender.length;
           }
     
-          handleItemClick(e, type, path) {
+          handleItemClick(e, type, path, ownerId = null, ownerArtist = null) {
             if (e.target.closest('.file-checkbox') || e.target.closest('.file-star-btn')) return;
             if (this.selectedItems.size > 0) {
               this.toggleSelect(e, path);
               return;
             }
             if (type === 'folder') {
+              this.currentOwnerId = ownerId;
+              this.currentOwnerArtist = ownerArtist;
               this.navigate(path);
             } else {
               this.openFile(path, true);
@@ -12140,7 +13369,7 @@ HTACCESS;
               fd.append('action', 'batch_rename');
               fd.append('renames', JSON.stringify(renamesPayload));
 
-              const res = await fetch('', { method: 'POST', body: fd });
+              const res = await fetch('?access=user', { method: 'POST', body: fd });
               const data = await res.json();
 
               if (data.success) {
@@ -12208,36 +13437,59 @@ HTACCESS;
             fd.append('action', 'details');
             items.forEach(i => fd.append('items[]', i));
     
-            fetch('', { method: 'POST', body: fd })
+            fetch('?access=user', { method: 'POST', body: fd })
               .then(r => r.json())
               .then(res => this.renderDetailsModal(res));
           }
     
           updateBreadcrumbs() {
-            let html = `<a href="#/" class="bc-item ${this.currentSection === 'home' && !this.currentPath ? 'active' : ''}">Home</a>`;
-            if (this.currentSection === 'recents') {
-              html += `<span class="bc-sep">/</span><a href="#/@recents" class="bc-item active">Recents</a>`;
+            let rootLabel = 'Home';
+            let rootUrl = '#/';
+            let prefix = '';
+
+            if (this.currentSection === 'public' || this.data?.share_type === 'public' || !this.isLoggedIn) {
+              rootLabel = 'Public';
+              rootUrl = '#/@public';
+              prefix = '@public/';
+            } else if (this.currentSection === 'shared' || this.data?.share_type === 'shared') {
+              rootLabel = 'Shared';
+              rootUrl = '#/@shared';
+              prefix = '@shared/';
+            } else if (this.currentSection === 'recents') {
+              rootLabel = 'Recents';
+              rootUrl = '#/@recents';
             } else if (this.currentSection === 'starred') {
-              html += `<span class="bc-sep">/</span><a href="#/@starred" class="bc-item active">Starred Items</a>`;
+              rootLabel = 'Starred Items';
+              rootUrl = '#/@starred';
             } else if (this.currentSection === 'activity') {
-              html += `<span class="bc-sep">/</span><a href="#/@activity" class="bc-item active">File Activity</a>`;
+              rootLabel = 'File Activity';
+              rootUrl = '#/@activity';
             } else if (this.currentSection === 'trash') {
-              html += `<span class="bc-sep">/</span><a href="#/@trash" class="bc-item active">Trash Bin</a>`;
+              rootLabel = 'Trash Bin';
+              rootUrl = '#/@trash';
             } else if (this.currentSection === 'gallery') {
-              html += `<span class="bc-sep">/</span><a href="#/@gallery" class="bc-item active">Gallery</a>`;
+              rootLabel = 'Gallery';
+              rootUrl = '#/@gallery';
             } else if (this.currentSection === 'videos') {
-              html += `<span class="bc-sep">/</span><a href="#/@videos" class="bc-item active">Videos</a>`;
+              rootLabel = 'Videos';
+              rootUrl = '#/@videos';
             } else if (this.currentSection === 'audio') {
-              html += `<span class="bc-sep">/</span><a href="#/@audio" class="bc-item active">Audio</a>`;
+              rootLabel = 'Audio';
+              rootUrl = '#/@audio';
             } else if (this.currentSection === 'documents') {
-              html += `<span class="bc-sep">/</span><a href="#/@documents" class="bc-item active">Documents</a>`;
-            } else if (this.currentPath) {
+              rootLabel = 'Documents';
+              rootUrl = '#/@documents';
+            }
+
+            let html = `<a href="${rootUrl}" class="bc-item ${!this.currentPath ? 'active' : ''}">${rootLabel}</a>`;
+
+            if (this.currentPath) {
               const parts = this.currentPath.split('/');
               let accum = '';
               parts.forEach((p, idx) => {
                 accum += (accum ? '/' : '') + p;
                 const isLast = idx === parts.length - 1;
-                html += `<span class="bc-sep">/</span><a href="#/${encodeURIComponent(accum)}" class="bc-item ${isLast ? 'active' : ''}">${p}</a>`;
+                html += `<span class="bc-sep">/</span><a href="#/${prefix}${encodeURIComponent(accum)}" class="bc-item ${isLast ? 'active' : ''}">${p}</a>`;
               });
             }
             this.breadcrumbs.innerHTML = html;
@@ -12547,6 +13799,8 @@ HTACCESS;
 
             let baseImg = new Image();
             baseImg.crossOrigin = 'anonymous';
+
+            const rawImageUrl = `?access=user&action=raw&f=${encodeURIComponent(path)}`;
 
             let historyStack = [];
             let redoStack = [];
@@ -12983,7 +14237,10 @@ HTACCESS;
               updateUndoUI();
               redraw();
             };
-            baseImg.src = `?action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+            baseImg.onerror = () => {
+              this.toast('Failed to load image into editor');
+            };
+            baseImg.src = `${rawImageUrl}&t=${Date.now()}`;
 
             // Tab Navigation
             const tabs = ['tab-transform', 'tab-crop', 'tab-adjust', 'tab-text', 'tab-draw'];
@@ -13015,7 +14272,7 @@ HTACCESS;
 
             document.getElementById('ie-draw-clear-btn').onclick = () => {
               pushSnapshot();
-              baseImg.src = `?action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+              baseImg.src = `${rawImageUrl}&t=${Date.now()}`;
               this.toast('Cleared drawing strokes');
             };
 
@@ -13192,7 +14449,7 @@ HTACCESS;
             };
 
             document.getElementById('ie-global-reset').onclick = () => {
-              baseImg.src = `?action=raw&f=${encodeURIComponent(path)}&t=${Date.now()}`;
+              baseImg.src = `${rawImageUrl}&t=${Date.now()}`;
               this.toast('Reset all changes');
             };
 
@@ -13304,7 +14561,7 @@ HTACCESS;
             this.currentSection = section;
             this.sidebar.classList.remove('open');
             this.sidebarBackdrop.classList.remove('active');
-            document.querySelectorAll('#nav-home, #nav-recents, #nav-starred, #nav-activity, #nav-trash, #nav-gallery, #nav-videos, #nav-audio, #nav-documents').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('#nav-home, #nav-public, #nav-shared, #nav-gallery, #nav-videos, #nav-audio, #nav-documents, #nav-recents, #nav-starred, #nav-activity, #nav-trash').forEach(el => el.classList.remove('active'));
             document.getElementById(`nav-${section}`)?.classList.add('active');
 
             this.filter = 'all';
@@ -13313,9 +14570,19 @@ HTACCESS;
               else p.classList.remove('active');
             });
 
+            // Guests are kept on Public; protected sections trigger the Login Modal
+            if (!this.isLoggedIn && section !== 'public') {
+              this.showLoginModal();
+              return;
+            }
+
             if (section === 'home') {
               this.currentPath = null;
               this.loadDir('');
+            } else if (section === 'public') {
+              this.loadPublic();
+            } else if (section === 'shared') {
+              this.loadShared();
             } else if (section === 'recents') {
               this.loadRecents();
             } else if (section === 'starred') {
@@ -13333,6 +14600,313 @@ HTACCESS;
             } else if (section === 'documents') {
               this.loadDocuments();
             }
+          }
+
+          showLoginModal() {
+            const alertBox = document.getElementById('drive-modal-alert');
+            if (alertBox) alertBox.style.display = 'none';
+            const emailInput = document.getElementById('drive-modal-email');
+            const passInput = document.getElementById('drive-modal-pass');
+            if (emailInput) emailInput.value = '';
+            if (passInput) passInput.value = '';
+            this.showModal('modal-login');
+            setTimeout(() => { if (emailInput) emailInput.focus(); }, 120);
+          }
+
+          async handleDriveLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('drive-modal-login-btn');
+            const alertBox = document.getElementById('drive-modal-alert');
+            const email = document.getElementById('drive-modal-email').value;
+            const password = document.getElementById('drive-modal-pass').value;
+            btn.disabled = true;
+            btn.innerText = 'Authenticating...';
+            alertBox.style.display = 'none';
+
+            try {
+              const res = await fetch('?action=login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+              });
+              const data = await res.json();
+              if (data.status === 'success') {
+                window.location.reload();
+              } else {
+                alertBox.innerText = data.message || 'Invalid credentials';
+                alertBox.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = 'Login';
+              }
+            } catch (err) {
+              alertBox.innerText = 'Network error during login';
+              alertBox.style.display = 'block';
+              btn.disabled = false;
+              btn.innerText = 'Login';
+            }
+          }
+
+          async loadPublic() {
+            const seq = ++this.navSeq;
+            this.currentSection = 'public';
+            this.updateControlsVisibility();
+            this.currentPath = '';
+            this.selectedItems.clear();
+            this.updateBatchBar();
+            this.renderLimit = 25;
+            this.isSearching = false;
+            this.dirTitle.innerText = 'Public Items';
+            this.dirStats.innerText = 'Public files and folders visible to everyone';
+            this.container.style.opacity = '1';
+            this.container.innerHTML = '<div class="center-state"><svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg><div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading public items...</div></div>';
+
+            try {
+              const res = await fetch('?access=user&action=public_list');
+              if (seq !== this.navSeq) return;
+              const data = await res.json();
+              if (seq !== this.navSeq) return;
+              this.data = {
+                folders: data.folders || [],
+                files: data.files || [],
+                stats: data.stats || { total_size: '0 B', files: (data.files || []).length, folders: (data.folders || []).length },
+                path: ''
+              };
+              this.renderGallery();
+              this.updateBreadcrumbs();
+              this.updateBadges();
+              this.updateDocTitle('Public Items');
+            } catch (e) {
+              if (seq !== this.navSeq) return;
+              this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+            }
+          }
+
+          async loadShared() {
+            const seq = ++this.navSeq;
+            this.currentSection = 'shared';
+            this.updateControlsVisibility();
+            this.currentPath = '';
+            this.currentOwnerId = null;
+            this.currentOwnerArtist = null;
+            this.selectedItems.clear();
+            this.updateBatchBar();
+            this.renderLimit = 25;
+            this.isSearching = false;
+            this.dirTitle.innerText = 'Shared with You';
+            this.dirStats.innerText = 'Items shared directly with your account';
+            this.container.style.opacity = '1';
+            this.container.innerHTML = `
+              <div class="center-state">
+                <svg class="m3-spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="4"></circle></svg>
+                <div style="font-size:0.85rem; color:var(--md-sys-color-on-surface-variant); font-weight:500;">Loading shared items...</div>
+              </div>
+            `;
+
+            try {
+              const res = await fetch('?access=user&action=shared_list');
+              if (seq !== this.navSeq) return;
+              const data = await res.json();
+              if (seq !== this.navSeq) return;
+              this.data = {
+                folders: data.folders || [],
+                files: data.files || [],
+                stats: data.stats || { total_size: '0 B', files: (data.files || []).length, folders: (data.folders || []).length },
+                path: ''
+              };
+              this.renderGallery();
+              this.updateBreadcrumbs();
+              this.updateBadges();
+              this.updateDocTitle('Shared Items', (data.folders?.length || 0) + (data.files?.length || 0));
+            } catch (e) {
+              if (seq !== this.navSeq) return;
+              this.container.innerHTML = `<div class="center-state" style="color:var(--md-sys-color-error);"><p>${e.message}</p></div>`;
+            }
+          }
+
+          async revokeShare(shareId) {
+            if (!confirm('Revoke access to this shared item?')) return;
+            this.api('unshare_user', { share_id: shareId }, () => {
+              this.toast('Access revoked');
+              this.loadShared();
+            });
+          }
+
+          async openPermissionsModal(path, name, isDir) {
+            document.getElementById('perm-modal-filename').innerText = `Permissions: ${name}`;
+            const toggle = document.getElementById('perm-public-toggle');
+            const listEl = document.getElementById('perm-shared-users-list');
+            const emailInput = document.getElementById('perm-user-email');
+            const searchResults = document.getElementById('perm-user-search-results');
+            
+            if (searchResults) {
+              searchResults.style.display = 'none';
+              searchResults.innerHTML = '';
+            }
+            if (emailInput) {
+              emailInput.value = '';
+            }
+
+            listEl.innerHTML = '<div style="font-size:0.8rem; color:#aaa;">Loading permissions...</div>';
+            this.showModal('modal-permissions');
+
+            // Live user search auto-suggest handler
+            let searchDebounce = null;
+            if (emailInput && searchResults) {
+              emailInput.oninput = (e) => {
+                const q = e.target.value.trim();
+                clearTimeout(searchDebounce);
+                if (q.length < 1) {
+                  searchResults.style.display = 'none';
+                  searchResults.innerHTML = '';
+                  return;
+                }
+                searchDebounce = setTimeout(async () => {
+                  try {
+                    const res = await fetch(`?access=user&action=search_users&q=${encodeURIComponent(q)}`);
+                    const data = await res.json();
+                    const users = data.users || [];
+                    if (!users.length) {
+                      searchResults.innerHTML = '<div style="padding:0.6rem;font-size:0.75rem;color:#888;text-align:center;">No matching users</div>';
+                      searchResults.style.display = 'flex';
+                      return;
+                    }
+                    searchResults.innerHTML = users.map(u => {
+                      const initial = (u.artist || u.email || '?').charAt(0).toUpperCase();
+                      const avatarUrl = `?action=get_profile_picture&id=${u.id}`;
+                      return `
+                        <div class="perm-search-item" onclick="document.getElementById('perm-user-email').value='${this.escapeHtml(u.email)}'; document.getElementById('perm-user-search-results').style.display='none'; document.getElementById('perm-user-search-results').innerHTML='';">
+                          <img src="${avatarUrl}" class="perm-search-avatar" alt="" onerror="this.outerHTML='<div class=\\'perm-search-avatar\\'>${initial}</div>'">
+                          <div class="perm-search-info">
+                            <span class="perm-search-name">${this.escapeHtml(u.artist)}</span>
+                            <span class="perm-search-email">${this.escapeHtml(u.email)}</span>
+                          </div>
+                        </div>
+                      `;
+                    }).join('');
+                    searchResults.style.display = 'flex';
+                  } catch (err) {
+                    searchResults.style.display = 'none';
+                  }
+                }, 180);
+              };
+            }
+
+            try {
+              const res = await fetch(`?access=user&action=get_item_permissions&path=${encodeURIComponent(path)}`);
+              if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || `HTTP ${res.status}`);
+              }
+              const data = await res.json();
+              toggle.checked = !!data.is_public;
+
+              toggle.onchange = () => {
+                const fd = new FormData();
+                fd.append('action', 'toggle_public');
+                fd.append('path', path);
+                fd.append('is_public', toggle.checked ? '1' : '0');
+                fetch('?access=user', { method: 'POST', body: fd })
+                  .then(r => r.json())
+                  .then(d => {
+                    if (d.success) {
+                      this.toast(toggle.checked ? 'Set to Public' : 'Set to Private');
+                      this.refresh();
+                    } else {
+                      toggle.checked = !toggle.checked;
+                      alert(d.error || 'Failed to update visibility');
+                    }
+                  })
+                  .catch(() => {
+                    toggle.checked = !toggle.checked;
+                    alert('Network error updating visibility');
+                  });
+              };
+
+              const renderUsersList = (users) => {
+                if (!users || !users.length) {
+                  listEl.innerHTML = '<div style="font-size:0.75rem; color:var(--md-sys-color-on-surface-variant); padding:0.4rem 0;">Not shared with any specific users yet.</div>';
+                  return;
+                }
+                const safePath = path.replace(/'/g, "\\'");
+                const safeName = name.replace(/'/g, "\\'");
+                listEl.innerHTML = users.map(u => `
+                  <div style="display:flex; align-items:center; justify-content:space-between; padding:0.45rem 0.75rem; background:var(--md-sys-color-surface-container-high); border-radius:12px; font-size:0.82rem; gap:0.5rem;">
+                    <div style="display:flex; flex-direction:column; min-width:0; flex:1;">
+                      <span style="color:#fff; font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${this.escapeHtml(u.target_artist || u.target_email)}</span>
+                      <span style="color:#888; font-size:0.72rem; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${this.escapeHtml(u.target_email)}</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.4rem; flex-shrink:0;">
+                      <select class="form-input" style="width:auto; height:32px; font-size:0.76rem; font-weight:600; padding:0 22px 0 10px; background-position:right 7px center; border-radius:8px; cursor:pointer;" onchange="app.updateUserPermission(${u.id}, this.value)">
+                        <option value="read" ${u.permission === 'read' ? 'selected' : ''}>Can view</option>
+                        <option value="write" ${u.permission === 'write' ? 'selected' : ''}>Can edit</option>
+                      </select>
+                      <button class="btn-primary" style="height:32px; padding:0 0.75rem; font-size:0.75rem; background:#dc2626; border-radius:8px;" onclick="app.revokeUserAccess(${u.id}, '${safePath}', '${safeName}', ${isDir})">Remove</button>
+                    </div>
+                  </div>
+                `).join('');
+              };
+
+              renderUsersList(data.shared_users);
+
+              document.getElementById('perm-add-user-btn').onclick = () => {
+                const emailInput = document.getElementById('perm-user-email');
+                const email = emailInput.value.trim();
+                const role = document.getElementById('perm-user-role').value;
+                if (!email) return;
+
+                const fd = new FormData();
+                fd.append('action', 'share_to_user');
+                fd.append('path', path);
+                fd.append('target_email', email);
+                fd.append('permission', role);
+
+                fetch('?access=user', { method: 'POST', body: fd })
+                  .then(r => r.json())
+                  .then(res => {
+                    if (res.success) {
+                      this.toast(`Shared with ${res.recipient}`);
+                      emailInput.value = '';
+                      this.openPermissionsModal(path, name, isDir);
+                    } else {
+                      alert(res.error || 'Failed to share');
+                    }
+                  })
+                  .catch(() => alert('Network error sharing item'));
+              };
+            } catch (err) {
+              listEl.innerHTML = `<div style="color:var(--md-sys-color-error); font-size:0.8rem; padding:0.4rem 0;">Failed to load permissions: ${this.escapeHtml(err.message)}</div>`;
+            }
+          }
+
+          revokeUserAccess(shareId, path, name, isDir) {
+            const fd = new FormData();
+            fd.append('action', 'unshare_user');
+            fd.append('share_id', shareId);
+            fetch('?access=user', { method: 'POST', body: fd })
+              .then(r => r.json())
+              .then(res => {
+                if (res.success) {
+                  this.toast('User removed');
+                  this.openPermissionsModal(path, name, isDir);
+                }
+              });
+          }
+
+          updateUserPermission(shareId, newPerm) {
+            const fd = new FormData();
+            fd.append('action', 'update_share_permission');
+            fd.append('share_id', shareId);
+            fd.append('permission', newPerm);
+            fetch('?access=user', { method: 'POST', body: fd })
+              .then(r => r.json())
+              .then(res => {
+                if (res.success) {
+                  this.toast(newPerm === 'write' ? 'Permission set to Can edit' : 'Permission set to Can view');
+                } else {
+                  alert(res.error || 'Failed to update permission');
+                }
+              })
+              .catch(() => alert('Network error updating permission'));
           }
 
           async loadGallery() {
@@ -14371,9 +15945,76 @@ HTACCESS;
               this.contextMenu.appendChild(div);
             };
 
+            // Resolve item ownership: 'isOwner' manages permissions, 'canEdit' (write permission) has full edit capabilities
+            const itemObj = this.filteredList.find(f => f.path === path) || this.activeContextItem;
+            const itemOwnerId = itemObj?.owner_id || this.data?.owner_id || (this.currentSection === 'home' ? CURRENT_USER_ID : null);
+            const itemPermission = itemObj?.permission || this.data?.permission || (itemOwnerId === CURRENT_USER_ID ? 'write' : 'read');
+
+            const isOwner = !itemOwnerId || itemOwnerId === CURRENT_USER_ID;
+            const canEdit = isOwner || itemPermission === 'write';
+            const isReadOnly = !this.isLoggedIn || !canEdit;
+
             const starSvg = isStarred
-              ? '<svg viewBox="0 0 24 24" style="color:#ff0000;"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
+              ? '<svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>'
               : '<svg viewBox="0 0 24 24"><path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/></svg>';
+
+            // 1. Read-Only Context Menu (Guests / 'Can view' users)
+            if (isReadOnly) {
+              if (type === 'folder') {
+                addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
+                if (this.isLoggedIn) {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy to My Drive', () => this.setClipboardSingle('copy', path));
+                }
+                addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public Folder Link', () => this.createShareLink(path));
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?access=user&action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>', 'Read as Manga', () => mangaViewer.openPath(path));
+                addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
+              } else {
+                if (fileType === 'archive' || ['zip', 'rar', 'tar', 'gz', 'tgz', '7z'].includes((name.split('.').pop() || '').toLowerCase())) {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Inspect Archive', () => this.previewArchive(path, name));
+                } else {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Play', () => this.openFile(path, true));
+                }
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'file'));
+                if (this.isLoggedIn) {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', 'Copy to My Drive', () => this.setClipboardSingle('copy', path));
+                }
+                addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => { window.location.href = `?access=user&action=download&f=${encodeURIComponent(path)}`; });
+                addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public File Link', () => this.createShareLink(path));
+                if (fileType === 'image') {
+                  addItem('<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"/></svg>', 'Search on Google', () => this.searchImageOnGoogle(path));
+                }
+                addItem('<svg viewBox="0 0 24 24"><path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/></svg>', 'Info', () => this.showDetails(path));
+              }
+
+              this.contextMenu.style.left = '-9999px';
+              this.contextMenu.style.top = '-9999px';
+              this.contextMenu.classList.add('active');
+
+              const menuWidth = this.contextMenu.offsetWidth || 230;
+              const menuHeight = this.contextMenu.offsetHeight || 320;
+              const padding = 12;
+
+              let posX = e.clientX;
+              let posY = e.clientY;
+
+              if (posX + menuWidth > window.innerWidth - padding) {
+                posX = Math.max(padding, window.innerWidth - menuWidth - padding);
+              }
+              if (posY + menuHeight > window.innerHeight - padding) {
+                posY = Math.max(padding, window.innerHeight - menuHeight - padding);
+              }
+
+              this.contextMenu.style.left = `${posX}px`;
+              this.contextMenu.style.top = `${posY}px`;
+              return;
+            }
+
+            // 2. Full Permission Context Menu ('Can edit' & Owners)
+            if (isOwner) {
+              addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Sharing &amp; Permissions', () => this.openPermissionsModal(path, name, type === 'folder'));
+            }
 
             if (type === 'folder') {
               if (this.clipboard && this.clipboard.items && this.clipboard.items.length > 0) {
@@ -14388,8 +16029,8 @@ HTACCESS;
               addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Open', () => this.navigate(path));
               addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'folder'));
               addItem('<svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg>', 'Public Folder Link', () => this.createShareLink(path));
-              addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
-              addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
+              addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => this.downloadZipWithProgress(`?access=user&action=download_zip&dir=${encodeURIComponent(path)}`, null, `${name}.zip`));
+              addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.1-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
                 this.showInputModal('Compress Folder', 'Archive Filename (.zip)', `${name}.zip`, (zipName) => {
                   this.runServerTaskWithProgress('Compressing folder', 'zip', { dir: this.currentPath || '', items: [path], zip_name: zipName || `${name}.zip` }, () => {
                     this.toast('Folder compressed');
@@ -14407,19 +16048,19 @@ HTACCESS;
             } else {
               if (fileType === 'archive' || ['zip', 'rar', 'tar', 'gz', 'tgz', '7z'].includes((name.split('.').pop() || '').toLowerCase())) {
                 addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Inspect Archive', () => this.previewArchive(path, name));
-                addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm0 12H4V8h16v10z"/></svg>', 'Extract to Folder', () => this.unzipItem(path, true));
+                addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.1-.89-2-2-2zm0 12H4V8h16v10z"/></svg>', 'Extract to Folder', () => this.unzipItem(path, true));
                 addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Extract Here', () => this.unzipItem(path, false));
               } else {
                 addItem('<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>', 'Preview / Play', () => this.openFile(path, true));
               }
               addItem('<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>', 'Open in a new tab', () => this.openInNewTab(path, 'file'));
-              addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => { window.location.href = `?action=download&f=${encodeURIComponent(path)}`; });
+              addItem('<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>', 'Download', () => { window.location.href = `?access=user&action=download&f=${encodeURIComponent(path)}`; });
               if (fileType === 'image') {
                 addItem('<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z"/></svg>', 'Search on Google', () => this.searchImageOnGoogle(path));
                 addItem('<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>', 'Edit Image', () => this.openImageEditor(path, name));
               }
               if (fileType !== 'archive') {
-                addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
+                addItem('<svg viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.1 0 2-.89 2-2V8c0-1.1-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>', 'Compress to ZIP', () => {
                   const baseName = name.replace(/\.[^/.]+$/, '');
                   this.showInputModal('Compress File', 'Archive Filename (.zip)', `${baseName}.zip`, (zipName) => {
                     this.runServerTaskWithProgress('Compressing file', 'zip', { dir: this.currentPath || '', items: [path], zip_name: zipName || `${baseName}.zip` }, () => {
@@ -14786,6 +16427,10 @@ HTACCESS;
             this.savedScrollTop = preserveScroll && scrollEl ? scrollEl.scrollTop : 0;
             if (this.isSearching && this.searchQuery) {
               this.performSearch(this.searchQuery);
+            } else if (this.currentSection === 'public') {
+              this.loadPublic();
+            } else if (this.currentSection === 'shared') {
+              this.loadShared();
             } else if (this.currentSection === 'starred') {
               this.loadStarred();
             } else if (this.currentSection === 'recents') {
@@ -14856,6 +16501,17 @@ HTACCESS;
             // Reset and cleanup Image Editor state & memory cache on close
             if (typeof window.resetImageEditorSession === 'function') {
               window.resetImageEditorSession();
+            }
+
+            // Automatically navigate guests back to Public page upon closing login modal
+            const loginModalWasOpen = document.getElementById('modal-login')?.style.display === 'flex';
+            if (!this.isLoggedIn && (loginModalWasOpen || this.currentSection !== 'public')) {
+              this.modalStack = [];
+              const mb = document.getElementById('modal-backdrop');
+              if (mb) mb.classList.remove('active');
+              document.querySelectorAll('.modal-box').forEach(m => m.style.display = 'none');
+              this.switchDriveSection('public');
+              return;
             }
 
             // If Media Lightbox is currently open behind the details modal, keep lightbox open without navigating away!
@@ -34777,6 +36433,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="lightbox-title" id="lb-title">image.jpg</div>
                 </div>
                 <div style="display:flex; gap:0.4rem; align-items:center;">
+                  <button class="btn-icon" id="btn-lb-zoom-out" title="Zoom Out (-)">
+                    <svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+                  </button>
+                  <button class="btn-icon" id="btn-lb-zoom-in" title="Zoom In (+)">
+                    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                  </button>
                   <button class="btn-icon" id="btn-lb-slideshow" title="Play Slideshow (15s)">
                     <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                   </button>
@@ -35987,7 +37649,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   e.stopPropagation();
                   this.close();
                 });
-
+    
+                document.getElementById('btn-lb-zoom-in')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.zoomIn();
+                });
+    
+                document.getElementById('btn-lb-zoom-out')?.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  this.zoomOut();
+                });
+    
                 document.getElementById('btn-lb-slideshow')?.addEventListener('click', (e) => {
                   e.stopPropagation();
                   this.toggleSlideshow();
@@ -36092,6 +37764,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                   if (e.key === 'Escape') {
                     this.close();
+                  } else if (e.key === '+' || e.key === '=') {
+                    e.preventDefault();
+                    this.zoomIn();
+                  } else if (e.key === '-' || e.key === '_') {
+                    e.preventDefault();
+                    this.zoomOut();
+                  } else if (e.key === '0') {
+                    e.preventDefault();
+                    this.resetTransform(true);
                   } else if (e.key === ' ' && (e.target === document.body || e.target === this.el || e.target === mediaEl)) {
                     if (mediaEl) {
                       e.preventDefault();
@@ -36205,11 +37886,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 });
 
                 // Mobile Touch Handling (Tap Toggle, Double Tap Zoom, Pinch & Swipe)
+                this.isPinching = false;
+    
                 this.body.addEventListener('touchstart', (e) => {
                   const isImg = !!this.body.querySelector('img.lightbox-media');
                   if (e.target.closest('video, audio, .lightbox-audio-card, button, .lightbox-carousel-wrap, .lightbox-header, .lightbox-bottom-bar, .lightbox-arrow')) return;
-
+    
                   if (e.touches.length === 2 && isImg) {
+                    this.isPinching = true;
                     this.isTouchPanning = false;
                     this.initialPinchDistance = Math.hypot(
                       e.touches[0].clientX - e.touches[1].clientX,
@@ -36217,24 +37901,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     );
                     this.initialPinchScale = this.scale;
                   } else if (e.touches.length === 1) {
+                    this.isPinching = false;
                     this.touchStartX = e.touches[0].clientX;
                     this.touchStartY = e.touches[0].clientY;
                     this.touchStartTime = Date.now();
                     this.initialPanX = this.panX;
                     this.initialPanY = this.panY;
                     this.swipeDeltaX = 0;
-
+    
                     if (this.scale > 1 && isImg) {
                       this.isTouchPanning = true;
                     }
                   }
                 }, { passive: false });
-
+    
                 this.body.addEventListener('touchmove', (e) => {
                   const isImg = !!this.body.querySelector('img.lightbox-media');
-
+    
                   if (e.touches.length === 2 && isImg) {
                     e.preventDefault();
+                    this.isPinching = true;
                     const currDist = Math.hypot(
                       e.touches[0].clientX - e.touches[1].clientX,
                       e.touches[0].clientY - e.touches[1].clientY
@@ -36244,17 +37930,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       if (this.scale === 1) {
                         this.panX = 0;
                         this.panY = 0;
+                      } else {
+                        this.clampPan();
                       }
                       this.applyTransform(false);
                     }
-                  } else if (e.touches.length === 1) {
+                  } else if (e.touches.length === 1 && !this.isPinching) {
                     const diffX = e.touches[0].clientX - this.touchStartX;
                     const diffY = e.touches[0].clientY - this.touchStartY;
-
+    
                     if (this.scale > 1 && this.isTouchPanning && isImg) {
                       e.preventDefault();
                       this.panX = this.initialPanX + diffX;
                       this.panY = this.initialPanY + diffY;
+                      this.clampPan();
                       this.applyTransform(false);
                     } else if (this.scale === 1) {
                       if (Math.abs(diffX) > 8 && Math.abs(diffX) > Math.abs(diffY)) {
@@ -36269,25 +37958,48 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     }
                   }
                 }, { passive: false });
-
+    
                 this.body.addEventListener('touchend', (e) => {
                   const isImg = !!this.body.querySelector('img.lightbox-media');
                   this.lastTouchEndTime = Date.now();
-
+    
+                  if (e.touches.length === 1 && this.isPinching) {
+                    this.isPinching = false;
+                    this.touchStartX = e.touches[0].clientX;
+                    this.touchStartY = e.touches[0].clientY;
+                    this.initialPanX = this.panX;
+                    this.initialPanY = this.panY;
+                    if (this.scale > 1 && isImg) {
+                      this.isTouchPanning = true;
+                    }
+                    return;
+                  }
+    
                   if (e.touches.length === 0) {
+                    if (this.isPinching) {
+                      this.isPinching = false;
+                      this.isTouchPanning = false;
+                      if (this.scale <= 1) {
+                        this.resetTransform(true);
+                      } else {
+                        this.clampPan();
+                        this.applyTransform(true);
+                      }
+                      return;
+                    }
+    
                     if (this.scale > 1) {
                       this.isTouchPanning = false;
                       this.clampPan();
                       this.applyTransform(true);
                     }
-
+    
                     const touchEndX = e.changedTouches[0].clientX;
                     const touchEndY = e.changedTouches[0].clientY;
                     const diffX = touchEndX - this.touchStartX;
                     const diffY = touchEndY - this.touchStartY;
                     const duration = Date.now() - this.touchStartTime;
-
-                    // Tap detection
+    
                     if (Math.abs(diffX) < 10 && Math.abs(diffY) < 10 && duration < 250) {
                       const now = Date.now();
                       if (now - this.lastTapTime < 300 && isImg) {
@@ -36297,17 +38009,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           this.resetTransform(true);
                         } else {
                           this.scale = 2.5;
-                          const rect = this.body.getBoundingClientRect();
-                          const tapX = touchEndX - rect.left - rect.width / 2;
-                          const tapY = touchEndY - rect.top - rect.height / 2;
-                          this.panX = -tapX * 1.5;
-                          this.panY = -tapY * 1.5;
+                          this.panX = 0;
+                          this.panY = 0;
                           this.clampPan();
                           this.applyTransform(true);
                         }
                         return;
                       }
-
+    
                       this.lastTapTime = now;
                       clearTimeout(this.tapTimeout);
                       this.tapTimeout = setTimeout(() => {
@@ -36316,8 +38025,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       }, 260);
                       return;
                     }
-
-                    // Swipe between images when scale is 1
+    
                     if (this.scale === 1) {
                       const img = this.body.querySelector('.lightbox-media');
                       if (Math.abs(this.swipeDeltaX) > 55) {
@@ -36340,7 +38048,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 });
               }
-
+    
+              zoomIn(factor = 1.35) {
+                const img = this.body.querySelector('.lightbox-media');
+                if (!img || img.tagName !== 'IMG') return;
+                this.scale = Math.min(5, this.scale * factor);
+                this.clampPan();
+                this.applyTransform(true);
+              }
+    
+              zoomOut(factor = 1.35) {
+                const img = this.body.querySelector('.lightbox-media');
+                if (!img || img.tagName !== 'IMG') return;
+                this.scale = Math.max(1, this.scale / factor);
+                if (this.scale === 1) {
+                  this.panX = 0;
+                  this.panY = 0;
+                } else {
+                  this.clampPan();
+                }
+                this.applyTransform(true);
+              }
+    
               clampPan() {
                 const img = this.body.querySelector('.lightbox-media');
                 if (!img || this.scale <= 1) {
@@ -36348,9 +38077,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   this.panY = 0;
                   return;
                 }
-                const rect = this.body.getBoundingClientRect();
-                const maxPanX = Math.max(0, (rect.width * this.scale - rect.width) / 2);
-                const maxPanY = Math.max(0, (rect.height * this.scale - rect.height) / 2);
+                const bodyRect = this.body.getBoundingClientRect();
+                const imgW = img.offsetWidth || bodyRect.width;
+                const imgH = img.offsetHeight || bodyRect.height;
+                const maxPanX = Math.max(0, (imgW * this.scale - bodyRect.width) / 2);
+                const maxPanY = Math.max(0, (imgH * this.scale - bodyRect.height) / 2);
                 this.panX = Math.min(maxPanX, Math.max(-maxPanX, this.panX));
                 this.panY = Math.min(maxPanY, Math.max(-maxPanY, this.panY));
               }
@@ -36657,6 +38388,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const isAudio = item.type === 'audio' || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'm4r', 'mid', 'midi'].includes(ext);
                 const isVideo = item.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv', 'avi', 'ts', '3gp', 'wmv', 'flv'].includes(ext);
 
+                const btnZoomIn = document.getElementById('btn-lb-zoom-in');
+                const btnZoomOut = document.getElementById('btn-lb-zoom-out');
+                if (btnZoomIn) btnZoomIn.style.display = isImage ? 'flex' : 'none';
+                if (btnZoomOut) btnZoomOut.style.display = isImage ? 'flex' : 'none';
                 const btnSlideshow = document.getElementById('btn-lb-slideshow');
                 if (btnSlideshow) btnSlideshow.style.display = isImage ? 'flex' : 'none';
                 const btnSearchGoogle = document.getElementById('btn-lb-search-google');
@@ -44393,7 +46128,7 @@ if (isset($_GET['action'])) {
       ");
     } catch(Exception $e) {}
 
-    // PHPShares (ArtCODE) Schema Initialization
+    // PHPShares (PHPMusic) Schema Initialization
     try {
       $db->exec("
         CREATE TABLE IF NOT EXISTS art_series (
@@ -45931,7 +47666,7 @@ HTML;
         send_json(['status' => 'error', 'message' => 'getID3 library is missing.']);
       }
 
-      $temp_id = preg_replace('/[^a-zA-Z0-9_.-]/', '', $_POST['temp_id'] ?? '');
+      $temp_id = preg_replace('/[^a-zA-Z0-9_\\.-]/', '', $_POST['temp_id'] ?? '');
       $is_chunked = !empty($temp_id);
       $temp_file_path = $is_chunked ? (MUSIC_DIR . '/.tmp_uploads/' . $temp_id) : '';
 
@@ -47994,23 +49729,82 @@ HTML;
       break;
 
     case 'get_arts_metadata_index':
-      $meta_type = $_GET['meta'] ?? 'tags'; 
-      $allowed = ['tags', 'characters', 'parodies', 'groups_name', 'series'];
+      $meta_type = $_GET['meta'] ?? 'tags';
+      $allowed = ['tags', 'characters', 'parodies', 'groups_name', 'series', 'artists'];
       if (!in_array($meta_type, $allowed)) { send_json([]); }
-      
-      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-      $offset = ($page - 1) * 50;
 
-      if ($meta_type === 'series') {
-        $stmt = $db->query("SELECT title as name, COUNT(a.id) as count FROM art_series s JOIN arts a ON s.id = a.series_id GROUP BY s.id ORDER BY count DESC LIMIT 50 OFFSET $offset");
+      $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+      $offset = ($page - 1) * 60;
+
+      if ($meta_type === 'artists') {
+        $stmt = $db->query("
+          SELECT 
+            u.id as user_id,
+            u.artist as name,
+            COUNT(a.id) as count,
+            (
+              SELECT COALESCE(f.thumb_path, f.file_path)
+              FROM art_files f
+              WHERE f.art_id IN (SELECT id FROM arts WHERE user_id = u.id)
+              ORDER BY f.id DESC, f.sort_order ASC
+              LIMIT 1
+            ) as cover_image
+          FROM users u
+          JOIN arts a ON u.id = a.user_id
+          WHERE u.banned = 0 AND u.email NOT LIKE 'deleted_%'
+          GROUP BY u.id
+          ORDER BY count DESC
+          LIMIT 60 OFFSET $offset
+        ");
         send_json($stmt->fetchAll());
         break;
       }
-      
-      // Fetch all entries to aggregate counts locally since SQLite split aggregation is complex
-      $stmt = $db->query("SELECT $meta_type FROM arts WHERE $meta_type IS NOT NULL AND $meta_type != ''");
+
+      if ($meta_type === 'series') {
+        $stmt = $db->query("
+          SELECT 
+            s.id,
+            s.public_id,
+            s.title as name,
+            COUNT(a.id) as count,
+            (
+              SELECT COALESCE(f.thumb_path, f.file_path)
+              FROM art_files f
+              WHERE f.art_id IN (SELECT id FROM arts WHERE series_id = s.id)
+              ORDER BY f.id DESC, f.sort_order ASC
+              LIMIT 1
+            ) as cover_image
+          FROM art_series s
+          JOIN arts a ON s.id = a.series_id
+          GROUP BY s.id
+          ORDER BY count DESC
+          LIMIT 60 OFFSET $offset
+        ");
+        send_json($stmt->fetchAll());
+        break;
+      }
+
+      // Fetch entries along with their newest artwork cover image
+      $stmt = $db->query("
+        SELECT 
+          a.id,
+          a.$meta_type,
+          (
+            SELECT COALESCE(f.thumb_path, f.file_path)
+            FROM art_files f
+            WHERE f.art_id = a.id
+            ORDER BY f.sort_order ASC
+            LIMIT 1
+          ) as cover_image
+        FROM arts a
+        WHERE a.$meta_type IS NOT NULL AND a.$meta_type != ''
+        ORDER BY a.id DESC
+      ");
+
       $counts = [];
       $actual_names = [];
+      $covers = [];
+
       while ($row = $stmt->fetch()) {
         $items = explode(',', $row[$meta_type]);
         foreach ($items as $item) {
@@ -48020,17 +49814,23 @@ HTML;
             if (!isset($counts[$lower])) {
               $counts[$lower] = 0;
               $actual_names[$lower] = $trimmed;
+              $covers[$lower] = $row['cover_image'] ?? '';
             }
             $counts[$lower]++;
           }
         }
       }
-      arsort($counts); // Sort by count descending
+      arsort($counts);
+
       $result = [];
       foreach ($counts as $lower => $count) {
-        $result[] = ['name' => $actual_names[$lower], 'count' => $count];
+        $result[] = [
+          'name' => $actual_names[$lower],
+          'count' => $count,
+          'cover_image' => $covers[$lower] ?? ''
+        ];
       }
-      $sliced = array_slice($result, $offset, 50);
+      $sliced = array_slice($result, $offset, 60);
       send_json($sliced);
       break;
 
@@ -48139,7 +49939,7 @@ HTML;
       $public_id = $_GET['public_id'] ?? $_GET['id'] ?? '';
       $ep_sort = ($_GET['sort'] ?? 'oldest') === 'newest' ? 'ORDER BY a.id DESC' : 'ORDER BY a.id ASC';
       $ep_page = max(1, (int)($_GET['page'] ?? 1));
-      $ep_limit = 25;
+      $ep_limit = 100;
       $ep_offset = ($ep_page - 1) * $ep_limit;
 
       $stmt_s = $db->prepare("
@@ -48147,7 +49947,7 @@ HTML;
         (SELECT COUNT(*) FROM arts WHERE series_id = s.id) as works_count,
         (SELECT COUNT(*) FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE series_id = s.id)) as total_pages,
         (SELECT COALESCE(SUM(views), 0) FROM arts WHERE series_id = s.id) as total_views,
-        (SELECT COALESCE(thumb_path, file_path) FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE series_id = s.id ORDER BY id DESC) LIMIT 1) as cover_image
+        (SELECT COALESCE(thumb_path, file_path) FROM art_files WHERE art_id IN (SELECT id FROM arts WHERE series_id = s.id) ORDER BY id DESC, sort_order ASC LIMIT 1) as cover_image
         FROM art_series s
         JOIN users u ON s.user_id = u.id
         WHERE s.public_id = ? OR s.id = ? OR s.title = ?
@@ -48171,6 +49971,13 @@ HTML;
         $series['ep_total_pages'] = ceil($series['works_count'] / $ep_limit);
         $series['ep_sort'] = ($_GET['sort'] ?? 'oldest') === 'newest' ? 'newest' : 'oldest';
 
+        if (empty(trim($series['description'] ?? ''))) {
+          $stmt_first_desc = $db->prepare("SELECT description FROM arts WHERE series_id = ? ORDER BY id ASC LIMIT 1");
+          $stmt_first_desc->execute([$series['id']]);
+          $first_desc = $stmt_first_desc->fetchColumn();
+          if ($first_desc) $series['description'] = $first_desc;
+        }
+
         $stmt_all_files = $db->prepare("
           SELECT f.id, f.art_id, f.file_path, f.thumb_path, f.sort_order, a.title as work_title, a.public_id as work_public_id
           FROM art_files f
@@ -48182,12 +49989,15 @@ HTML;
         $series['all_files'] = $stmt_all_files->fetchAll();
 
         $all_tags = []; $all_parodies = []; $all_characters = []; $all_groups = [];
+        $has_nsfw = 0;
         foreach ($series['works'] as $w) {
+          if (!empty($w['nsfw'])) $has_nsfw = 1;
           if (!empty($w['tags'])) foreach (explode(',', $w['tags']) as $t) { $t = trim($t); if ($t) $all_tags[$t] = ($all_tags[$t] ?? 0) + 1; }
           if (!empty($w['parodies'])) foreach (explode(',', $w['parodies']) as $p) { $p = trim($p); if ($p) $all_parodies[$p] = ($all_parodies[$p] ?? 0) + 1; }
           if (!empty($w['characters'])) foreach (explode(',', $w['characters']) as $c) { $c = trim($c); if ($c) $all_characters[$c] = ($all_characters[$c] ?? 0) + 1; }
           if (!empty($w['groups_name'])) foreach (explode(',', $w['groups_name']) as $g) { $g = trim($g); if ($g) $all_groups[$g] = ($all_groups[$g] ?? 0) + 1; }
         }
+        $series['nsfw'] = $has_nsfw;
         $series['aggregated_tags'] = $all_tags;
         $series['aggregated_parodies'] = $all_parodies;
         $series['aggregated_characters'] = $all_characters;
@@ -48219,7 +50029,7 @@ HTML;
       if ($sort === 'oldest') $order_by = "ORDER BY a.created_at ASC";
       elseif ($sort === 'popular') $order_by = "ORDER BY a.views DESC, a.created_at DESC";
       elseif ($sort === 'most_liked') $order_by = "ORDER BY (SELECT COUNT(*) FROM art_favorites WHERE art_id = a.id) DESC, a.created_at DESC";
-      $limit = 24;
+      $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 24;
       $offset = ($page - 1) * $limit;
 
       $where_clauses = ["1=1"];
@@ -48372,6 +50182,9 @@ HTML;
       $type = (isset($_POST['type']) && $_POST['type'] === 'manga') ? 'manga' : 'image';
       
       $series_name = trim(htmlspecialchars($_POST['series'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if ($type === 'manga' && empty($series_name)) {
+        $series_name = $title;
+      }
       $series_id = null;
       if ($series_name !== '') {
         $stmt_s = $db->prepare("SELECT id FROM art_series WHERE LOWER(title) = LOWER(?)");
@@ -48409,7 +50222,7 @@ HTML;
           foreach ($temp_ids as $i => $item) {
             $t_id = is_array($item) ? ($item['temp_id'] ?? '') : $item;
             $t_name = is_array($item) ? ($item['file_name'] ?? '') : $item;
-            $safe_tid = preg_replace('/[^a-zA-Z0-9_.-]/', '', $t_id);
+            $safe_tid = preg_replace('/[^a-zA-Z0-9_\\.-]/', '', $t_id);
             $tmp_path = MUSIC_DIR . '/.tmp_uploads/' . $safe_tid;
 
             if (!file_exists($tmp_path)) continue;
@@ -48477,7 +50290,16 @@ HTML;
         }
         
         $db->commit();
-        send_json(['status' => 'success', 'public_id' => $public_id]);
+
+        // Fetch Series Public ID for redirection context
+        $series_public_id = null;
+        if ($series_id) {
+          $stmt_sp = $db->prepare("SELECT public_id FROM art_series WHERE id = ?");
+          $stmt_sp->execute([$series_id]);
+          $series_public_id = $stmt_sp->fetchColumn();
+        }
+
+        send_json(['status' => 'success', 'public_id' => $public_id, 'type' => $type, 'series_public_id' => $series_public_id]);
       } catch (Exception $e) {
         $db->rollBack();
         send_json(['status' => 'error', 'message' => 'Database error during upload: ' . $e->getMessage()]);
@@ -48506,8 +50328,12 @@ HTML;
       $characters = trim(htmlspecialchars($_POST['characters'] ?? '', ENT_QUOTES, 'UTF-8'));
       $groups_name = trim(htmlspecialchars($_POST['groups'] ?? '', ENT_QUOTES, 'UTF-8'));
       $nsfw = isset($_POST['nsfw']) && $_POST['nsfw'] == '1' ? 1 : 0;
+      $type = (isset($_POST['type']) && $_POST['type'] === 'manga') ? 'manga' : 'image';
       
       $series_name = trim(htmlspecialchars($_POST['series'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if ($type === 'manga' && empty($series_name)) {
+        $series_name = $title;
+      }
       $series_id = null;
       if ($series_name !== '') {
         $stmt_s = $db->prepare("SELECT id FROM art_series WHERE LOWER(title) = LOWER(?)");
@@ -48529,7 +50355,7 @@ HTML;
 
       $db->beginTransaction();
       try {
-        $db->prepare("UPDATE arts SET series_id=?, title=?, description=?, tags=?, parodies=?, characters=?, groups_name=?, nsfw=?, updated_at=CURRENT_TIMESTAMP WHERE public_id=?")->execute([$series_id, $title, $description, $tags, $parodies, $characters, $groups_name, $nsfw, $public_id]);
+        $db->prepare("UPDATE arts SET series_id=?, title=?, description=?, tags=?, parodies=?, characters=?, groups_name=?, type=?, nsfw=?, updated_at=CURRENT_TIMESTAMP WHERE public_id=?")->execute([$series_id, $title, $description, $tags, $parodies, $characters, $groups_name, $type, $nsfw, $public_id]);
 
         // 1. Handle Deleted Files
         $deleted_files = json_decode($_POST['deleted_files'] ?? '[]', true);
@@ -48539,8 +50365,8 @@ HTML;
           $stmt_del = $db->prepare("SELECT file_path, thumb_path FROM art_files WHERE art_id = ? AND id IN ($placeholders)");
           $stmt_del->execute(array_merge([$art_id], $del_ids));
           while ($f = $stmt_del->fetch()) {
-            if (!empty($f['file_path'])) @unlink(MUSIC_DIR . '/' . $f['file_path']);
-            if (!empty($f['thumb_path'])) @unlink(MUSIC_DIR . '/' . $f['thumb_path']);
+            if (!empty($f['file_path']) && file_exists(MUSIC_DIR . '/' . $f['file_path'])) @unlink(MUSIC_DIR . '/' . $f['file_path']);
+            if (!empty($f['thumb_path']) && file_exists(MUSIC_DIR . '/' . $f['thumb_path'])) @unlink(MUSIC_DIR . '/' . $f['thumb_path']);
           }
           $db->prepare("DELETE FROM art_files WHERE art_id = ? AND id IN ($placeholders)")->execute(array_merge([$art_id], $del_ids));
         }
@@ -48555,10 +50381,10 @@ HTML;
             $file_id = (int)$file_id;
             $t_id = is_array($item) ? ($item['temp_id'] ?? '') : $item;
             $t_name = is_array($item) ? ($item['file_name'] ?? '') : $item;
-            $safe_tid = preg_replace('/[^a-zA-Z0-9_.-]/', '', $t_id);
+            $safe_tid = preg_replace('/[^a-zA-Z0-9_\\.-]/', '', $t_id);
             $tmp_path = MUSIC_DIR . '/.tmp_uploads/' . $safe_tid;
 
-            if (!file_exists($tmp_path)) continue;
+            if (empty($safe_tid) || !file_exists($tmp_path)) continue;
 
             $ext = strtolower(pathinfo($t_name ?: $safe_tid, PATHINFO_EXTENSION));
             if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])) {
@@ -48579,7 +50405,7 @@ HTML;
               @file_put_contents($upload_dir . '/' . $filename, $webpData);
               @file_put_contents($upload_dir . '/' . $thumbname, $thumbData);
             } else {
-              rename($tmp_path, $upload_dir . '/' . $filename);
+              @copy($tmp_path, $upload_dir . '/' . $filename);
               @copy($upload_dir . '/' . $filename, $upload_dir . '/' . $thumbname);
             }
             @unlink($tmp_path);
@@ -48590,8 +50416,8 @@ HTML;
             $stmt_old->execute([$file_id, $art_id]);
             $old = $stmt_old->fetch();
             if ($old) {
-              if (!empty($old['file_path'])) @unlink(MUSIC_DIR . '/' . $old['file_path']);
-              if (!empty($old['thumb_path'])) @unlink(MUSIC_DIR . '/' . $old['thumb_path']);
+              if (!empty($old['file_path']) && file_exists(MUSIC_DIR . '/' . $old['file_path'])) @unlink(MUSIC_DIR . '/' . $old['file_path']);
+              if (!empty($old['thumb_path']) && file_exists(MUSIC_DIR . '/' . $old['thumb_path'])) @unlink(MUSIC_DIR . '/' . $old['thumb_path']);
               $stmt_upd_file->execute([$rel_path, $rel_thumb, $file_id]);
             }
           }
@@ -48609,10 +50435,10 @@ HTML;
           foreach ($new_files as $item) {
             $t_id = is_array($item) ? ($item['temp_id'] ?? '') : $item;
             $t_name = is_array($item) ? ($item['file_name'] ?? '') : $item;
-            $safe_tid = preg_replace('/[^a-zA-Z0-9_.-]/', '', $t_id);
+            $safe_tid = preg_replace('/[^a-zA-Z0-9_\\.-]/', '', $t_id);
             $tmp_path = MUSIC_DIR . '/.tmp_uploads/' . $safe_tid;
 
-            if (!file_exists($tmp_path)) continue;
+            if (empty($safe_tid) || !file_exists($tmp_path)) continue;
 
             $ext = strtolower(pathinfo($t_name ?: $safe_tid, PATHINFO_EXTENSION));
             if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])) {
@@ -48634,7 +50460,7 @@ HTML;
               @file_put_contents($upload_dir . '/' . $filename, $webpData);
               @file_put_contents($upload_dir . '/' . $thumbname, $thumbData);
             } else {
-              rename($tmp_path, $upload_dir . '/' . $filename);
+              @copy($tmp_path, $upload_dir . '/' . $filename);
               @copy($upload_dir . '/' . $filename, $upload_dir . '/' . $thumbname);
             }
             @unlink($tmp_path);
@@ -48655,7 +50481,15 @@ HTML;
         }
 
         $db->commit();
-        send_json(['status' => 'success']);
+
+        $series_public_id = null;
+        if ($series_id) {
+          $stmt_sp = $db->prepare("SELECT public_id FROM art_series WHERE id = ?");
+          $stmt_sp->execute([$series_id]);
+          $series_public_id = $stmt_sp->fetchColumn();
+        }
+
+        send_json(['status' => 'success', 'type' => $type, 'series_public_id' => $series_public_id]);
       } catch (Exception $e) {
         $db->rollBack();
         http_response_code(400);
@@ -50711,6 +52545,11 @@ HTML;
           $details['song_count'] = count($songs);
         }
       } elseif (in_array($type, ['artist', 'album', 'genre', 'year'])) {
+        if ($name === '' && !empty($_GET['filter_user_id'])) {
+          $stmt_u_name = $db->prepare("SELECT artist FROM users WHERE id = ?");
+          $stmt_u_name->execute([(int)$_GET['filter_user_id']]);
+          $name = $stmt_u_name->fetchColumn() ?: '';
+        }
         if ($name === '') { http_response_code(400); exit; }
         $field = $type;
         $filter_user_id = $_GET['filter_user_id'] ?? '';
@@ -55281,9 +57120,13 @@ function perform_cover_scan($db) {
 
       .main-content {
         flex-grow: 1;
+        min-width: 0;
+        width: 100%;
+        max-width: 100vw;
         display: flex;
         flex-direction: column;
         overflow-y: auto;
+        overflow-x: hidden;
       }
 
       body.player-visible .main-content {
@@ -55293,6 +57136,10 @@ function perform_cover_scan($db) {
       .content-area-wrapper {
         padding: 1.5rem 2rem;
         flex-grow: 1;
+        min-width: 0;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
       }
 
       .view-details-header {
@@ -55611,15 +57458,311 @@ function perform_cover_scan($db) {
       }
 
       .art-filter-badge {
-        height: 40px !important;
+        height: 38px !important;
         padding: 0 1rem !important;
         display: inline-flex !important;
         align-items: center !important;
-        border-radius: 20px !important;
+        border-radius: 50rem !important;
         font-weight: 600 !important;
-        font-size: 0.85rem !important;
+        font-size: 0.82rem !important;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
-        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        color: #ffffff !important;
+        backdrop-filter: blur(8px);
+      }
+
+      /* 5px Card Architecture & Grid */
+      .phpfiles-art-grid {
+        display: grid !important;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)) !important;
+        gap: 5px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      @media (max-width: 768px) {
+        .phpfiles-art-grid {
+          grid-template-columns: repeat(2, 1fr) !important;
+          gap: 5px !important;
+        }
+      }
+
+      .phpfiles-card {
+        border-radius: 5px !important;
+        background: #111116 !important;
+        border: 1px solid rgba(255, 255, 255, 0.07) !important;
+        overflow: hidden !important;
+        position: relative !important;
+        transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease !important;
+        cursor: pointer !important;
+      }
+
+      .phpfiles-card:hover {
+        transform: translateY(-3px) !important;
+        border-color: rgba(255, 255, 255, 0.22) !important;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.65) !important;
+      }
+
+      .phpfiles-card-thumb {
+        width: 100% !important;
+        aspect-ratio: 1 / 1 !important;
+        object-fit: cover !important;
+        border-radius: 5px 5px 0 0 !important;
+        display: block !important;
+        background-color: #08080c !important;
+        transition: transform 0.25s ease !important;
+      }
+
+      .phpfiles-card:hover .phpfiles-card-thumb {
+        transform: scale(1.03) !important;
+      }
+
+      /* Clean borderless 3-dots button */
+      .art-more-btn,
+      .phpfiles-card .art-more-btn {
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        background: transparent !important;
+        color: #ffffff !important;
+        padding: 4px !important;
+        line-height: 1 !important;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9) !important;
+        cursor: pointer !important;
+      }
+
+      /* Clean floating page count badge without background or outline */
+      .art-page-count-badge {
+        background: transparent !important;
+        background-color: transparent !important;
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        color: #ffffff !important;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 2px #000 !important;
+        font-weight: 800 !important;
+        font-size: 0.85rem !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+      }
+
+      /* PHPMusic Viewer Layout */
+      .phpmusic-viewer-layout {
+        display: flex;
+        gap: 1.5rem;
+        align-items: flex-start;
+        max-width: 1400px;
+        margin: 0 auto;
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+      }
+
+      .phpmusic-viewer-main {
+        flex: 1;
+        min-width: 0;
+        max-width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 1.2rem;
+        box-sizing: border-box;
+      }
+
+      .phpmusic-viewer-sidebar {
+        width: 360px;
+        min-width: 0;
+        max-width: 100%;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1.2rem;
+        box-sizing: border-box;
+      }
+
+      .manga-preview-shell,
+      .manga-single-view {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+
+      @media (max-width: 991.98px) {
+        .phpmusic-viewer-layout {
+          flex-direction: column;
+          gap: 1rem;
+          padding-left: 0.25rem !important;
+          padding-right: 0.25rem !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          overflow-x: hidden !important;
+        }
+        .phpmusic-viewer-main {
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          overflow-x: hidden !important;
+        }
+        .phpmusic-viewer-sidebar {
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          overflow-x: hidden !important;
+        }
+        .manga-preview-canvas {
+          min-height: 240px !important;
+          max-height: 65vh !important;
+        }
+        .manga-single-view-img {
+          min-height: 240px !important;
+          max-height: 65vh !important;
+        }
+        .manga-thumb-item {
+          width: 58px !important;
+          height: 58px !important;
+        }
+      }
+
+      .phpmusic-author-card {
+        background: #111116;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+      }
+
+      .phpfiles-art-grid {
+        display: grid !important;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)) !important;
+        gap: 5px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      @media (max-width: 768px) {
+        .phpfiles-art-grid {
+          grid-template-columns: repeat(2, 1fr) !important;
+          gap: 5px !important;
+        }
+      }
+
+      /* Unified 5px Card Architecture */
+      .phpfiles-card {
+        border-radius: 5px !important;
+        background: #111116 !important;
+        border: 1px solid rgba(255, 255, 255, 0.07) !important;
+        overflow: hidden !important;
+        position: relative !important;
+        transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease !important;
+        cursor: pointer !important;
+      }
+
+      .phpfiles-card:hover {
+        transform: translateY(-3px) !important;
+        border-color: rgba(255, 255, 255, 0.22) !important;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.65) !important;
+      }
+
+      .phpfiles-card-thumb {
+        width: 100% !important;
+        aspect-ratio: 1 / 1 !important;
+        object-fit: cover !important;
+        border-radius: 5px 5px 0 0 !important;
+        display: block !important;
+        background-color: #08080c !important;
+        transition: transform 0.25s ease !important;
+      }
+
+      .phpfiles-card:hover .phpfiles-card-thumb {
+        transform: scale(1.03) !important;
+      }
+
+      /* Remove border, outline, and background for 3-dots button */
+      .art-more-btn,
+      .phpfiles-card .art-more-btn {
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        background: transparent !important;
+        color: #ffffff !important;
+        padding: 4px !important;
+        line-height: 1 !important;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9) !important;
+        cursor: pointer !important;
+      }
+
+      .art-more-btn:hover,
+      .art-more-btn:focus {
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        color: var(--ytm-accent) !important;
+      }
+
+      .phpmusic-comments-action-btn {
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        border-radius: 50px !important;
+        padding: 5px 14px !important;
+        font-weight: 600 !important;
+        font-size: 0.82rem !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 6px !important;
+        background: rgba(255, 255, 255, 0.06) !important;
+        color: var(--ytm-secondary-text, #aaa) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        cursor: pointer !important;
+        backdrop-filter: blur(8px) !important;
+        text-decoration: none !important;
+      }
+
+      .phpmusic-comments-action-btn:hover {
+        background: rgba(255, 255, 255, 0.14) !important;
+        color: #ffffff !important;
+        transform: scale(1.05);
+        border-color: rgba(255, 255, 255, 0.25) !important;
+      }
+
+      .phpmusic-comments-action-btn:active {
+        transform: scale(0.95);
+      }
+
+      .phpmusic-comments-action-btn.active-like {
+        color: #ffffff !important;
+        background: rgba(255, 0, 85, 0.2) !important;
+        border-color: rgba(255, 0, 85, 0.45) !important;
+      }
+
+      .phpmusic-comments-action-btn.active-dislike {
+        color: #ffffff !important;
+        background: rgba(255, 59, 48, 0.2) !important;
+        border-color: rgba(255, 59, 48, 0.45) !important;
+      }
+
+      /* Remove background and outline for image total count badge */
+      .art-page-count-badge {
+        background: transparent !important;
+        background-color: transparent !important;
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        color: #ffffff !important;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 2px #000 !important;
+        font-weight: 800 !important;
+        font-size: 0.85rem !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px !important;
       }
 
       select[id*="sort"]:hover {
@@ -61295,8 +63438,9 @@ function perform_cover_scan($db) {
 
           <hr class="text-secondary">
           
-          <div class="logged-in-only">
-            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library & Social</h6>
+<div class="logged-in-only">
+            <!-- Library & Social -->
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Library &amp; Social</h6>
             <a href="#" class="nav-link" data-view="get_recommendations">
               <i class="bi bi-magic"></i>
               <span>For You</span>
@@ -61304,10 +63448,6 @@ function perform_cover_scan($db) {
             <a href="#" class="nav-link" data-view="user_profile">
               <i class="bi bi-person-fill"></i>
               <span>My Profile</span>
-            </a>
-            <a href="?access=user&page=drive" target="_blank" rel="noopener noreferrer" class="nav-link">
-              <i class="bi bi-hdd-rack-fill"></i>
-              <span>My Drive</span>
             </a>
             <a href="#" class="nav-link" data-view="get_history">
               <i class="bi bi-clock-history"></i>
@@ -61329,10 +63469,6 @@ function perform_cover_scan($db) {
               <i class="bi bi-cloud-arrow-down-fill"></i>
               <span>Offline Library</span>
             </a>
-            <a href="#" class="nav-link" data-view="rhythm_game">
-              <i class="bi bi-controller"></i>
-              <span>Rhythm Game</span>
-            </a>
             <a href="#" class="nav-link" data-view="get_following">
               <i class="bi bi-person-lines-fill"></i>
               <span>Following</span>
@@ -61349,6 +63485,17 @@ function perform_cover_scan($db) {
               <i class="bi bi-chat-dots-fill"></i>
               <span>Messages</span>
               <span class="badge bg-danger rounded-pill d-none ms-auto inbox-badge">0</span>
+            </a>
+
+            <!-- Platforms -->
+            <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-3 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Platforms</h6>
+            <a href="?access=user&page=drive" target="_blank" rel="noopener noreferrer" class="nav-link">
+              <i class="bi bi-hdd-rack-fill"></i>
+              <span>My Drive</span>
+            </a>
+            <a href="#" class="nav-link" data-view="rhythm_game">
+              <i class="bi bi-controller"></i>
+              <span>Rhythm Game</span>
             </a>
             <a href="#" class="nav-link" data-view="audio_editor">
               <i class="bi bi-music-note-list"></i>
@@ -61379,9 +63526,10 @@ function perform_cover_scan($db) {
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="image"><i class="bi bi-image"></i> Illustrations</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="manga"><i class="bi bi-book"></i> Manga / Comics</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-filter-link" data-view="get_arts" data-filter="my_favorites"><i class="bi bi-heart-fill text-danger"></i> Favorites</a></li>
-                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-profile-link" onclick="if(currentUser) { loadView({type: 'user_profile', param: currentUser.artist, sort: 'id_desc', filter_user_id: currentUser.id, open_tab: 'arts'}); } else { showToast('Please login', 'error'); }"><i class="bi bi-person text-success"></i> My Artworks</a></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-profile-link"><i class="bi bi-person text-success"></i> My Studio Profile</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0" data-view="upload_art_page"><i class="bi bi-upload text-info"></i> Upload Artwork</a></li>
                 <li><hr class="dropdown-divider border-secondary opacity-50 my-1"></li>
+                <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="artists"><i class="bi bi-people"></i> Artists</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="tags"><i class="bi bi-tags"></i> Tags</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="characters"><i class="bi bi-person-hearts"></i> Characters</a></li>
                 <li><a href="#" class="nav-link py-2 ps-3 border-0 arts-meta-link" data-view="arts_meta" data-meta="parodies"><i class="bi bi-controller"></i> Parodies</a></li>
@@ -63172,7 +65320,6 @@ function perform_cover_scan($db) {
         </div>
       </div>
     </div>
-
 
     <div class="editor-overlay" id="editorOverlay">
       <!-- Single Header Bar -->
@@ -76468,8 +78615,32 @@ SOFTWARE.</div>
           document
             .querySelectorAll(".cat-nav-link")
             .forEach((el) => el.classList.remove("active", "text-white"));
+          document
+            .querySelectorAll(".arts-meta-link, .arts-filter-link")
+            .forEach((el) => el.classList.remove("active", "text-white"));
           let activeLink;
           switch (viewType) {
+            case "art_profile":
+              const artProfLink = document.querySelector('.arts-profile-link');
+              if (artProfLink) artProfLink.classList.add("active", "text-white");
+              const artsCol = document.getElementById("artsSubmenu");
+              if (artsCol && !artsCol.classList.contains("show")) {
+                bootstrap.Collapse.getOrCreateInstance(artsCol).show();
+              }
+              activeLink = document.querySelector('a[href="#artsSubmenu"]');
+              break;
+            case "arts_meta":
+              const metaParam = currentView.param || "tags";
+              const currentMetaLink = document.querySelector(`.arts-meta-link[data-meta="${metaParam}"]`);
+              if (currentMetaLink) {
+                currentMetaLink.classList.add("active", "text-white");
+                const collapseParent = currentMetaLink.closest(".collapse");
+                if (collapseParent && !collapseParent.classList.contains("show")) {
+                  bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
+                }
+              }
+              activeLink = document.querySelector('a[href="#artsSubmenu"]');
+              break;
             case "artist_songs":
               activeLink = document.querySelector(
                 '.nav-link[data-view="get_artists"]',
@@ -76546,14 +78717,17 @@ SOFTWARE.</div>
               activeLink = document.querySelector('a[href="#imageditorSubmenu"]');
               break;
             case "get_arts":
-              const aFilter = currentView.filter || "all";
-              const aFilterLink = document.querySelector(`.arts-filter-link[data-filter="${aFilter}"]`);
-              if (aFilterLink) {
-                aFilterLink.classList.add("active", "text-white");
-                const collapseParent = aFilterLink.closest(".collapse");
-                if (collapseParent && !collapseParent.classList.contains("show")) {
-                  bootstrap.Collapse.getOrCreateInstance(collapseParent).show();
-                }
+              if (currentView.exact_filter) {
+                const matchedMeta = document.querySelector(`.arts-meta-link[data-meta="${currentView.exact_filter}"]`);
+                if (matchedMeta) matchedMeta.classList.add("active", "text-white");
+              } else {
+                const aFilter = currentView.filter || "all";
+                const aFilterLink = document.querySelector(`.arts-filter-link[data-filter="${aFilter}"]`);
+                if (aFilterLink) aFilterLink.classList.add("active", "text-white");
+              }
+              const artsCollapse = document.getElementById("artsSubmenu");
+              if (artsCollapse && !artsCollapse.classList.contains("show")) {
+                bootstrap.Collapse.getOrCreateInstance(artsCollapse).show();
               }
               activeLink = document.querySelector('a[href="#artsSubmenu"]');
               break;
@@ -76781,6 +78955,10 @@ SOFTWARE.</div>
           } catch (e) {}
           updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
+
+          const isArtPlaceholder = ["get_arts", "view_art", "view_art_full", "read_series", "upload_art_page", "edit_art_page", "arts_meta", "view_series", "art_profile"].includes(currentView.type);
+          if (searchInputDesktop) searchInputDesktop.placeholder = isArtPlaceholder ? "Search artworks..." : "Search...";
+          if (searchInputMobile) searchInputMobile.placeholder = isArtPlaceholder ? "Search artworks..." : "Search...";
     
           // Check if view requires Authentication and User is logged out
           const authRequiredViews = [
@@ -83098,28 +85276,151 @@ SOFTWARE.</div>
               }
               break;
     
-            case "arts_meta":
-              updateContentTitle(currentView.param.toUpperCase() || "Index", !!currentUser);
+            case "arts_meta": {
+              const metaKey = currentView.param || "tags";
+              let metaLabel = "Tags";
+              let metaIcon = "bi-tags-fill";
+              let metaDesc = "Browse artworks and creations organized by descriptive tags.";
+              if (metaKey === "artists") {
+                metaLabel = "Artists";
+                metaIcon = "bi-people-fill";
+                metaDesc = "Explore talented illustrators, digital creators, and mangaka.";
+              } else if (metaKey === "characters") {
+                metaLabel = "Characters";
+                metaIcon = "bi-person-hearts";
+                metaDesc = "Explore all illustrations and manga featuring specific characters.";
+              } else if (metaKey === "parodies") {
+                metaLabel = "Parodies";
+                metaIcon = "bi-controller";
+                metaDesc = "Discover tribute fan-art and series doujins by anime, game, or franchise.";
+              } else if (metaKey === "groups_name") {
+                metaLabel = "Groups";
+                metaIcon = "bi-people-fill";
+                metaDesc = "Browse collaborative works, doujin circles, and artist teams.";
+              } else if (metaKey === "series") {
+                metaLabel = "Series";
+                metaIcon = "bi-collection-play-fill";
+                metaDesc = "Read multi-chapter manga serials and ongoing comic runs.";
+              }
+
+              updateContentTitle(metaLabel, true);
+
+              // UI adopting the "My Playlists" banner card from Screenshot 1
               contentArea.innerHTML = `
-                <div class="d-flex w-100 justify-content-between align-items-center mb-4 px-md-3 mt-4">
-                  <h4 class="text-white fw-bold m-0"><i class="bi bi-hash text-info me-2"></i> ${currentView.param.toUpperCase()}</h4>
+                <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px;">
+                  <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+                    <div class="d-flex align-items-center gap-3">
+                      <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                        <i class="bi ${metaIcon} text-danger fs-3"></i>
+                      </div>
+                      <div>
+                        <h2 class="text-white fw-bold mb-1 fs-4">${metaLabel}</h2>
+                        <p class="text-secondary small mb-0">${metaDesc}</p>
+                      </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                      <label for="meta-sort-select" class="text-secondary small fw-bold text-uppercase d-none d-sm-inline" style="letter-spacing: 0.5px;">SORT BY</label>
+                      <select id="meta-sort-select" class="form-select form-select-sm bg-dark text-white border-secondary rounded-pill" style="width: auto;">
+                        <option value="count_desc">Most Works</option>
+                        <option value="count_asc">Least Works</option>
+                        <option value="name_asc">Name (A-Z)</option>
+                        <option value="name_desc">Name (Z-A)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="w-100 position-relative">
+                    <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                    <input type="text" id="meta-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5" placeholder="Search ${metaLabel.toLowerCase()}..." style="height: 42px;">
+                  </div>
                 </div>
-                <div id="arts-meta-grid" class="mx-md-3 mb-5 d-flex flex-wrap gap-2"></div>
+
+                <div id="arts-meta-grid" class="phpfiles-art-grid px-md-3 mb-5">
+                  <div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;">
+                    <div class="spinner-border text-danger" role="status"></div>
+                  </div>
+                </div>
               `;
-              
-              const metaData = await fetchData(`?action=get_arts_metadata_index&meta=${currentView.param}`);
+
+              const metaData = await fetchData(`?action=get_arts_metadata_index&meta=${metaKey}`);
               const metaGrid = document.getElementById("arts-meta-grid");
+
               if (metaData && metaData.length > 0) {
-                metaGrid.innerHTML = metaData.map(m => `
-                  <button class="btn btn-outline-light rounded-pill mb-2 px-3 fw-bold border-secondary" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${currentView.param}', exact_val: '${escapeHTML(m.name)}'})">
-                    ${escapeHTML(m.name)} <span class="badge bg-secondary ms-1">${m.count}</span>
-                  </button>
-                `).join('');
+                window.cachedMetaData = metaData;
+
+                window.filterAndSortArtsMeta = () => {
+                  const sInp = document.getElementById("meta-search-input");
+                  const sSel = document.getElementById("meta-sort-select");
+                  const q = sInp ? sInp.value.toLowerCase().trim() : "";
+                  const sortVal = sSel ? sSel.value : "count_desc";
+
+                  let filtered = [...window.cachedMetaData];
+                  if (q) {
+                    filtered = filtered.filter(item => item.name.toLowerCase().includes(q));
+                  }
+
+                  filtered.sort((a, b) => {
+                    if (sortVal === "count_desc") return (b.count || 0) - (a.count || 0);
+                    if (sortVal === "count_asc") return (a.count || 0) - (b.count || 0);
+                    if (sortVal === "name_asc") return a.name.localeCompare(b.name);
+                    if (sortVal === "name_desc") return b.name.localeCompare(a.name);
+                    return 0;
+                  });
+
+                  if (filtered.length === 0) {
+                    metaGrid.innerHTML = `<div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;">No ${metaLabel.toLowerCase()} found matching your filter.</div>`;
+                    return;
+                  }
+
+                  // 5px radius and 5px gap playlist-style cards with preview thumbnails
+                  metaGrid.innerHTML = filtered.map(m => {
+                    const previewThumb = m.cover_image
+                      ? `<img src="?action=get_art_image&path=${encodeURIComponent(m.cover_image)}" class="phpfiles-card-thumb" alt="${escapeHTML(m.name)}" loading="lazy">`
+                      : (metaKey === 'artists' && m.user_id 
+                          ? `<img src="?action=get_profile_picture&id=${m.user_id}" class="phpfiles-card-thumb" style="object-fit: cover;" alt="${escapeHTML(m.name)}" loading="lazy">` 
+                          : `<div class="d-flex align-items-center justify-content-center w-100 h-100" style="background: #14141d;"><i class="bi bi-folder-fill fs-1" style="color: #ff9800;"></i></div>`);
+
+                    const cardClickAction = metaKey === 'artists'
+                      ? `loadView({type: 'art_profile', param: ${m.user_id}, filter_user_id: ${m.user_id}, artist_name: '${escapeHTML(m.name)}', sort: 'newest', filter: 'all'})`
+                      : `loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${metaKey}', exact_val: '${escapeHTML(m.name)}'})`;
+
+                    return `
+                      <div class="card phpfiles-card h-100" onclick="${cardClickAction}">
+                        <div style="position: relative; width: 100%; aspect-ratio: 1/1; overflow: hidden; border-radius: 5px 5px 0 0; background: #08080c;">
+                          ${previewThumb}
+                          
+                          <!-- Top right borderless more options icon -->
+                          <button class="art-more-btn position-absolute top-0 end-0 m-2" onclick="event.stopPropagation(); loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${metaKey}', exact_val: '${escapeHTML(m.name)}'});" title="View Artworks">
+                            <i class="bi bi-arrow-up-right fs-5"></i>
+                          </button>
+
+                          <!-- Bottom overlay with work count badge (no background, no outline) -->
+                          <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(to top, rgba(0,0,0,0.88) 0%, transparent 100%);">
+                            <span class="art-page-count-badge">
+                              <i class="bi bi-images me-1"></i> ${m.count} works
+                            </span>
+                            <span class="text-secondary small fw-bold text-uppercase" style="font-size: 0.68rem; letter-spacing: 0.5px;">${metaKey === 'series' ? 'Series' : 'Art'}</span>
+                          </div>
+                        </div>
+
+                        <div class="p-2 text-start d-flex flex-column justify-content-center" style="min-height: 48px; background: #111116;">
+                          <div class="fw-bold text-truncate text-white" style="font-size: 0.88rem;" title="${escapeHTML(m.name)}">${escapeHTML(m.name)}</div>
+                          <div class="text-secondary small text-truncate" style="font-size: 0.72rem;">${metaLabel.slice(0, -1)} &bull; ${m.count} creations</div>
+                        </div>
+                      </div>
+                    `;
+                  }).join('');
+                };
+
+                window.filterAndSortArtsMeta();
+
+                document.getElementById("meta-search-input")?.addEventListener("input", window.filterAndSortArtsMeta);
+                document.getElementById("meta-sort-select")?.addEventListener("change", window.filterAndSortArtsMeta);
               } else {
-                metaGrid.innerHTML = '<div class="text-center w-100 p-5 text-secondary">No tags found.</div>';
+                metaGrid.innerHTML = `<div class="text-center w-100 p-5 text-secondary" style="grid-column: 1/-1;">No ${metaLabel.toLowerCase()} cataloged yet.</div>`;
               }
               allContentloaded = true;
               break;
+            }
     
             case "get_arts": {
               const artFilter = currentView.filter || 'all';
@@ -83146,9 +85447,9 @@ SOFTWARE.</div>
                 else if (currentView.exact_filter === 'characters') filterPrefix = 'Character';
                 else if (currentView.exact_filter === 'tags') filterPrefix = 'Tag';
                 else if (currentView.exact_filter === 'series') filterPrefix = 'Series';
-                exactFilterHtml = `<span class="badge bg-secondary text-white art-filter-badge border-0 align-self-start"><i class="bi bi-funnel-fill me-1 text-info"></i> ${filterPrefix}: "${escapeHTML(currentView.exact_val)}" <i class="bi bi-x-circle ms-2 clear-art-filter-btn" style="cursor:pointer;"></i></span>`;
+                exactFilterHtml = `<span class="art-filter-badge"><i class="bi bi-funnel-fill me-1 text-info"></i> ${filterPrefix}: "${escapeHTML(currentView.exact_val)}" <i class="bi bi-x-circle ms-2 clear-art-filter-btn" style="cursor:pointer;"></i></span>`;
               } else if (currentView.searchQuery) {
-                exactFilterHtml = `<span class="badge bg-secondary text-white art-filter-badge border-0 align-self-start"><i class="bi bi-search me-1 text-info"></i> Search: "${escapeHTML(currentView.searchQuery)}" <i class="bi bi-x-circle ms-2 clear-art-filter-btn" style="cursor:pointer;"></i></span>`;
+                exactFilterHtml = `<span class="art-filter-badge"><i class="bi bi-search me-1 text-info"></i> Search: "${escapeHTML(currentView.searchQuery)}" <i class="bi bi-x-circle ms-2 clear-art-filter-btn" style="cursor:pointer;"></i></span>`;
               }
 
               const handleFilterChange = (e) => {
@@ -83167,7 +85468,7 @@ SOFTWARE.</div>
               };
 
               let sortSelectHtml = `
-                <select class="form-select form-select-sm bg-dark text-white border-secondary rounded-pill arts-sort-select" style="width: auto;">
+                <select class="form-select form-select-sm bg-dark text-white border-secondary arts-sort-select" style="width: auto;">
                   <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest</option>
                   <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest</option>
                   <option value="popular" ${currentView.sort === "popular" ? "selected" : ""}>Most Viewed</option>
@@ -83176,7 +85477,7 @@ SOFTWARE.</div>
               `;
 
               let filterSelectHtml = `
-                <select class="form-select form-select-sm bg-dark text-white border-secondary rounded-pill arts-filter-field-select" style="width: auto; min-width: 120px;">
+                <select class="form-select form-select-sm bg-dark text-white border-secondary arts-filter-field-select" style="width: auto; min-width: 110px;">
                   <option value="all" ${!currentView.exact_filter ? 'selected' : ''}>All Fields</option>
                   <option value="tags" ${currentView.exact_filter === 'tags' ? 'selected' : ''}>Tag</option>
                   <option value="characters" ${currentView.exact_filter === 'characters' ? 'selected' : ''}>Character</option>
@@ -83190,7 +85491,7 @@ SOFTWARE.</div>
               if (existingCustomSort) existingCustomSort.remove();
 
               const customSortHTML = `
-                <div id="artist-custom-sort-container" class="d-none d-md-flex align-items-center gap-2">
+                <div id="artist-custom-sort-container" class="d-none d-md-flex align-items-center" style="gap: 8px;">
                   ${filterSelectHtml}
                   ${sortSelectHtml}
                   ${exactFilterHtml}
@@ -83204,8 +85505,12 @@ SOFTWARE.</div>
                 if (exploreData && exploreData.tags) {
                   tagsHtml = `
                     <div class="mb-3 mt-0 px-md-3 d-none d-md-block" style="margin-top: -4px;">
-                      <div class="d-flex flex-wrap gap-2 justify-content-start modern-custom-scroll" style="max-height: 120px; overflow-y: auto;">
-                        ${exploreData.tags.map(t => `<button class="btn btn-dark border-secondary rounded-pill btn-sm text-white fw-medium flex-shrink-0" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: '${artFilter}', exact_filter: 'tags', exact_val: '${escapeHTML(t)}'})"><i class="bi bi-tag-fill me-1 text-secondary"></i> ${escapeHTML(t)}</button>`).join('')}
+                      <div class="d-flex flex-wrap modern-custom-scroll" style="max-height: 120px; overflow-y: auto; gap: 6px;">
+                        ${exploreData.tags.map(t => `
+                          <button class="btn btn-sm text-white fw-bold flex-shrink-0 d-inline-flex align-items-center gap-1 shadow-sm rounded-pill" style="font-size: 0.8rem; padding: 5px 14px; background: rgba(255, 0, 85, 0.08); border: 1px solid rgba(255, 0, 85, 0.25); backdrop-filter: blur(8px); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);" onmouseover="this.style.transform='translateY(-2px) scale(1.05)'; this.style.borderColor='#ff0055'; this.style.boxShadow='0 4px 12px rgba(255,0,85,0.3)';" onmouseout="this.style.transform='translateY(0) scale(1)'; this.style.borderColor='rgba(255, 0, 85, 0.25)'; this.style.boxShadow='none';" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: '${artFilter}', exact_filter: 'tags', exact_val: '${escapeHTML(t)}'})">
+                            <i class="bi bi-tag-fill text-danger me-1"></i> ${escapeHTML(t)}
+                          </button>
+                        `).join('')}
                       </div>
                     </div>
                   `;
@@ -83214,39 +85519,40 @@ SOFTWARE.</div>
 
               contentArea.innerHTML = `
                 ${tagsHtml}
-                <div class="d-flex d-md-none align-items-center justify-content-between mb-3 gap-2 w-100 mt-2">
-                  <button class="btn btn-outline-light rounded-pill btn-sm fw-bold px-3 py-2 d-flex align-items-center gap-2" data-bs-toggle="modal" data-bs-target="#arts-mobile-filter-modal">
-                    <i class="bi bi-funnel-fill text-info"></i> Advanced Filter
+                <div class="d-flex d-md-none align-items-center justify-content-between mb-3 w-100 mt-2 px-1" style="gap: 8px;">
+                  <button class="btn btn-outline-light rounded-pill px-3 py-2 fw-bold d-flex align-items-center gap-2 shadow-sm" type="button" data-bs-toggle="modal" data-bs-target="#arts-mobile-filter-modal" style="border-color: rgba(255, 255, 255, 0.2); font-size: 0.85rem; background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(8px);">
+                    <i class="bi bi-sliders text-danger"></i> Filters &amp; Sort ${exactFilterHtml ? '<span class="badge bg-danger rounded-circle p-1 ms-1"></span>' : ''}
                   </button>
+                  ${exactFilterHtml ? `<div class="d-flex align-items-center overflow-hidden">${exactFilterHtml}</div>` : ''}
                 </div>
 
-                <div id="arts-grid" class="row row-cols-2 row-cols-sm-2 row-cols-md-4 row-cols-lg-6 g-2 px-md-3 mb-4 mt-2"></div>
-                <div id="arts-pagination" class="d-flex justify-content-center mb-5"></div>
+                <div id="arts-grid" class="phpfiles-art-grid px-md-3 mb-4 mt-2"></div>
+                <div id="arts-pagination" class="d-flex justify-content-center mb-5 mt-4"></div>
 
                 <div class="modal fade d-md-none" id="arts-mobile-filter-modal" tabindex="-1">
                   <div class="modal-dialog modal-dialog-centered modal-sm">
-                    <div class="modal-content bg-dark text-white border-secondary rounded-4 shadow-lg">
-                      <div class="modal-header border-secondary pb-2">
-                        <h5 class="modal-title fw-bold text-white fs-6"><i class="bi bi-funnel-fill text-info me-2"></i> Advanced Filter</h5>
+                    <div class="modal-content bg-dark text-white border-secondary shadow-lg rounded-4" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px !important;">
+                      <div class="modal-header border-0 pb-2 px-4 pt-4">
+                        <h5 class="modal-title fw-bold text-white fs-6"><i class="bi bi-sliders text-danger me-2"></i> Filter &amp; Sort</h5>
                         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                       </div>
-                      <div class="modal-body p-4 d-flex flex-column gap-3 text-start">
+                      <div class="modal-body px-4 pb-4 d-flex flex-column text-start" style="gap: 14px;">
                         <div class="text-start w-100">
-                          <label class="form-label text-secondary small fw-bold mb-1">FIELD</label>
+                          <label class="form-label text-secondary small fw-bold mb-1" style="letter-spacing: 0.5px;">SEARCH FIELD</label>
                           ${filterSelectHtml.replace('width: auto;', 'width: 100%;')}
                         </div>
                         <div class="text-start w-100">
-                          <label class="form-label text-secondary small fw-bold mb-1">SORT BY</label>
+                          <label class="form-label text-secondary small fw-bold mb-1" style="letter-spacing: 0.5px;">SORT BY</label>
                           ${sortSelectHtml.replace('width: auto;', 'width: 100%;')}
                         </div>
-                        ${exactFilterHtml ? `<div class="mt-2 text-start d-flex justify-content-start w-100">${exactFilterHtml}</div>` : ''}
-                        <button type="button" class="btn btn-danger rounded-pill fw-bold w-100 mt-2" data-bs-dismiss="modal">Apply & Close</button>
+                        ${exactFilterHtml ? `<div class="mt-1 text-start d-flex justify-content-start w-100">${exactFilterHtml}</div>` : ''}
+                        <button type="button" class="btn btn-danger rounded-pill fw-bold w-100 mt-2 py-2 shadow-sm" data-bs-dismiss="modal">Apply Filters</button>
                       </div>
                     </div>
                   </div>
                 </div>
               `;
-              
+
               setTimeout(() => {
                 document.querySelectorAll('.arts-filter-field-select').forEach(el => el.addEventListener('change', handleFilterChange));
                 document.querySelectorAll('.arts-sort-select').forEach(el => el.addEventListener('change', (e) => {
@@ -83279,11 +85585,11 @@ SOFTWARE.</div>
               if (currentView.exact_filter) pageParams.set("exact_filter", currentView.exact_filter);
               if (currentView.exact_val) pageParams.set("exact_val", currentView.exact_val);
               if (artFilter === 'image' || artFilter === 'manga' || artFilter === 'my_favorites') pageParams.set("type_filter", artFilter);
-              
+
               const rawData = await fetchData(`?action=get_arts&${pageParams.toString()}`);
               const dataList = rawData.items || [];
               const totalArts = rawData.total || 0;
-              
+
               const bindArtCards = () => {
                 document.querySelectorAll('.art-card-item:not(.bound)').forEach(card => {
                   card.classList.add('bound');
@@ -83301,59 +85607,89 @@ SOFTWARE.</div>
               const artGrid = document.getElementById("arts-grid");
               if (dataList.length > 0) {
                 if (artFilter === 'manga') {
-                  artGrid.className = "d-flex flex-column gap-2 px-md-3 mb-4 mt-2";
+                  // BEAUTIFIED MANGA CARDS: Portrait 3:4 Aspect Ratio
                   artGrid.innerHTML = dataList.map(a => `
-                    <div class="card bg-dark text-white border-secondary overflow-hidden shadow-sm art-card-item w-100" data-id="${a.public_id}" data-is-series="${a.is_series ? '1' : '0'}" data-series-id="${a.series_public_id || a.series_id || a.series_name || ''}" style="border-radius: 8px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='var(--bs-dark)'">
-                      <div class="row g-0 align-items-center">
-                        <div class="col-auto position-relative">
-                          <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" style="width: 80px; height: 110px; object-fit: cover; display: block;">
-                          ${a.is_series ? `<div class="position-absolute top-0 start-0 m-1 px-1 bg-primary text-white rounded fw-bold" style="font-size: 0.65rem;"><i class="bi bi-collection-play-fill"></i> Series</div>` : ''}
-                        </div>
-                        <div class="col p-3 d-flex flex-column justify-content-center" style="min-width: 0;">
-                          <h6 class="fw-bold text-white mb-1 text-truncate">${escapeHTML(a.display_title || a.title)}</h6>
-                          <div class="text-secondary small d-flex align-items-center gap-2 mb-2 user-profile-link" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" onclick="event.stopPropagation()">
-                            <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle" style="width: 16px; height: 16px; object-fit: cover;">
-                            <span class="text-truncate hover-underline">${escapeHTML(a.author)}</span>
-                          </div>
-                          <div class="d-flex gap-3 text-secondary" style="font-size: 0.8rem;">
-                            <span><i class="bi bi-eye"></i> ${a.views || 0}</span>
-                            <span><i class="bi bi-images"></i> ${a.is_series ? a.works_count + ' chapters' : a.page_count + ' pages'}</span>
-                            <span class="d-none d-sm-inline"><i class="bi bi-clock"></i> ${new Date(a.created_at.replace(' ','T')+'Z').toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                        <div class="col-auto pe-3">
+                    <div class="card phpfiles-card art-card-item h-100" data-id="${a.public_id}" data-is-series="${a.is_series ? '1' : '0'}" data-series-id="${a.series_public_id || a.series_id || a.series_name || ''}">
+                      <div style="position: relative; width: 100%; aspect-ratio: 3/4; overflow: hidden; border-radius: 5px 5px 0 0; background: #08080c;">
+                        <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" class="phpfiles-card-thumb" style="aspect-ratio: 3/4 !important;" alt="${escapeHTML(a.display_title || a.title)}" loading="lazy">
+                        
+                        <!-- Top left: series badge or total pages (NO background, NO outline) -->
+                        <div class="position-absolute top-0 start-0 m-2">
                           ${a.is_series 
-                            ? `<button class="btn btn-sm btn-danger rounded-pill px-3 fw-bold" onclick="event.stopPropagation(); loadView({type: 'view_series', param: '${a.series_public_id || a.series_id || a.series_name}'})"><i class="bi bi-book me-1"></i> Series</button>` 
-                            : `<button class="btn btn-sm btn-outline-light rounded-pill px-3 fw-bold" onclick="event.stopPropagation(); loadView({type: 'read_series', param: '${a.public_id}'})"><i class="bi bi-book me-1"></i> Read</button>`}
+                            ? `<span class="art-page-count-badge" style="color: #38bdf8 !important;"><i class="bi bi-collection-play-fill me-1"></i> Series</span>` 
+                            : `<span class="art-page-count-badge"><i class="bi bi-book-half me-1"></i> ${a.page_count || 1}P</span>`}
+                        </div>
+
+                        <!-- Top right: 3-dots context button without outline or background -->
+                        <button class="art-more-btn position-absolute top-0 end-0 m-2" data-id="${a.public_id}" title="More Options">
+                          <i class="bi bi-three-dots-vertical fs-5"></i>
+                        </button>
+
+                        <!-- Bottom gradient bar with read trigger -->
+                        <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, transparent 100%);">
+                          <span class="text-white small fw-bold" style="font-size: 0.72rem; text-shadow: 0 1px 3px #000;">
+                            <i class="bi bi-eye-fill me-1"></i> ${formatSongCount(a.views || 0)}
+                          </span>
+                          ${a.is_series 
+                            ? `<span class="badge bg-danger rounded-pill px-2 py-1 fw-bold" style="font-size: 0.68rem;">${a.works_count || 1} Ch</span>` 
+                            : `<span class="badge bg-dark border border-secondary text-white rounded-pill px-2 py-1" style="font-size: 0.68rem;">Read</span>`}
+                        </div>
+                      </div>
+
+                      <div class="p-2 text-start d-flex flex-column justify-content-between" style="min-height: 52px; background: #111116;">
+                        <h6 class="fw-bold text-white text-truncate mb-1" style="font-size: 0.88rem;" title="${escapeHTML(a.display_title || a.title)}">
+                          ${escapeHTML(a.display_title || a.title)}
+                        </h6>
+                        <div class="d-flex justify-content-between align-items-center w-100">
+                          <div class="d-flex align-items-center gap-1 user-profile-link text-truncate" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" onclick="event.stopPropagation()">
+                            <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle" style="width: 16px; height: 16px; object-fit: cover;">
+                            <span class="text-secondary small text-truncate hover-underline" style="font-size: 0.76rem;">${escapeHTML(a.author)}</span>
+                          </div>
+                          <span class="text-secondary small" style="font-size: 0.72rem;"><i class="bi bi-heart-fill text-danger me-1"></i>${a.fav_count || 0}</span>
                         </div>
                       </div>
                     </div>
                   `).join('');
                 } else {
-                  artGrid.className = "row row-cols-2 row-cols-sm-2 row-cols-md-4 row-cols-lg-6 g-2 px-md-3 mb-4 mt-2";
+                  // BEAUTIFIED ILLUSTRATIONS: Using Pixiv UI of PHPMusic with 5px radius and 5px gaps
                   artGrid.innerHTML = dataList.map(a => `
-                    <div class="col">
-                      <div class="card bg-transparent border-0 overflow-hidden position-relative art-card-item h-100" data-id="${a.public_id}" data-is-series="${a.is_series ? '1' : '0'}" data-series-id="${a.series_public_id || a.series_id || a.series_name || ''}" style="border-radius: 6px; cursor: pointer;">
-                        <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" style="width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block;">
+                    <div class="card phpfiles-card art-card-item h-100" data-id="${a.public_id}" data-is-series="${a.is_series ? '1' : '0'}" data-series-id="${a.series_public_id || a.series_id || a.series_name || ''}">
+                      <div style="position: relative; width: 100%; aspect-ratio: 1/1; overflow: hidden; border-radius: 5px 5px 0 0; background: #08080c;">
+                        <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" class="phpfiles-card-thumb" alt="${escapeHTML(a.display_title || a.title)}" loading="lazy">
                         
-                        ${a.is_series ? `<div class="position-absolute top-0 start-0 m-2 px-2 py-1 bg-primary text-white rounded fw-bold shadow-sm" style="font-size: 0.75rem; backdrop-filter: blur(4px);"><i class="bi bi-collection-play-fill"></i> Series</div>` : (a.page_count > 1 ? `<div class="position-absolute top-0 start-0 m-2 text-white fw-bold" style="font-size: 0.95rem; text-shadow: 0 2px 4px rgba(0,0,0,0.8); z-index: 2;"><i class="bi bi-images"></i> ${a.page_count}</div>` : '')}
+                        <!-- Top left: Clean Page Count Badge without background or outline -->
+                        <div class="position-absolute top-0 start-0 m-2">
+                          ${a.is_series 
+                            ? `<span class="art-page-count-badge" style="color: #38bdf8 !important;"><i class="bi bi-collection-play-fill me-1"></i> Series</span>` 
+                            : (a.page_count > 1 ? `<span class="art-page-count-badge"><i class="bi bi-images me-1"></i> ${a.page_count}</span>` : '')}
+                        </div>
+
+                        <!-- Top right: 3-dots button with no outline or background -->
+                        <button class="art-more-btn position-absolute top-0 end-0 m-2" data-id="${a.public_id}" title="More Options">
+                          <i class="bi bi-three-dots-vertical fs-5"></i>
+                        </button>
                         
-                        <button class="btn btn-sm btn-link text-white position-absolute top-0 end-0 p-1 art-more-btn m-1" data-id="${a.public_id}" style="text-shadow: 0 1px 3px #000; z-index: 2;"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                        
-                        <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex flex-column justify-content-end" style="background: linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.5) 60%, transparent 100%);">
-                          <div class="fw-bold text-white text-truncate mb-1" style="font-size: 0.85rem; text-shadow: 1px 1px 3px #000;">${escapeHTML(a.display_title || a.title)}</div>
-                          <div class="d-flex justify-content-between align-items-center w-100 gap-2">
-                            <div class="d-flex align-items-center gap-1 text-white user-profile-link" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" onclick="event.stopPropagation()" style="min-width: 0;">
-                              <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle flex-shrink-0" style="width: 18px; height: 18px; object-fit: cover; border: 1px solid rgba(255,255,255,0.2);">
-                              <span class="text-truncate fw-medium" style="font-size: 0.75rem; text-shadow: 1px 1px 3px #000;">${escapeHTML(a.author)}</span>
+                        <!-- Bottom Gradient Info Overlay -->
+                        <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex flex-column justify-content-end" style="background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.4) 55%, transparent 100%);">
+                          <div class="fw-bold text-white text-truncate mb-1" style="font-size: 0.84rem; text-shadow: 0 1px 3px #000;">
+                            ${escapeHTML(a.display_title || a.title)}
+                          </div>
+                          <div class="d-flex justify-content-between align-items-center w-100">
+                            <div class="d-flex align-items-center gap-1 user-profile-link text-truncate" data-userid="${a.author_id}" data-artist="${encodeURIComponent(a.author)}" onclick="event.stopPropagation()" style="min-width: 0;">
+                              <img src="?action=get_profile_picture&id=${a.author_id}" class="rounded-circle flex-shrink-0" style="width: 17px; height: 17px; object-fit: cover; border: 1px solid rgba(255,255,255,0.25);">
+                              <span class="text-white text-truncate fw-medium hover-underline" style="font-size: 0.74rem; text-shadow: 0 1px 2px #000;">${escapeHTML(a.author)}</span>
                             </div>
-                            <div class="d-flex gap-1 text-white fw-bold flex-shrink-0" style="font-size: 0.7rem; text-shadow: 1px 1px 2px #000;">
-                              ${a.nsfw === 1 ? `<span class="badge bg-danger rounded-pill px-1" style="font-size: 0.6rem;">R-18</span>` : ''}
-                              <span><i class="bi bi-eye-fill"></i> ${a.views || 0}</span>
-                              <span><i class="bi bi-heart-fill text-danger"></i> ${a.fav_count || 0}</span>
+                            <div class="d-flex align-items-center gap-1 text-white fw-bold flex-shrink-0" style="font-size: 0.7rem; text-shadow: 0 1px 2px #000;">
+                              ${a.nsfw === 1 ? `<span class="badge bg-danger rounded px-1" style="font-size: 0.6rem; border-radius: 3px !important;">R-18</span>` : ''}
+                              <span><i class="bi bi-heart-fill text-danger me-1"></i>${a.fav_count || 0}</span>
                             </div>
                           </div>
                         </div>
+                      </div>
+
+                      <div class="p-2 text-start d-flex justify-content-between align-items-center" style="background: #111116; border-top: 1px solid rgba(255,255,255,0.05); font-size: 0.72rem;">
+                        <span class="text-secondary"><i class="bi bi-eye-fill me-1"></i>${formatSongCount(a.views || 0)} views</span>
+                        <span class="text-secondary"><i class="bi bi-clock me-1"></i>${new Date(a.created_at.replace(' ','T')+'Z').toLocaleDateString()}</span>
                       </div>
                     </div>
                   `).join('');
@@ -83365,15 +85701,15 @@ SOFTWARE.</div>
                   let paginationHTML = `<ul class="pagination pagination-sm m-0" style="gap: 5px;">`;
                   let startPage = Math.max(1, currentPage - 2);
                   let endPage = Math.min(totalPages, currentPage + 2);
-                  
+
                   if (currentPage > 1) {
-                    paginationHTML += `<li class="page-item"><button class="page-link rounded bg-dark border-secondary text-white" onclick="currentView.page=${currentPage-1}; loadView(currentView)">&laquo;</button></li>`;
+                    paginationHTML += `<li class="page-item"><button class="page-link bg-dark border-secondary text-white" style="border-radius: 5px !important;" onclick="currentView.page=${currentPage-1}; loadView(currentView)">&laquo;</button></li>`;
                   }
                   for (let i = startPage; i <= endPage; i++) {
-                    paginationHTML += `<li class="page-item ${i === currentPage ? 'active' : ''}"><button class="page-link rounded bg-dark border-secondary text-white ${i === currentPage ? 'bg-primary border-primary' : ''}" onclick="currentView.page=${i}; loadView(currentView)">${i}</button></li>`;
+                    paginationHTML += `<li class="page-item ${i === currentPage ? 'active' : ''}"><button class="page-link bg-dark border-secondary text-white ${i === currentPage ? 'bg-primary border-primary fw-bold' : ''}" style="border-radius: 5px !important;" onclick="currentView.page=${i}; loadView(currentView)">${i}</button></li>`;
                   }
                   if (currentPage < totalPages) {
-                    paginationHTML += `<li class="page-item"><button class="page-link rounded bg-dark border-secondary text-white" onclick="currentView.page=${currentPage+1}; loadView(currentView)">&raquo;</button></li>`;
+                    paginationHTML += `<li class="page-item"><button class="page-link bg-dark border-secondary text-white" style="border-radius: 5px !important;" onclick="currentView.page=${currentPage+1}; loadView(currentView)">&raquo;</button></li>`;
                   }
                   paginationHTML += `</ul>`;
                   document.getElementById("arts-pagination").innerHTML = paginationHTML;
@@ -83381,9 +85717,9 @@ SOFTWARE.</div>
               } else {
                 artGrid.style.display = "block";
                 if (artFilter === 'my_favorites') {
-                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100"><i class="bi bi-heart-break fs-1 d-block mb-3"></i>You haven\'t favorited any artworks yet.</div>';
+                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;"><i class="bi bi-heart-break fs-1 d-block mb-3"></i>You haven\'t favorited any artworks yet.</div>';
                 } else {
-                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100">No artworks found matching your criteria.</div>';
+                  artGrid.innerHTML = '<div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;">No artworks found matching your criteria.</div>';
                 }
               }
               allContentloaded = true;
@@ -83775,8 +86111,9 @@ SOFTWARE.</div>
             }
 
             case "view_series": {
-              updateContentTitle("Series", false);
-              const seriesRes = await fetchData(`?action=get_series_details&public_id=${currentView.param}`);
+              updateContentTitle("", false);
+              const epSort = currentView.sort || "oldest";
+              const seriesRes = await fetchData(`?action=get_series_details&public_id=${currentView.param}&sort=${epSort}`);
               if (!seriesRes || seriesRes.status !== 'success' || !seriesRes.series) {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary"><i class="bi bi-exclamation-triangle fs-1 d-block mb-3"></i>Series not found.</div>`;
                 allContentloaded = true;
@@ -83786,150 +86123,240 @@ SOFTWARE.</div>
               const s = seriesRes.series;
               document.title = `${s.title} - PHP Music`;
 
+              // Beautified Manga Viewer-Themed Category Badges
               const renderTagBadges = (mapObj, typeKey, iconClass) => {
-                if (!mapObj || Object.keys(mapObj).length === 0) return '<span class="text-secondary">—</span>';
+                if (!mapObj || Object.keys(mapObj).length === 0) return '';
+                const pillThemes = {
+                  tags: { border: 'rgba(255, 0, 85, 0.35)', color: '#ff4d6d', bg: 'rgba(255, 0, 85, 0.08)', prefix: '#' },
+                  characters: { border: 'rgba(236, 72, 153, 0.35)', color: '#f472b6', bg: 'rgba(236, 72, 153, 0.08)', prefix: '' },
+                  parodies: { border: 'rgba(56, 189, 248, 0.35)', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.08)', prefix: '' },
+                  groups_name: { border: 'rgba(251, 191, 36, 0.35)', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.08)', prefix: '' }
+                };
+                const theme = pillThemes[typeKey] || pillThemes.tags;
+
                 return Object.entries(mapObj).map(([tag, count]) => `
-                  <span class="badge bg-dark border border-secondary text-light px-2 py-1 rounded me-1 mb-1 hover-white" style="cursor: pointer; font-size: 0.8rem;" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${typeKey}', exact_val: '${escapeHTML(tag)}'})">
-                    <i class="bi ${iconClass} me-1 text-secondary"></i>${escapeHTML(tag)} <span class="badge bg-secondary ms-1">${count}</span>
+                  <span class="badge d-inline-flex align-items-center gap-1 py-1 px-2 rounded-1 text-white fw-bold shadow-sm me-1 mb-1" style="background: ${theme.bg}; border: 1px solid ${theme.border}; font-size: 0.72rem; letter-spacing: 0.3px; cursor: pointer; transition: all 0.2s ease;" onmouseover="this.style.background='rgba(255,255,255,0.15)';" onmouseout="this.style.background='${theme.bg}';" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${typeKey}', exact_val: '${escapeHTML(tag)}'})">
+                    <i class="bi ${iconClass}" style="color: ${theme.color};"></i>
+                    <span style="opacity: 0.75; font-weight: 500;">${theme.prefix}</span>
+                    <span>${escapeHTML(tag)}</span>
+                    <span class="text-secondary small ms-1" style="font-size: 0.65rem;">(${count})</span>
                   </span>
                 `).join('');
               };
 
-              const createdDate = s.created_at ? new Date(s.created_at.replace(' ','T')+'Z').toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'Unknown';
+              const coverImgUrl = s.cover_image ? `?action=get_art_image&path=${encodeURIComponent(s.cover_image)}` : '';
+              const isOwner = currentUser && (currentUser.id == s.user_id || currentUser.status === 'super_admin' || currentUser.is_admin == 1);
+              const firstEpisode = (s.works && s.works.length > 0) ? s.works[0] : null;
 
-              // Ensure works order is mapped sequentially to find correct start_page logic if needed
               let pageCounter = 1;
               s.works.forEach(w => {
                 w.start_page_index = pageCounter;
-                pageCounter += w.page_count;
+                pageCounter += w.page_count || 1;
               });
 
+              // Manga Viewer Core UI layered directly on top of PHP Music's Ambient Blur Header
               contentArea.innerHTML = `
-                <style>
-                  .series-meta-table td, .series-meta-table tr, .series-meta-table tbody {
-                    background: transparent !important;
-                    background-color: transparent !important;
-                    color: #fff !important;
-                  }
-                </style>
-                <div class="container-fluid px-2 px-md-4 py-3">
-                  <!-- Top Series Details Header (Nhentai / Gallery Style) -->
-                  <div class="row g-4 mb-4">
-                    <!-- Left Cover Image -->
-                    <div class="col-12 col-md-4 col-lg-3 text-center text-md-start">
-                      <div class="position-relative d-inline-block w-100 shadow-lg" style="max-width: 320px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);">
-                        <img src="?action=get_art_image&path=${encodeURIComponent(s.cover_image)}" style="width: 100%; height: auto; aspect-ratio: 3/4; object-fit: cover; display: block;">
+                <div class="position-relative w-100 pb-5">
+
+                  <!-- Playlist Style View Header Area -->
+                  <div id="dynamic-series-header" class="view-details-header position-relative overflow-hidden mb-4" style="min-height: 380px; background-color: var(--ytm-surface); border-bottom: none;">
+                    <div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${coverImgUrl}'); background-size: cover; background-position: center; filter: brightness(0.25) blur(35px); transform: scale(1.15); pointer-events: none; z-index: 0;"></div>
+                    
+                    <div class="d-flex flex-column flex-md-row align-items-center align-items-md-end gap-4 position-relative w-100 px-3 px-md-4 mt-auto" style="z-index: 1;">
+                      
+                      <!-- Manga Viewer Left Cover Thumbnail -->
+                      <div class="position-relative shadow-lg flex-shrink-0" style="width: 220px; aspect-ratio: 3/4; border-radius: 8px; overflow: hidden; border: 2px solid rgba(255,255,255,0.15); box-shadow: 0 16px 40px rgba(0,0,0,0.85); margin-bottom: -1rem;">
+                        <img src="${coverImgUrl}" style="width: 100%; height: 100%; object-fit: cover; display: block;" alt="${escapeHTML(s.title)}">
+                      </div>
+
+                      <!-- Manga Viewer Center/Right Info -->
+                      <div class="d-flex flex-column align-items-center align-items-md-start text-center text-md-start flex-grow-1 pb-3" style="min-width: 0; width: 100%;">
+                        <div class="marquee-container w-100 mb-1">
+                          <h1 class="fw-bolder text-white m-0 marquee-content text-truncate" style="font-size: clamp(2.2rem, 4vw, 3.5rem); line-height: 1.1; letter-spacing: -0.5px; text-shadow: 0 4px 12px rgba(0,0,0,0.8);">${escapeHTML(s.title)}</h1>
+                        </div>
+
+                        <!-- Author Link -->
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                          <span class="text-white fw-bold user-profile-link hover-underline" data-userid="${s.author_id}" data-artist="${encodeURIComponent(s.author)}" style="cursor: pointer; font-size: 1.1rem; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">
+                            ${escapeHTML(s.author)}
+                          </span>
+                        </div>
+
+                        <!-- Manga Viewer Action Buttons Row -->
+                        <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mb-3">
+                          ${firstEpisode ? `
+                            <button class="btn btn-danger fw-bold d-inline-flex align-items-center gap-2 px-4 py-2 shadow-lg" style="border-radius: 6px; background-color: #ff4d4d; border: none; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.5px;" onclick="loadView({type: 'read_series', param: '${s.public_id}'})">
+                              <i class="bi bi-book-half fs-5"></i> Start Reading
+                            </button>
+                          ` : ''}
+
+                          <button class="btn btn-outline-light fw-bold d-inline-flex align-items-center gap-2 px-3 py-2 share-view-btn shadow-sm" style="border-radius: 6px; border-color: rgba(255,255,255,0.2); font-size: 0.9rem;" data-share-type="series" data-share-id="${s.public_id}">
+                            <i class="bi bi-share-fill"></i> Share
+                          </button>
+
+                          ${isOwner ? `
+                            <button class="btn btn-outline-light fw-bold d-inline-flex align-items-center gap-2 px-3 py-2 shadow-sm" style="border-radius: 6px; border-color: rgba(255,255,255,0.2); font-size: 0.9rem;" onclick="loadView({type: 'upload_art_page', series_name: '${escapeHTML(s.title)}'})">
+                              <i class="bi bi-upload"></i> Upload Chapter
+                            </button>
+                            <button class="btn btn-outline-danger fw-bold d-inline-flex align-items-center gap-2 px-3 py-2 shadow-sm ms-2" style="border-radius: 6px; border-color: rgba(255,59,48,0.5); font-size: 0.9rem;" onclick="if(confirm('Delete entire series?')){ fetchData('?action=delete_art', {method:'POST', body:JSON.stringify({public_id:'${s.public_id}'})}).then(()=>loadView({type:'get_arts', filter: 'manga'})); }">
+                              <i class="bi bi-trash2"></i> Delete Series
+                            </button>
+                          ` : ''}
+                        </div>
+
+                        <!-- Manga Viewer Meta Badges -->
+                        <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2" style="font-size: 0.75rem;">
+                          <span class="badge bg-warning text-dark font-monospace fw-bold px-2 py-1">${s.nsfw === 1 ? 'SUGGESTIVE (18+)' : 'SAFE'}</span>
+                          <span class="badge bg-dark border border-secondary text-white fw-bold px-2 py-1">MANGA</span>
+                          <span class="badge bg-dark border border-secondary text-success fw-bold px-2 py-1">● PUBLISHED</span>
+                        </div>
                       </div>
                     </div>
 
-                    <!-- Right Series Metadata Table (No Background) -->
-                    <div class="col-12 col-md-8 col-lg-9 text-start">
-                      <h2 class="text-white fw-bold mb-2" style="font-size: clamp(1.5rem, 3vw, 2.2rem);">${escapeHTML(s.title)}</h2>
-                      ${s.description ? `<p class="text-secondary small mb-3" style="white-space: pre-wrap;">${parseUserText(s.description)}</p>` : ''}
-
-                      <div class="table-responsive">
-                        <table class="table table-borderless align-middle m-0 text-white small series-meta-table" style="background: transparent !important;">
-                          <tbody>
-                            <tr>
-                              <td class="text-secondary fw-bold py-2" style="width: 110px;">Artist</td>
-                              <td class="py-2">
-                                <span class="badge bg-dark border border-secondary text-light px-3 py-2 rounded user-profile-link" data-userid="${s.author_id}" data-artist="${encodeURIComponent(s.author)}" style="cursor: pointer; font-size: 0.85rem;">
-                                  <i class="bi bi-person-fill me-1 text-info"></i>${escapeHTML(s.author)}
-                                </span>
-                              </td>
-                            </tr>
-                            ${s.aggregated_tags && Object.keys(s.aggregated_tags).length > 0 ? `
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Tags</td>
-                              <td class="py-2">${renderTagBadges(s.aggregated_tags, 'tags', 'bi-tag-fill')}</td>
-                            </tr>` : ''}
-                            ${s.aggregated_characters && Object.keys(s.aggregated_characters).length > 0 ? `
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Characters</td>
-                              <td class="py-2">${renderTagBadges(s.aggregated_characters, 'characters', 'bi-person-fill')}</td>
-                            </tr>` : ''}
-                            ${s.aggregated_parodies && Object.keys(s.aggregated_parodies).length > 0 ? `
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Parodies</td>
-                              <td class="py-2">${renderTagBadges(s.aggregated_parodies, 'parodies', 'bi-controller')}</td>
-                            </tr>` : ''}
-                            ${s.aggregated_groups && Object.keys(s.aggregated_groups).length > 0 ? `
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Groups</td>
-                              <td class="py-2">${renderTagBadges(s.aggregated_groups, 'groups_name', 'bi-people-fill')}</td>
-                            </tr>` : ''}
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Works</td>
-                              <td class="py-2 fw-bold text-info">${s.works_count || 0} chapters / works</td>
-                            </tr>
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Pages</td>
-                              <td class="py-2 fw-bold">${s.total_pages || 0} total pages</td>
-                            </tr>
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Views</td>
-                              <td class="py-2">${s.total_views || 0}</td>
-                            </tr>
-                            <tr>
-                              <td class="text-secondary fw-bold py-2">Date</td>
-                              <td class="py-2 text-secondary">${createdDate}</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
+                    <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 140px; background: linear-gradient(to top, var(--ytm-bg), transparent); z-index: 0;"></div>
                   </div>
 
-                  <hr class="border-secondary opacity-25 my-4">
-
-                  <!-- Bottom Section: All works in Series -->
-                  <div class="mb-4">
-                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
-                      <h5 class="text-white fw-bold m-0" style="font-size: 1.1rem;">All works in ${escapeHTML(s.title)} by ${escapeHTML(s.author)}</h5>
-                      <div class="d-flex gap-2">
-                        <button class="btn btn-sm btn-outline-light rounded-pill px-4 fw-bold" onclick="loadView({type: 'read_series', param: '${s.public_id}'})"><i class="bi bi-book-half me-1"></i> Read First</button>
-                        <button class="btn btn-sm btn-outline-light rounded-pill px-4 fw-bold share-view-btn" data-share-type="manga" data-share-id="${s.public_id}"><i class="bi bi-share-fill me-1"></i> Share</button>
-                      </div>
-                    </div>
-
-                    <!-- Works List (List View Replacement) -->
-                    <div class="d-flex flex-column gap-2">
-                      ${s.works.map(w => `
-                        <div class="card bg-dark text-white border-secondary overflow-hidden shadow-sm art-card-item" data-id="${w.public_id}" style="border-radius: 8px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='var(--bs-dark)'">
-                          <div class="row g-0 align-items-center">
-                            <div class="col-auto">
-                              <img src="?action=get_art_image&path=${encodeURIComponent(w.cover_image)}" style="width: 80px; height: 100px; object-fit: cover; border-right: 1px solid rgba(255,255,255,0.1);">
+                  <div class="px-2 px-md-4 mt-2">
+                    <!-- Manga Viewer Layout Core: 2-Column Split -->
+                    <div class="row g-4 text-start">
+                      
+                      <!-- Left Column: Manga Viewer Details Panel -->
+                      <div class="col-12 col-lg-4 col-xl-3 mb-4 mb-lg-0">
+                        <div class="d-flex flex-column gap-3">
+                          
+                          <!-- Description Box -->
+                          ${s.description ? `
+                            <div>
+                              <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Synopsis</div>
+                              <p class="text-light mb-0" style="font-size: 0.92rem; line-height: 1.6; white-space: pre-wrap;">${parseUserText(s.description)}</p>
                             </div>
-                            <div class="col p-3 d-flex flex-column justify-content-center" style="min-width: 0;">
-                              <h6 class="fw-bold text-white mb-1 text-truncate">${escapeHTML(w.title)}</h6>
-                              <div class="text-secondary small d-flex gap-3 text-truncate">
-                                <span><i class="bi bi-eye"></i> ${w.views || 0} views</span>
-                                <span><i class="bi bi-images"></i> ${w.page_count || 1} pages</span>
-                              </div>
+                            <hr class="border-secondary opacity-25 m-0">
+                          ` : ''}
+
+                          <!-- Tags & Themes Section -->
+                          <div>
+                            <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Author &amp; Artist</div>
+                            <span class="badge bg-dark border border-secondary text-light px-3 py-2 rounded user-profile-link hover-underline" data-userid="${s.author_id}" data-artist="${encodeURIComponent(s.author)}" style="cursor: pointer; font-size: 0.82rem;">
+                              <i class="bi bi-person-fill me-1 text-info"></i> ${escapeHTML(s.author)}
+                            </span>
+                          </div>
+
+                          ${s.aggregated_tags && Object.keys(s.aggregated_tags).length > 0 ? `
+                            <div>
+                              <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Genres &amp; Themes</div>
+                              <div class="d-flex flex-wrap">${renderTagBadges(s.aggregated_tags, 'tags', 'bi-tag-fill')}</div>
                             </div>
-                            <div class="col-auto pe-3">
-                              <button class="btn btn-sm btn-danger rounded-pill px-3 fw-bold" onclick="event.stopPropagation(); loadView({type: 'read_series', param: '${s.public_id}', work_id: '${w.public_id}', page: ${w.start_page_index}})"><i class="bi bi-book me-1"></i> Read</button>
+                          ` : ''}
+
+                          ${s.aggregated_characters && Object.keys(s.aggregated_characters).length > 0 ? `
+                            <div>
+                              <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Characters</div>
+                              <div class="d-flex flex-wrap">${renderTagBadges(s.aggregated_characters, 'characters', 'bi-person-fill')}</div>
+                            </div>
+                          ` : ''}
+
+                          ${s.aggregated_parodies && Object.keys(s.aggregated_parodies).length > 0 ? `
+                            <div>
+                              <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Parodies</div>
+                              <div class="d-flex flex-wrap">${renderTagBadges(s.aggregated_parodies, 'parodies', 'bi-controller')}</div>
+                            </div>
+                          ` : ''}
+
+                          ${s.aggregated_groups && Object.keys(s.aggregated_groups).length > 0 ? `
+                            <div>
+                              <div class="text-secondary small fw-bold text-uppercase mb-2" style="font-size: 0.75rem; letter-spacing: 0.5px;">Groups / Circle</div>
+                              <div class="d-flex flex-wrap">${renderTagBadges(s.aggregated_groups, 'groups_name', 'bi-people-fill')}</div>
+                            </div>
+                          ` : ''}
+
+                          <!-- Metric Readouts -->
+                          <div class="pt-2">
+                            <div class="d-flex justify-content-between text-secondary small py-2 border-bottom border-secondary border-opacity-25">
+                              <span class="fw-bold"><i class="bi bi-file-earmark-image-fill me-1 text-info"></i> Pages</span>
+                              <span class="text-white fw-bold">${s.total_pages || 0}</span>
+                            </div>
+                            <div class="d-flex justify-content-between text-secondary small py-2 border-bottom border-secondary border-opacity-25">
+                              <span class="fw-bold"><i class="bi bi-eye-fill me-1 text-warning"></i> Views</span>
+                              <span class="text-white fw-bold">${formatSongCount(s.total_views || 0)}</span>
+                            </div>
+                            <div class="d-flex justify-content-between text-secondary small py-2">
+                              <span class="fw-bold"><i class="bi bi-clock-fill me-1 text-secondary"></i> Published</span>
+                              <span class="text-white fw-bold">${new Date(s.created_at.replace(' ','T')+'Z').toLocaleDateString()}</span>
                             </div>
                           </div>
+
                         </div>
-                      `).join('')}
+                      </div>
+
+                      <!-- Right Column: Manga Viewer Chapter List Table -->
+                      <div class="col-12 col-lg-8 col-xl-9">
+                        
+                        <!-- Header Tabs -->
+                        <div class="d-flex align-items-center gap-3 border-bottom border-secondary border-opacity-50 mb-4 pb-2">
+                          <h4 class="text-white fw-bold m-0 fs-5 pb-2 border-bottom border-danger border-2 mb-n2">Chapters</h4>
+                        </div>
+
+                        <!-- Sort & Filter Bar -->
+                        <div class="d-flex justify-content-between align-items-center mb-3 p-2 rounded-2" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                          <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-dark border border-secondary text-white px-2 py-1"><i class="bi bi-list-ul me-1"></i> ${s.works_count || 0}</span>
+                          </div>
+                          <div class="d-flex align-items-center gap-2">
+                            <button class="btn btn-sm btn-dark border-secondary d-flex align-items-center gap-1 px-3 fw-bold text-white hover-white" style="font-size: 0.8rem;" onclick="loadView({type: 'view_series', param: '${s.public_id}', sort: '${epSort === 'newest' ? 'oldest' : 'newest'}'})">
+                              <i class="bi bi-sort-${epSort === 'newest' ? 'down' : 'up'} text-danger"></i> ${epSort === 'newest' ? 'Descending' : 'Ascending'}
+                            </button>
+                          </div>
+                        </div>
+
+                        <!-- Manga Viewer Chapter Rows -->
+                        <div class="d-flex flex-column" id="Manga Viewer-chapter-rows" style="border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; overflow: hidden;">
+                          ${s.works.map((w, idx) => `
+                            <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between p-3 text-white" style="background: ${idx % 2 === 0 ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.02)'}; border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer; transition: background 0.15s ease;" onmouseover="this.style.background='rgba(255,255,255,0.08)'" onmouseout="this.style.background='${idx % 2 === 0 ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.02)'}'" onclick="loadView({type: 'read_series', param: '${s.public_id}', work_id: '${w.public_id}', page: ${w.start_page_index}})">
+                              
+                              <div class="d-flex align-items-center gap-3 overflow-hidden flex-grow-1 mb-2 mb-md-0" style="min-width: 0;">
+                                <i class="bi bi-eye-fill text-secondary fs-5 opacity-50"></i>
+                                <div class="text-truncate">
+                                  <span class="fw-bold text-white hover-underline" style="font-size: 0.95rem;">
+                                    Ch. ${epSort === 'newest' ? (s.works.length - idx) : (idx + 1)} - ${escapeHTML(w.title)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div class="d-flex align-items-center justify-content-between justify-content-md-end gap-3 text-secondary small flex-shrink-0" style="font-size: 0.82rem;">
+                                <span class="text-truncate d-none d-md-block" style="max-width: 140px;" title="${escapeHTML(w.groups_name || s.author)}">
+                                  <i class="bi bi-people me-1"></i> ${escapeHTML(w.groups_name || s.author)}
+                                </span>
+                                <span class="d-none d-md-block"><i class="bi bi-eye me-1"></i> ${formatSongCount(w.views || 0)}</span>
+                                <span style="min-width: 70px; text-align: right;"><i class="bi bi-clock me-1"></i> ${timeAgo(w.created_at).replace(' ago', '')}</span>
+                                <span class="badge bg-dark border border-secondary text-light px-2 py-1">${w.page_count || 1} <i class="bi bi-images ms-1"></i></span>
+                                ${isOwner ? `<button class="btn btn-sm btn-outline-warning rounded-pill px-3 py-1 fw-bold ms-1" style="font-size: 0.75rem;" onclick="event.stopPropagation(); loadView({type: 'edit_art_page', param: '${w.public_id}'})"><i class="bi bi-pencil me-1"></i>Edit</button>` : ''}
+                              </div>
+                            </div>
+                          `).join('')}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               `;
 
-              contentArea.querySelectorAll('.art-card-item').forEach(card => {
-                card.addEventListener('click', () => {
-                  loadView({type: 'read_series', param: s.public_id, work_id: card.dataset.id});
-                });
-              });
+              const headerImg = new Image();
+              headerImg.crossOrigin = "anonymous";
+              headerImg.onload = () => {
+                const rgb = getAverageColor(headerImg);
+                const seriesHeader = document.getElementById("dynamic-series-header");
+                if (seriesHeader) {
+                  seriesHeader.style.background = `linear-gradient(135deg, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.7) 0%, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.2) 50%, var(--ytm-bg) 100%)`;
+                }
+              };
+              headerImg.src = coverImgUrl + (coverImgUrl.includes('?') ? '&' : '?') + 't=' + Date.now();
 
               allContentloaded = true;
               break;
             }
 
-            case "view_art":
-              updateContentTitle("View Art", false);
+            case "view_art": {
+              updateContentTitle("Artwork View", false);
               const artData = await fetchData(`?action=get_art&public_id=${currentView.param}`);
               if (!artData) {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Artwork not found.</div>`;
@@ -83939,374 +86366,458 @@ SOFTWARE.</div>
 
               document.title = `${artData.title} - PHP Music`;
               window.activeArtPublicId = currentView.param;
+              window.activeArtCurrentPageIndex = 0;
 
-              // Fetch artist works for Prev/Next navigation
-              const artistWorks = await fetchData(`?action=get_arts&artist_id=${artData.user_id}&sort=newest`);
-              let prevArtId = null;
-              let nextArtId = null;
-              if (artistWorks && artistWorks.items) {
-                const idx = artistWorks.items.findIndex(a => a.public_id === artData.public_id);
-                if (idx !== -1) {
-                  if (idx > 0) nextArtId = artistWorks.items[idx - 1].public_id; // newer
-                  if (idx < artistWorks.items.length - 1) prevArtId = artistWorks.items[idx + 1].public_id; // older
+              const isOwner = currentUser && (currentUser.id == artData.user_id || currentUser.status === 'super_admin' || currentUser.is_admin == 1);
+              const avatarUrl = `?action=get_profile_picture&id=${artData.user_id}`;
+
+              // Fetch an extended window of artworks. Native loading="lazy" handles the bandwidth safely.
+              const artistWorks = await fetchData(`?action=get_arts&artist_id=${artData.user_id}&type_filter=image&sort=newest&page=1&limit=150`);
+              const otherArtworks = (artistWorks && artistWorks.items ? artistWorks.items : []);
+
+              let renderedDescription = "";
+              if (artData.description) {
+                const decoded = decodeHTML(artData.description);
+                if (typeof marked !== "undefined") {
+                  try {
+                    renderedDescription = marked.parse(decoded);
+                  } catch(e) {
+                    renderedDescription = parseUserText(decoded);
+                  }
+                } else {
+                  renderedDescription = parseUserText(decoded);
                 }
               }
 
-              let navButtonsHtml = ''; // Removed from top left
+              // Beautified Category-Themed Tags Pills
+              const formatPills = (str, typeKey, iconClass) => {
+                if (!str || str.trim() === '') return '';
+                const pillThemes = {
+                  tags: { border: 'rgba(255, 0, 85, 0.35)', color: '#ff4d6d', bg: 'rgba(255, 0, 85, 0.08)', prefix: '#' },
+                  characters: { border: 'rgba(236, 72, 153, 0.35)', color: '#f472b6', bg: 'rgba(236, 72, 153, 0.08)', prefix: 'Character: ' },
+                  parodies: { border: 'rgba(56, 189, 248, 0.35)', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.08)', prefix: 'Series: ' },
+                  groups_name: { border: 'rgba(251, 191, 36, 0.35)', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.08)', prefix: 'Circle: ' }
+                };
+                const theme = pillThemes[typeKey] || pillThemes.tags;
 
-              let editDelButtons = "";
-              if (currentUser && (currentUser.id == artData.user_id || currentUser.status === 'super_admin')) {
-                editDelButtons = `
-                  <div class="position-relative custom-opt-dropdown ms-3">
-                    <button class="btn btn-link text-white p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-4"></i></button>
-                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                      <li><button class="dropdown-item" onclick="loadView({type: 'edit_art_page', param: '${artData.public_id}'})"><i class="bi bi-pencil me-2"></i> Edit</button></li>
-                      <li><button class="dropdown-item text-danger" onclick="if(confirm('Delete this artwork permanently?')) { fetchData('?action=delete_art', {method: 'POST', body: JSON.stringify({public_id: '${artData.public_id}'})}).then(() => loadView({type: 'get_arts'})); }"><i class="bi bi-trash2 me-2"></i> Delete</button></li>
-                    </ul>
+                return str.split(',').filter(t => t.trim() !== '').map(t => `
+                  <span class="badge d-inline-flex align-items-center gap-1 py-2 px-3 rounded-pill text-white fw-bold shadow-sm" style="background: ${theme.bg}; border: 1px solid ${theme.border}; font-size: 0.78rem; letter-spacing: 0.3px; cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); backdrop-filter: blur(8px);" onmouseover="this.style.transform='translateY(-2px) scale(1.05)'; this.style.borderColor='${theme.color}'; this.style.boxShadow='0 6px 14px rgba(0,0,0,0.6)';" onmouseout="this.style.transform='translateY(0) scale(1)'; this.style.borderColor='${theme.border}'; this.style.boxShadow='none';" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${typeKey}', exact_val: '${escapeHTML(t.trim())}'});">
+                    <i class="bi ${iconClass}" style="color: ${theme.color};"></i>
+                    <span style="opacity: 0.75; font-weight: 500;">${theme.prefix}</span>
+                    <span>${escapeHTML(t.trim())}</span>
+                  </span>
+                `).join('');
+              };
+
+              // Beautified Manga / Comic & Gallery Preview Viewer
+              let mediaViewerHtml = '';
+              const totalFiles = (artData.files && artData.files.length > 0) ? artData.files.length : 1;
+              const firstFile = artData.files && artData.files[0] ? artData.files[0] : null;
+              const firstImgUrl = firstFile ? `?action=get_art_image&path=${encodeURIComponent(firstFile.file_path)}` : '';
+
+              if (artData.files && artData.files.length > 1) {
+                mediaViewerHtml = `
+                  <div class="manga-preview-shell position-relative overflow-hidden mb-3 shadow-lg" style="background: #09090d; border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.1); width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;">
+                    <!-- Header Bar -->
+                    <div class="d-flex justify-content-between align-items-center px-3 py-2" style="background: linear-gradient(180deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%); border-bottom: 1px solid rgba(255,255,255,0.08); backdrop-filter: blur(10px); width: 100%; min-width: 0; box-sizing: border-box;">
+                      <div class="d-flex align-items-center gap-2 text-truncate pe-2" style="min-width: 0; flex: 1;">
+                        <span class="badge bg-danger rounded-pill px-2 py-1 fw-bold flex-shrink-0" style="font-size: 0.7rem;"><i class="bi bi-book-half me-1"></i> MANGA</span>
+                        <span class="text-white fw-bold small text-truncate">${escapeHTML(artData.title)}</span>
+                      </div>
+                      <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                        <span class="badge bg-dark text-white border border-secondary rounded-pill px-2 px-sm-3 py-1 font-monospace" id="manga-preview-page-badge" style="font-size: 0.75rem;">1 / ${totalFiles}</span>
+                        <button class="btn btn-sm btn-danger rounded-pill px-2 px-sm-3 py-1 fw-bold shadow-sm d-flex align-items-center gap-1" onclick="loadView({type: 'view_art_full', param: '${artData.public_id}'})">
+                          <i class="bi bi-arrows-fullscreen"></i> <span class="d-none d-sm-inline">Reader</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <!-- Main Canvas with Interactive Navigation Overlays -->
+                    <div class="position-relative d-flex justify-content-center align-items-center manga-preview-canvas" style="background: #050508; min-height: 260px; max-height: 75vh; width: 100%; max-width: 100%; overflow: hidden; cursor: pointer;">
+                      <img id="main-art-viewer-img" src="${firstImgUrl}" style="max-width: 100%; max-height: 75vh; width: auto; height: auto; object-fit: contain; display: block; transition: opacity 0.15s ease;" alt="Page 1">
+                      
+                      <!-- Left Navigation Overlay -->
+                      <div class="position-absolute start-0 top-0 bottom-0 d-flex align-items-center ps-2 ps-sm-3 pe-4 text-decoration-none" style="z-index: 5; cursor: pointer; background: linear-gradient(90deg, rgba(0,0,0,0.5) 0%, transparent 100%); opacity: 0.35; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.35'" onclick="event.stopPropagation(); window.stepMangaPreviewPage(-1);">
+                        <div class="d-flex align-items-center justify-content-center rounded-circle bg-dark bg-opacity-75 text-white shadow border border-secondary" style="width: 36px; height: 36px;">
+                          <i class="bi bi-chevron-left fs-5"></i>
+                        </div>
+                      </div>
+
+                      <!-- Right Navigation Overlay -->
+                      <div class="position-absolute end-0 top-0 bottom-0 d-flex align-items-center pe-2 ps-4 text-decoration-none" style="z-index: 5; cursor: pointer; background: linear-gradient(-90deg, rgba(0,0,0,0.5) 0%, transparent 100%); opacity: 0.35; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.35'" onclick="event.stopPropagation(); window.stepMangaPreviewPage(1);">
+                        <div class="d-flex align-items-center justify-content-center rounded-circle bg-dark bg-opacity-75 text-white shadow border border-secondary" style="width: 36px; height: 36px;">
+                          <i class="bi bi-chevron-right fs-5"></i>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Bottom Thumbnail Strip with Glow Active Indicator -->
+                    <div class="d-flex gap-2 p-2 modern-custom-scroll" id="manga-preview-thumb-strip" style="overflow-x: auto; background: #0e0e14; border-top: 1px solid rgba(255,255,255,0.06); scroll-snap-type: x mandatory; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;">
+                      ${artData.files.map((f, i) => `
+                        <div class="position-relative flex-shrink-0 manga-thumb-item ${i === 0 ? 'active' : ''}" data-idx="${i}" style="width: 60px; height: 60px; border-radius: 6px; overflow: hidden; cursor: pointer; border: 2px solid ${i === 0 ? 'var(--ytm-accent)' : 'rgba(255,255,255,0.1)'}; scroll-snap-align: start; transition: all 0.2s ease;" onclick="window.selectMangaPreviewPage(${i}, '?action=get_art_image&path=${encodeURIComponent(f.file_path)}');">
+                          <img src="?action=get_art_image&path=${encodeURIComponent(f.thumb_path || f.file_path)}" style="width: 100%; height: 100%; object-fit: cover; display: block;" loading="lazy">
+                          <span class="position-absolute bottom-0 start-0 w-100 text-center text-white fw-bold" style="font-size: 0.65rem; background: rgba(0,0,0,0.75); line-height: 1.4;">#${i + 1}</span>
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+                `;
+              } else {
+                mediaViewerHtml = `
+                  <div class="position-relative overflow-hidden mb-3 shadow-lg manga-single-view" style="background: #050508; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08); width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;">
+                    <div class="d-flex justify-content-center align-items-center w-100" style="min-height: 240px; max-height: 80vh; width: 100%; overflow: hidden;">
+                      <img src="${firstImgUrl}" class="manga-single-view-img" style="max-width: 100%; max-height: 80vh; width: auto; height: auto; object-fit: contain; display: block;">
+                    </div>
                   </div>
                 `;
               }
 
-              window.changeMainArtImage = (src, index, total) => {
-                document.getElementById('main-art-image-view').src = src;
-                const counter = document.getElementById('main-art-image-counter');
-                if (counter) counter.innerHTML = `<i class="bi bi-images"></i> ${index}/${total}`;
-              };
-
-              // Pixiv style layout with Main Viewer and bottom thumbnail slider
-              let sliderHtml = `
-                <div class="d-flex flex-column w-100 py-2" style="background: transparent;">
-                  <div class="position-relative w-100" style="background: var(--ytm-surface-2); border-radius: 12px; overflow: hidden; display: flex; align-items: center; justify-content: center; min-height: 40vh; cursor: pointer;" onclick="loadView({type: 'view_art_full', param: '${artData.public_id}'})" title="Click to view all images in full size">
-                    <img id="main-art-image-view" src="?action=get_art_image&path=${encodeURIComponent(artData.files[0].file_path)}" style="max-width: 100%; max-height: calc(100dvh - 180px); object-fit: contain; display: block; margin: auto;">
-                    ${artData.files.length > 1 ? `<div id="main-art-image-counter" class="position-absolute top-0 end-0 m-3 px-3 py-1 bg-dark bg-opacity-75 text-white rounded-pill fw-bold border border-secondary" style="font-size: 0.85rem; backdrop-filter: blur(4px);"><i class="bi bi-images"></i> 1/${artData.files.length}</div>` : ''}
-                  </div>
-                  
-                  ${artData.files.length > 1 ? `
-                  <div class="w-100 mt-3 d-flex gap-2 pb-2 modern-custom-scroll" style="overflow-x: auto; padding: 5px;">
-                    ${artData.files.map((f, i) => `
-                      <img src="?action=get_art_image&path=${encodeURIComponent(f.thumb_path || f.file_path)}" class="rounded shadow-sm flex-shrink-0" style="height: 80px; width: 80px; object-fit: cover; cursor: pointer; border: 2px solid transparent; transition: border-color 0.2s;" onmouseover="this.style.borderColor='var(--ytm-accent)'" onmouseout="this.style.borderColor='transparent'" onclick="window.changeMainArtImage('?action=get_art_image&path=${encodeURIComponent(f.file_path)}', ${i+1}, ${artData.files.length})">
-                    `).join('')}
-                  </div>
-                  <button class="btn btn-outline-light rounded-pill px-5 py-2 mt-2 fw-bold w-100" onclick="loadView({type: 'view_art_full', param: '${artData.public_id}'})"><i class="bi bi-arrows-fullscreen me-2"></i> View Full Gallery (${artData.files.length} Images)</button>
-                  ` : ''}
-                </div>
-              `;
-
-              const mapTagsHTML = (str, typeKey, iconClass) => {
-                if (!str || str.trim() === '') return '';
-                return str.split(',').filter(t => t.trim() !== '').map(t => {
-                  let prefix = "";
-                  if (typeKey === 'characters') prefix = "Character: ";
-                  if (typeKey === 'parodies') prefix = "Series: ";
-                  if (typeKey === 'groups_name') prefix = "Group: ";
-                  return `<span class="badge bg-dark border border-secondary text-light px-3 py-2 rounded-pill hover-white" style="cursor: pointer; font-size: 0.85rem;" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all', exact_filter: '${typeKey}', exact_val: '${escapeHTML(t.trim())}'});"><i class="bi ${iconClass} me-1 opacity-75"></i> <span class="opacity-50 me-1">${prefix}</span>${escapeHTML(t.trim())}</span>`;
-                }).join('');
-              };
-
-              let prevNextHtml = `
-                <div class="d-flex justify-content-between align-items-center mb-4 pt-3 border-top border-secondary">
-                  <button class="btn btn-outline-light rounded-pill px-4 fw-bold" ${nextArtId ? `onclick="loadView({type: 'view_art', param: '${nextArtId}'})"` : 'disabled'}><i class="bi bi-chevron-left me-2"></i>Next</button>
-                  <button class="btn btn-outline-light rounded-pill px-4 fw-bold" ${prevArtId ? `onclick="loadView({type: 'view_art', param: '${prevArtId}'})"` : 'disabled'}>Prev<i class="bi bi-chevron-right ms-2"></i></button>
-                </div>
-              `;
-
               contentArea.innerHTML = `
-                <div class="d-flex flex-column w-100 pb-5 h-100">
-                  <div class="d-flex align-items-center justify-content-between p-3 flex-shrink-0" style="margin-bottom: -1rem;">
-                    <div class="d-flex align-items-center">
-                      <button class="btn btn-link text-white text-decoration-none p-0" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all'})"><i class="bi bi-arrow-left fs-4"></i></button>
+                <div class="phpmusic-viewer-layout py-2 py-md-3 px-1 px-md-4">
+                  <!-- Main Left Column -->
+                  <div class="phpmusic-viewer-main">
+                    <div class="mb-3">
+                      <button class="btn btn-link text-white text-decoration-none p-0 d-inline-flex align-items-center gap-2 hover-underline" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: 'all'})">
+                        <i class="bi bi-arrow-left fs-4"></i> <span class="fw-bold">Back to Artworks</span>
+                      </button>
+                    </div>
+
+                    ${mediaViewerHtml}
+
+                    <!-- Details Card -->
+                    <div style="background: #111116; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.9rem; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; overflow: hidden;">
+                      <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+                        <div class="flex-grow-1" style="min-width: 0; word-break: break-word;">
+                          <h1 class="fw-bold text-white mb-1" style="font-size: clamp(1.35rem, 4vw, 1.85rem); letter-spacing: -0.5px; line-height: 1.2;">${escapeHTML(artData.title)}</h1>
+                          <div class="text-secondary small mt-1" style="font-size: 0.8rem;">
+                            Posted ${new Date(artData.created_at.replace(' ','T')+'Z').toLocaleDateString()} &bull; 
+                            <span>${formatSongCount(artData.views || 0)}</span> views &bull; 
+                            <span id="art-detail-favs">${artData.fav_count || 0}</span> favorites
+                          </div>
+                        </div>
+
+                        ${isOwner ? `
+                          <div class="d-flex gap-2 flex-shrink-0">
+                            <button class="btn btn-sm btn-outline-light rounded-pill px-3 py-1 fw-bold" onclick="loadView({type: 'edit_art_page', param: '${artData.public_id}'})"><i class="bi bi-pencil me-1"></i> ${artData.type === 'manga' ? 'Edit Chapter' : 'Edit'}</button>
+                            <button class="btn btn-sm btn-outline-danger rounded-pill px-3 py-1 fw-bold" onclick="if(confirm('Delete ${artData.type === 'manga' ? 'chapter' : 'artwork'}?')){ fetchData('?action=delete_art', {method:'POST', body:JSON.stringify({public_id:'${artData.public_id}'})}).then(()=>loadView({type:'get_arts'})); }"><i class="bi bi-trash2 me-1"></i> Delete</button>
+                          </div>
+                        ` : ''}
+                      </div>
+
+                      ${renderedDescription ? `<div class="text-light mt-1" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word;">${renderedDescription}</div>` : ''}
+
+                      <div class="d-flex flex-wrap gap-2 mt-2">
+                        ${formatPills(artData.tags, "tags", "bi-tag-fill")}
+                        ${formatPills(artData.characters, "characters", "bi-person-fill")}
+                        ${formatPills(artData.parodies, "parodies", "bi-controller")}
+                        ${formatPills(artData.groups_name, "groups_name", "bi-people-fill")}
+                      </div>
+
+                      <!-- Interaction Buttons -->
+                      <div class="d-flex gap-2 gap-sm-3 mt-3 pt-3 border-top border-secondary border-opacity-25 flex-wrap">
+                        <button class="btn ${artData.is_favorited ? 'btn-danger text-white' : 'btn-outline-light'} rounded-pill px-3 px-sm-4 py-2 fw-bold d-inline-flex align-items-center justify-content-center gap-2 shadow-sm flex-grow-1 flex-sm-grow-0" id="art-bookmark-btn">
+                          <i class="bi ${artData.is_favorited ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i>
+                          <span>${artData.is_favorited ? 'Favorited' : 'Add to Favorites'}</span>
+                        </button>
+                        <button class="btn btn-outline-light rounded-pill px-3 px-sm-4 py-2 fw-bold d-inline-flex align-items-center justify-content-center gap-2 share-view-btn shadow-sm flex-grow-1 flex-sm-grow-0" data-share-type="art" data-share-id="${artData.public_id}">
+                          <i class="bi bi-share-fill"></i> <span>Share</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <!-- Full Music Comments UI Applied to PHPMusic (Fixed Constrained Box) -->
+                    <div class="p-3 p-md-4 rounded-4 w-100" style="background: #111116; border: 1px solid rgba(255,255,255,0.08); min-width: 0; max-width: 100%; box-sizing: border-box; overflow: hidden;">
+                      <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom border-secondary border-opacity-25">
+                        <div class="d-flex align-items-center gap-3">
+                          <span class="text-secondary small fw-bold"><span id="total-art-comments-count">0</span> Comments</span>
+                        </div>
+                        <div class="d-flex align-items-center gap-3">
+                          <select id="art-comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill">
+                            <option value="newest">Newest</option>
+                            <option value="oldest">Oldest</option>
+                            <option value="most_replied">Most Replied</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      ${currentUser ? `
+                        <div class="d-flex gap-3 mb-4 w-100" style="min-width: 0; max-width: 100%;">
+                          <img src="${avatarUrl}" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1" style="width: 44px; height: 44px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                          <div class="flex-grow-1 rich-input-container w-100" data-target-id="art-comment-input" style="min-width: 0; max-width: 100%; overflow: hidden;">
+                            <form id="art-comment-form" class="bg-transparent position-relative mb-0 w-100" style="min-width: 0; max-width: 100%;">
+                              <input type="hidden" id="art-comment-parent-id" value="">
+                              <input type="hidden" id="art-comment-reply-to-id" value="">
+                              <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner w-100" style="min-width: 0; max-width: 100%; border: 1px solid rgba(255,255,255,0.12); box-sizing: border-box; transition: border-color 0.3s; overflow: hidden;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
+                                <div class="editor-toolbar d-flex flex-nowrap align-items-center gap-1 mb-2 px-2 py-1 rounded-3 w-100 overflow-auto modern-custom-scroll" style="min-width: 0; max-width: 100%; box-sizing: border-box; background-color: rgba(0,0,0,0.3); border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                                  <div class="vr bg-secondary mx-2 opacity-25 flex-shrink-0" style="width: 2px; min-height: 20px;"></div>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                                  <div class="vr bg-secondary mx-2 opacity-25 flex-shrink-0" style="width: 2px; min-height: 20px;"></div>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                                  <div class="vr bg-secondary mx-2 opacity-25 flex-shrink-0" style="width: 2px; min-height: 20px;"></div>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                                  <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                                </div>
+                                <div class="d-flex flex-column flex-sm-row align-items-stretch align-items-sm-end gap-2 p-1 w-100" style="min-width: 0;">
+                                  <textarea id="art-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll flex-grow-1" placeholder="Add a comment... (Markdown supported)" maxlength="5000" rows="3" required style="resize: none; min-height: 85px; max-height: 280px; padding: 8px 12px; font-size: 0.95rem; line-height: 1.5; min-width: 0;"></textarea>
+                                  <button type="submit" class="btn btn-danger rounded-pill px-4 py-2 d-inline-flex align-items-center justify-content-center flex-shrink-0 shadow-sm fw-bold text-dark align-self-stretch align-self-sm-end" style="height: 38px; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-6 me-2"></i> Post</button>
+                                </div>
+                              </div>
+                            </form>
+                          </div>
+                        </div>
+                      ` : `
+                        <div class="p-3 mb-4 rounded-3 text-secondary text-center" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
+                          Please <a href="#" class="text-info fw-bold" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('login-modal')).show(); return false;">Log In</a> to join the conversation.
+                        </div>
+                      `}
+
+                      <div id="art-comments-list" class="d-flex flex-column gap-3 mb-2" style="min-width: 0; max-width: 100%; overflow: hidden;"></div>
+                      <div class="text-center mt-3 mb-2 d-none" id="load-more-art-comments-container">
+                        <button class="btn btn-outline-light btn-sm px-4 rounded-pill fw-bold" id="load-more-art-comments-btn">Load More Comments</button>
+                      </div>
                     </div>
                   </div>
 
-                  <div class="container-fluid px-0 px-lg-4 mt-2 flex-grow-1">
-                    <div class="row g-0 g-lg-4 m-0 h-100">
+                  <!-- Sidebar Right Column (Studio Profile Card + More from Author Carousel) -->
+                  <div class="phpmusic-viewer-sidebar">
+                    <div class="phpmusic-author-card" style="width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;">
+                      <div class="d-flex align-items-center gap-3">
+                        <img src="${avatarUrl}" class="rounded-circle shadow" style="width: 58px; height: 58px; object-fit: cover; border: 2px solid var(--ytm-accent);">
+                        <div class="overflow-hidden">
+                          <h5 class="fw-bold text-white mb-0 text-truncate hover-underline" style="cursor: pointer;" onclick="loadView({type: 'art_profile', param: ${artData.user_id}})">${escapeHTML(artData.author)}</h5>
+                          <span class="text-secondary small">@${escapeHTML(artData.author.toLowerCase().replace(/\s+/g, '_'))}</span>
+                        </div>
+                      </div>
+                      ${artData.bio ? `<p class="text-secondary small mb-0" style="line-height: 1.5; word-break: break-word;">${parseUserText(artData.bio)}</p>` : ''}
                       
-                      <!-- Main Media Viewer Column -->
-                      <div class="col-12 col-lg-8 position-relative p-0" style="min-height: 50vh;">
-                        ${sliderHtml}
-                      </div>
-
-                      <!-- Details & Comments Column -->
-                      <div class="col-12 col-lg-4 px-3 px-lg-2 mt-4 mt-lg-3 d-flex flex-column" style="border: none !important;">
-                        <div class="d-flex justify-content-between align-items-center mb-4">
-                          <div class="d-flex align-items-center gap-3 user-profile-link" data-userid="${artData.user_id}" data-artist="${encodeURIComponent(artData.author)}" style="cursor: pointer;">
-                            <img src="?action=get_profile_picture&id=${artData.user_id}" class="rounded-circle" style="width: 48px; height: 48px; object-fit: cover;">
-                            <div>
-                              <h5 class="m-0 fw-bold text-white hover-underline">${escapeHTML(artData.author)}</h5>
-                              <div class="text-secondary small">${new Date(artData.created_at.replace(' ','T')+'Z').toLocaleDateString()}</div>
-                            </div>
-                          </div>
-                          <div class="d-flex align-items-center gap-2">
-                            <div class="d-flex align-items-center gap-3 text-secondary fw-bold">
-                              <span><i class="bi bi-eye-fill"></i> <span id="art-views">${artData.views}</span></span>
-                              <span><i class="bi bi-heart-fill text-danger"></i> <span id="art-fav-count">${artData.fav_count}</span></span>
-                            </div>
-                            ${editDelButtons}
-                          </div>
-                        </div>
-
-                        <div class="d-flex flex-wrap gap-2 mb-4">
-                          <button class="btn btn-danger rounded-pill px-4 fw-bold flex-grow-1" id="art-fav-btn"><i class="bi ${artData.is_favorited ? 'bi-heart-fill' : 'bi-heart'}"></i> ${artData.is_favorited ? 'Favorited' : 'Favorite'}</button>
-                          <button class="btn btn-outline-light rounded-pill px-4 fw-bold flex-grow-1 share-view-btn" data-share-type="art" data-share-id="${artData.public_id}"><i class="bi bi-share-fill"></i> Share</button>
-                        </div>
-
-                        <h4 class="text-white fw-bold mb-3">${escapeHTML(artData.title)}</h4>
-                        <div class="text-light mb-4" style="font-size: 1rem; line-height: 1.6;">${parseUserText(decodeHTML(artData.description || ''))}</div>
-
-                        ${prevNextHtml}
-
-                        <div class="mb-4 mt-2">
-                          <div class="d-flex flex-wrap gap-2">
-                            ${mapTagsHTML(artData.tags, "tags", "bi-tag-fill")}
-                            ${mapTagsHTML(artData.characters, "characters", "bi-person-fill")}
-                            ${mapTagsHTML(artData.parodies, "parodies", "bi-controller")}
-                            ${mapTagsHTML(artData.groups_name, "groups_name", "bi-people-fill")}
-                          </div>
-                        </div>
-
-                        <h6 class="text-white fw-bold mb-3 mt-4 pt-3 border-top border-secondary"><i class="bi bi-chat-dots-fill"></i> Comments (<span id="total-art-comments">0</span>)</h6>
-                        <form id="art-comment-form" class="bg-transparent position-relative mb-4">
-                          <input type="hidden" id="art-comment-parent-id" value="">
-                          <input type="hidden" id="art-comment-reply-to-id" value="">
-                          <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                            <div class="d-flex align-items-end">
-                              <textarea id="art-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Add a comment... (Markdown & @mentions supported)" maxlength="5000" rows="3" required style="resize: none; min-height: 80px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;"></textarea>
-                              <button type="submit" class="btn btn-danger rounded-pill d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm fw-bold text-dark" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill"></i></button>
-                            </div>
-                          </div>
-                        </form>
-
-                        <div id="art-comments-list" class="d-flex flex-column gap-3 mb-5">
-                          <div class="text-center p-3 text-secondary"><div class="spinner-border spinner-border-sm"></div></div>
-                        </div>
-                      </div>
+                      ${!isOwner ? `
+                        <button class="btn btn-danger rounded-pill btn-sm w-100 fw-bold follow-btn mt-1" data-user-id="${artData.user_id}">Follow Artist</button>
+                      ` : ''}
                     </div>
+
+                    <!-- Horizontal Carousel: More from Artist -->
+                    ${otherArtworks.length > 0 ? `
+                      <div style="background: #111116; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 1.25rem; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; overflow: hidden;">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                          <h6 class="fw-bold text-white m-0 text-truncate" style="font-size: 0.95rem;">
+                            <i class="bi bi-collection-play-fill text-danger me-2"></i> More from ${escapeHTML(artData.author)}
+                          </h6>
+                          <button class="btn btn-sm btn-outline-light rounded-pill px-2 py-0" style="font-size: 0.72rem;" onclick="loadView({type: 'art_profile', param: ${artData.user_id}})">View All</button>
+                        </div>
+
+                        <!-- 5px Gap Horizontal Scroll Shelf -->
+                        <div class="d-flex overflow-auto pb-2 modern-custom-scroll" style="scroll-snap-type: x mandatory; gap: 5px; width: 100%; max-width: 100%; min-width: 0;">
+                          ${otherArtworks.map(o => {
+                            const isCurrent = o.public_id === artData.public_id;
+                            return `
+                            <div class="position-relative flex-shrink-0" ${isCurrent ? 'id="current-art-carousel-item"' : ''} style="width: 118px; scroll-snap-align: start; border-radius: 5px; cursor: pointer; background: #111116; border: 1px solid rgba(255,255,255,0.05);" onclick="loadView({type: 'view_art', param: '${o.public_id}'})">
+                              <div style="position: relative; width: 100%; aspect-ratio: 1/1; overflow: hidden; border-radius: 5px 5px 0 0; background: #08080c;">
+                                <img src="?action=get_art_image&path=${encodeURIComponent(o.cover_image)}" style="width: 100%; height: 100%; object-fit: cover; transition: none; ${isCurrent ? 'opacity: 0.4;' : ''}" alt="${escapeHTML(o.title)}" loading="lazy">
+                                ${o.page_count > 1 && !isCurrent ? `<span class="art-page-count-badge position-absolute top-0 start-0 m-1" style="font-size: 0.68rem;"><i class="bi bi-images me-1"></i>${o.page_count}</span>` : ''}
+                                <div class="position-absolute bottom-0 start-0 w-100 p-1 d-flex justify-content-between align-items-center" style="background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%);">
+                                  <span class="text-white small fw-bold" style="font-size: 0.65rem;"><i class="bi bi-eye-fill me-1"></i>${formatSongCount(o.views || 0)}</span>
+                                  <span class="text-white small fw-bold" style="font-size: 0.65rem;"><i class="bi bi-heart-fill text-danger me-1"></i>${o.fav_count || 0}</span>
+                                </div>
+                              </div>
+                              <div class="p-1" style="background: #111116; border-radius: 0 0 5px 5px;">
+                                <div class="text-truncate fw-bold ${isCurrent ? 'text-secondary' : 'text-white'}" style="font-size: 0.76rem;" title="${escapeHTML(o.title)}">${escapeHTML(o.title)}</div>
+                              </div>
+                            </div>
+                            `;
+                          }).join('')}
+                        </div>
+                      </div>
+                    ` : ''}
                   </div>
                 </div>
               `;
 
-              const favBtn = document.getElementById("art-fav-btn");
-              const favIcon = favBtn.querySelector('i');
-              const favCount = document.getElementById("art-fav-count");
+              // Interactive Manga / Gallery Preview Helpers
+              window.selectMangaPreviewPage = (index, imgSrc) => {
+                window.activeArtCurrentPageIndex = index;
+                const mainImg = document.getElementById("main-art-viewer-img");
+                const badge = document.getElementById("manga-preview-page-badge");
+                if (mainImg) {
+                  mainImg.style.opacity = "0.5";
+                  setTimeout(() => {
+                    mainImg.src = imgSrc;
+                    mainImg.style.opacity = "1";
+                  }, 80);
+                }
+                if (badge) badge.innerText = `${index + 1} / ${totalFiles}`;
 
-              favBtn.onclick = async () => {
-                if (!currentUser) return showToast("Please log in", "error");
-                const res = await fetchData("?action=toggle_art_favorite", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    public_id: artData.public_id
-                  })
+                document.querySelectorAll(".manga-thumb-item").forEach(el => {
+                  const isActive = parseInt(el.dataset.idx) === index;
+                  el.classList.toggle("active", isActive);
+                  el.style.borderColor = isActive ? "var(--ytm-accent)" : "rgba(255,255,255,0.1)";
+                  if (isActive) el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
                 });
-                if (res) {
-                  const currentCount = parseInt(favCount.textContent);
-                  if (res.status === 'added') {
-                    favIcon.className = "bi bi-heart-fill";
-                    favBtn.innerHTML = `<i class="bi bi-heart-fill"></i> Favorited`;
-                    favCount.textContent = currentCount + 1;
-                  } else {
-                    favIcon.className = "bi bi-heart";
-                    favBtn.innerHTML = `<i class="bi bi-heart"></i> Favorite`;
-                    favCount.textContent = Math.max(0, currentCount - 1);
-                  }
+              };
+
+              window.stepMangaPreviewPage = (step) => {
+                if (!artData.files || artData.files.length <= 1) return;
+                let nextIdx = (window.activeArtCurrentPageIndex || 0) + step;
+                if (nextIdx < 0) nextIdx = artData.files.length - 1;
+                if (nextIdx >= artData.files.length) nextIdx = 0;
+                const targetFile = artData.files[nextIdx];
+                if (targetFile) {
+                  window.selectMangaPreviewPage(nextIdx, `?action=get_art_image&path=${encodeURIComponent(targetFile.file_path)}`);
                 }
               };
 
-              // Re-attach comments rendering Logic
-              window.refreshArtComments = async () => {
-                const commData = await fetchData(`?action=get_art_comments&public_id=${artData.public_id}`);
+              const bkmkBtn = document.getElementById("art-bookmark-btn");
+              if (bkmkBtn) {
+                bkmkBtn.onclick = async () => {
+                  if (!currentUser) return showToast("Please log in", "error");
+                  const res = await fetchData("?action=toggle_art_favorite", {
+                    method: "POST",
+                    body: JSON.stringify({ public_id: artData.public_id })
+                  });
+                  if (res) {
+                    const isFav = res.status === 'added';
+                    bkmkBtn.className = `btn ${isFav ? 'btn-danger text-white' : 'btn-outline-light'} rounded-pill px-4 py-2 fw-bold d-inline-flex align-items-center gap-2 shadow-sm`;
+                    bkmkBtn.innerHTML = `<i class="bi ${isFav ? 'bi-heart-fill' : 'bi-heart'} fs-5"></i> <span>${isFav ? 'Added to Favorites' : 'Add to My Favorites'}</span>`;
+                    const favCountEl = document.getElementById("art-detail-favs");
+                    if (favCountEl) {
+                      let cur = parseInt(favCountEl.textContent) || 0;
+                      favCountEl.textContent = Math.max(0, isFav ? cur + 1 : cur - 1);
+                    }
+                  }
+                };
+              }
+
+              let currentArtCommentsPage = 1;
+              window.refreshArtComments = async (reset = false) => {
+                if (reset === true) currentArtCommentsPage = 1;
+                const sortVal = document.getElementById("art-comments-sort-select")?.value || "newest";
+                const commData = await fetchData(`?action=get_art_comments&public_id=${artData.public_id}&sort=${sortVal}&page=${currentArtCommentsPage}`);
                 const commList = document.getElementById("art-comments-list");
                 if (!commList || !commData) return;
+
+                const totalEl = document.getElementById("total-art-comments-count");
+                if (totalEl) totalEl.textContent = commData.total_comments || 0;
 
                 const buildTree = (comments, parent = null) => {
                   const children = comments.filter((c) => c.parent_id == parent);
                   if (children.length === 0) return "";
-          
+
                   const renderContent = (raw) => {
                     let decoded = decodeHTML(raw || "");
                     let parsed = parseUserText(decoded);
                     if (typeof marked !== "undefined") {
-                      try {
-                        parsed = marked.parse(parsed);
-                      } catch (e) {}
+                      try { parsed = marked.parse(parsed); } catch(e) {}
                     }
                     return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
                   };
 
-                  const styleInjection = parent === null ? `
-                    <style>
-                      .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
-                      .rich-comment-box img:hover { transform: scale(1.02); }
-                      .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
-                      .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
-                      .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
-                      .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
-                      .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
-                      .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
-                      .rich-comment-box li { margin-bottom: 6px; }
-                      .rich-comment-box p { margin-bottom: 12px; }
-                      .rich-comment-box p:last-child { margin-bottom: 0; }
-                      .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
-                      .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
-                      .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
-                      .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
-                      .phpmusic-comments-action-btn:active { transform: scale(0.95); }
-                      .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                      .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                      @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-                    </style>
-                  ` : "";
-
                   if (parent === null) {
-                    return styleInjection + children.map(c => `
+                    return children.map(c => `
                       <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
-                        <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
-                          <div class="position-relative">
-                            <img src="?action=get_profile_picture&id=${c.u_id}"
-                                 class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
-                                 data-userid="${c.u_id}"
-                                 data-artist="${encodeURIComponent(c.artist)}"
-                                 style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
-                                 onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
-                                 onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
-                            ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
-                          </div>
+                        <div class="d-flex flex-column align-items-center" style="width: 48px; flex-shrink: 0;">
+                          <img src="?action=get_profile_picture&id=${c.u_id}" class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="width:48px; height:48px; object-fit:cover; border: 2px solid rgba(255,255,255,0.08); cursor: pointer;">
                         </div>
                         <div class="flex-grow-1" style="min-width: 0;">
                           <div class="d-flex justify-content-between align-items-start mb-2">
                             <div class="d-flex align-items-center flex-wrap gap-2">
-                              <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                    data-userid="${c.u_id}"
-                                    data-artist="${encodeURIComponent(c.artist)}"
-                                    style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
-                                    onmouseover="this.style.textDecoration='underline'"
-                                    onmouseout="this.style.textDecoration='none'">
-                                ${escapeHTML(c.artist)}
-                              </span>
-                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
+                              <span class="fw-bolder text-white user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="font-size: 0.95rem; cursor: pointer;">${escapeHTML(c.artist)}</span>
+                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
                                 <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
                               </span>
                             </div>
                             ${currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `
-                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                  <li><button class="dropdown-item edit-art-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-art-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                </ul>
-                              </div>
-                            ` : ""}
+                              <button class="btn btn-link text-danger p-0 border-0 delete-art-comment-btn" data-id="${c.id}" title="Delete comment"><i class="bi bi-trash2 fs-6"></i></button>
+                            ` : ''}
                           </div>
-                          <div class="p-3 mb-3 rounded-4" style="background: rgba(255,255,255,0.03);">
+                          <div class="p-3 mb-2 rounded-4" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.04);">
                             ${renderContent(c.content)}
                           </div>
-                          ${currentUser ? `
                           <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                            <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
-                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
+                            <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === 'like' ? 'active-like text-white' : ''}" data-id="${c.id}" data-reaction="like" title="Like">
+                              <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-danger' : 'bi-hand-thumbs-up'} fs-6"></i>
                               <span>${c.like_count || 0}</span>
                             </button>
-                            <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
-                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
+                            <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike text-white' : ''}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                              <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'} fs-6"></i>
                               <span>${c.dislike_count || 0}</span>
                             </button>
-                            <button class="phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
-                              <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
+                            <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply">
+                              <i class="bi bi-chat-left-text fs-6"></i>
+                              <span>Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ''}</span>
                             </button>
                           </div>
-                          ` : `
-                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
-                          </div>
-                          `}
-                          <div class="mt-4">${buildTree(comments, c.id)}</div>
+                          <div class="mt-3">${buildTree(comments, c.id)}</div>
                         </div>
                       </div>
                     `).join("");
                   } else {
-                    return children.map(c => {
-                      let replyQuoteHtml = "";
-                      if (c.reply_to_id && c.reply_content && c.reply_to_id != parent) {
-                        const cleanRep = decodeHTML(c.reply_content).replace(/<[^>]*>?/gm, "");
-                        replyQuoteHtml = `
-                          <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${c.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
-                            <strong class="text-info">${escapeHTML(c.reply_sender || "Someone")}</strong><br>
-                            <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
+                    return `
+                      <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
+                        <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="art-comment-reply-container-${parent}" style="font-size: 0.95rem;">
+                          <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
+                            <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
                           </div>
-                        `;
-                      }
-                      return `
-                        <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${c.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
-                          <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                            <img src="?action=get_profile_picture&id=${c.u_id}"
-                                 class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
-                                 data-userid="${c.u_id}"
-                                 data-artist="${encodeURIComponent(c.artist)}"
-                                 style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                                 onmouseover="this.style.transform='scale(1.15)'"
-                                 onmouseout="this.style.transform='scale(1)'">
-                            ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
-                          </div>
-                          <div class="flex-grow-1" style="min-width: 0;">
-                            <div class="d-flex justify-content-between align-items-start mb-1">
-                              <div class="d-flex align-items-center flex-wrap gap-2">
-                                <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                      data-userid="${c.u_id}"
-                                      data-artist="${encodeURIComponent(c.artist)}"
-                                      style="font-size: 0.9rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                      onmouseover="this.style.textDecoration='underline'"
-                                      onmouseout="this.style.textDecoration='none'">
-                                  ${escapeHTML(c.artist)}
-                                </span>
-                                <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
-                                  <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                                </span>
-                              </div>
-                              ${currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `
-                                <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                  <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                  <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                    <li><button class="dropdown-item edit-art-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                    <li><button class="dropdown-item text-danger delete-art-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                  </ul>
+                          View ${children.length} ${children.length === 1 ? 'reply' : 'replies'}
+                        </button>
+                        <div id="art-comment-reply-container-${parent}" class="d-none mt-2 pt-2">
+                          ${children.map(c => `
+                            <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-secondary rounded-4 p-2">
+                              <img src="?action=get_profile_picture&id=${c.u_id}" class="rounded-circle shadow-sm user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="width:36px; height:36px; object-fit:cover; cursor: pointer;">
+                              <div class="flex-grow-1" style="min-width: 0;">
+                                <div class="d-flex justify-content-between align-items-start mb-1">
+                                  <div class="d-flex align-items-center gap-2">
+                                    <span class="fw-bold text-white user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="font-size: 0.85rem; cursor: pointer;">${escapeHTML(c.artist)}</span>
+                                    <span class="text-secondary small" style="font-size: 0.7rem;">${timeAgo(c.created_at)}</span>
+                                  </div>
+                                  ${currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1) ? `
+                                    <button class="btn btn-link text-danger p-0 delete-art-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i></button>
+                                  ` : ''}
                                 </div>
-                              ` : ""}
+                                <div class="p-2 mb-2">
+                                  ${renderContent(c.content)}
+                                </div>
+                                <div class="d-flex align-items-center gap-2 mt-1">
+                                  <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === 'like' ? 'active-like text-white' : ''}" data-id="${c.id}" data-reaction="like" title="Like">
+                                    <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill text-danger' : 'bi-hand-thumbs-up'}"></i>
+                                    <span>${c.like_count || 0}</span>
+                                  </button>
+                                  <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === 'dislike' ? 'active-dislike text-white' : ''}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
+                                    <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill text-danger' : 'bi-hand-thumbs-down'}"></i>
+                                    <span>${c.dislike_count || 0}</span>
+                                  </button>
+                                  <button type="button" class="btn btn-sm rounded-pill phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply">
+                                    <i class="bi bi-chat-left-text"></i>
+                                    <span>Reply</span>
+                                  </button>
+                                </div>
+                                <div class="mt-2">${buildTree(comments, c.id)}</div>
+                              </div>
                             </div>
-                            <div class="p-2 mb-2">
-                              ${replyQuoteHtml}
-                              ${renderContent(c.content)}
-                            </div>
-                            ${currentUser ? `
-                            <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                              <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
-                                <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-6"></i>
-                                <span>${c.like_count || 0}</span>
-                              </button>
-                              <button class="phpmusic-comments-action-btn art-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
-                                <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-6"></i>
-                                <span>${c.dislike_count || 0}</span>
-                              </button>
-                              <button class="phpmusic-comments-action-btn art-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
-                                <i class="bi bi-chat-left-text fs-6"></i> Reply
-                              </button>
-                            </div>
-                            ` : `
-                            <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
-                              <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
-                              <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
-                            </div>
-                            `}
-                            <div class="mt-3">${buildTree(comments, c.id)}</div>
-                          </div>
+                          `).join("")}
                         </div>
-                      `;
-                    }).join("");
-                  };
+                      </div>
+                    `;
+                  }
                 };
 
-                const newHtml = buildTree(commData.comments) || '<p class="text-secondary text-center p-3">No comments yet. Be the first to comment!</p>';
-                preserveReplyState(newHtml, "art-comments-list");
-                document.getElementById('total-art-comments').textContent = commData.total_comments || 0;
+                const newHtml = buildTree(commData.comments) || '<p class="text-secondary text-center my-4">No comments yet. Be the first to share your thoughts!</p>';
+                if (reset) preserveReplyState(newHtml, "art-comments-list");
+                else commList.insertAdjacentHTML("beforeend", newHtml);
+
+                const btnContainer = document.getElementById("load-more-art-comments-container");
+                if (btnContainer) {
+                  const rootCount = commData.comments.filter(c => c.parent_id == null).length;
+                  if (rootCount >= 25) btnContainer.classList.remove("d-none");
+                  else btnContainer.classList.add("d-none");
+                }
               };
 
               const commForm = document.getElementById("art-comment-form");
@@ -84320,21 +86831,196 @@ SOFTWARE.</div>
                     method: "POST",
                     body: JSON.stringify({
                       public_id: artData.public_id,
-                      parent_id: document.getElementById("art-comment-parent-id").value || null,
-                      reply_to_id: document.getElementById("art-comment-reply-to-id").value || null,
+                      parent_id: document.getElementById("art-comment-parent-id")?.value || null,
+                      reply_to_id: document.getElementById("art-comment-reply-to-id")?.value || null,
                       content: inp.value
                     })
                   });
                   inp.value = "";
-                  document.getElementById("art-comment-parent-id").value = "";
-                  document.getElementById("art-comment-reply-to-id").value = "";
-                  window.refreshArtComments();
+                  if (document.getElementById("art-comment-parent-id")) document.getElementById("art-comment-parent-id").value = "";
+                  if (document.getElementById("art-comment-reply-to-id")) document.getElementById("art-comment-reply-to-id").value = "";
+                  window.refreshArtComments(true);
                 };
               }
-              window.refreshArtComments();
+
+              document.getElementById("art-comments-sort-select")?.addEventListener("change", () => window.refreshArtComments(true));
+              document.getElementById("load-more-art-comments-btn")?.addEventListener("click", () => {
+                currentArtCommentsPage++;
+                window.refreshArtComments(false);
+              });
+
+              window.refreshArtComments(true);
+
+              // Auto-scroll carousel to current item automatically without layout bouncing
+              setTimeout(() => {
+                const activeCarouselItem = document.getElementById("current-art-carousel-item");
+                if (activeCarouselItem) {
+                  activeCarouselItem.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                }
+              }, 150);
 
               allContentloaded = true;
               break;
+            }
+
+            case "art_profile": {
+              const targetUserId = currentView.param || currentView.filter_user_id || (currentUser ? currentUser.id : null);
+              if (!targetUserId) {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Please log in to view this studio.</div>`;
+                allContentloaded = true;
+                break;
+              }
+
+              let artistName = currentView.artist_name || (currentUser && targetUserId == currentUser.id ? currentUser.artist : "");
+              let profData = await fetchData(`?action=get_view_data&type=artist&name=${encodeURIComponent(artistName)}&filter_user_id=${targetUserId}`);
+
+              if (!profData || !profData.details) {
+                if (currentUser && targetUserId == currentUser.id) {
+                  profData = {
+                    details: {
+                      user_id: currentUser.id,
+                      name: currentUser.artist,
+                      bio: currentUser.bio || "",
+                      followers_count: 0,
+                      following_count: 0,
+                      song_count: 0,
+                      background_url: `?action=get_profile_background&id=${currentUser.id}&v=${Date.now()}`
+                    }
+                  };
+                } else {
+                  contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Artist studio profile not found.</div>`;
+                  allContentloaded = true;
+                  break;
+                }
+              }
+              if (!profData || !profData.details) {
+                contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Artist studio profile not found.</div>`;
+                allContentloaded = true;
+                break;
+              }
+
+              const d = profData.details;
+              const isOwner = currentUser && currentUser.id == d.user_id;
+              updateContentTitle(`${d.name} Studio`, true);
+
+              const avatarSrc = `?action=get_profile_picture&id=${d.user_id}&t=${Date.now()}`;
+              const bannerBg = d.background_url ? `background-image: url('${d.background_url}'); background-size: cover; background-position: center;` : `background: linear-gradient(135deg, #0096fa, #ff4772);`;
+
+              contentArea.innerHTML = `
+                <div class="px-2 px-md-4 py-3">
+                  <!-- PHPMusic Profile Banner Card -->
+                  <div style="width: 100%; height: 180px; border-radius: 5px; ${bannerBg} position: relative; margin-bottom: 3.5rem; box-shadow: 0 4px 14px rgba(0,0,0,0.5);">
+                    <div style="position: absolute; bottom: -35px; left: 1.5rem; display: flex; align-items: flex-end; gap: 1rem;">
+                      <img src="${avatarSrc}" style="width: 88px; height: 88px; border-radius: 50%; object-fit: cover; border: 4px solid var(--ytm-bg); background: var(--ytm-bg);" alt="">
+                    </div>
+                  </div>
+
+                  <!-- Artist Info & Controls -->
+                  <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-3">
+                    <div>
+                      <h1 class="fw-bold text-white mb-1" style="font-size: 1.75rem; letter-spacing: -0.5px;">${escapeHTML(d.name)}</h1>
+                      <div class="text-secondary small">@${escapeHTML(d.name.toLowerCase().replace(/\s+/g, '_'))}</div>
+                      ${d.bio ? `<p class="text-light small mt-2 mb-0" style="max-width: 650px; line-height: 1.5;">${parseUserText(d.bio)}</p>` : ''}
+                      <div class="d-flex gap-4 small text-secondary mt-3">
+                        <span><strong class="text-white">${formatSongCount(d.song_count || 0)}</strong> Works</span>
+                        <span><strong class="text-white">${formatSongCount(d.followers_count || 0)}</strong> Followers</span>
+                        <span><strong class="text-white">${formatSongCount(d.following_count || 0)}</strong> Following</span>
+                      </div>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                      ${isOwner ? `
+                        <button class="btn btn-outline-light rounded-pill px-4 fw-bold btn-sm" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('settings-modal')).show();">Edit Profile</button>
+                        <button class="btn btn-danger rounded-pill px-4 fw-bold btn-sm" onclick="loadView({type: 'upload_art_page'})"><i class="bi bi-upload me-1"></i> Upload Work</button>
+                      ` : `
+                        <button class="btn ${d.is_following ? 'btn-outline-light' : 'btn-danger'} rounded-pill px-4 fw-bold btn-sm follow-btn" data-user-id="${d.user_id}">${d.is_following ? 'Unfollow' : 'Follow Artist'}</button>
+                        <button class="btn btn-outline-light rounded-pill px-4 fw-bold btn-sm" onclick="loadView({type: 'get_inbox'}).then(() => window.openChatFull(${d.user_id}, 'dm', '${escapeHTML(d.name)}'))"><i class="bi bi-chat-dots-fill me-1"></i> Message</button>
+                      `}
+                    </div>
+                  </div>
+
+                  <!-- Artwork Gallery Filter Bar (PHPFiles Banner Style) -->
+                  <div class="p-3 mb-3 rounded-3 shadow-sm" style="border-radius: 5px; background: #111116; border: 1px solid rgba(255,255,255,0.07);">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+                      <div class="d-flex gap-2 flex-wrap">
+                        <button class="btn btn-sm ${currentView.filter === 'all' ? 'btn-danger fw-bold' : 'btn-dark'} rounded-pill px-3" onclick="currentView.filter='all'; window.loadStudioWorks();">All</button>
+                        <button class="btn btn-sm ${currentView.filter === 'image' ? 'btn-danger fw-bold' : 'btn-dark'} rounded-pill px-3" onclick="currentView.filter='image'; window.loadStudioWorks();">Illustrations</button>
+                        <button class="btn btn-sm ${currentView.filter === 'manga' ? 'btn-danger fw-bold' : 'btn-dark'} rounded-pill px-3" onclick="currentView.filter='manga'; window.loadStudioWorks();">Manga</button>
+                      </div>
+                      <div class="d-flex align-items-center gap-2">
+                        <input type="text" id="studio-search-inp" class="form-control bg-dark text-white border-secondary rounded-pill" placeholder="Search creations..." style="height: 36px; font-size: 0.82rem; width: 200px;">
+                        <select id="studio-sort-sel" class="form-select form-select-sm bg-dark text-white border-secondary rounded-pill" style="width: auto; height: 36px;">
+                          <option value="newest">Newest</option>
+                          <option value="oldest">Oldest</option>
+                          <option value="popular">Most Viewed</option>
+                          <option value="most_liked">Most Favorited</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 5px Card & Gap Gallery Grid -->
+                  <div id="studio-artworks-grid" class="phpfiles-art-grid mb-5">
+                    <div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;"><div class="spinner-border text-danger"></div></div>
+                  </div>
+                </div>
+              `;
+
+              window.loadStudioWorks = async () => {
+                const grid = document.getElementById("studio-artworks-grid");
+                const q = document.getElementById("studio-search-inp")?.value.trim() || "";
+                const sort = document.getElementById("studio-sort-sel")?.value || "newest";
+                const typeFilter = currentView.filter || "all";
+
+                const res = await fetchData(`?action=get_arts&artist_id=${targetUserId}&type_filter=${typeFilter}&sort=${sort}&q=${encodeURIComponent(q)}`);
+                const items = res?.items || [];
+
+                if (items.length === 0) {
+                  grid.innerHTML = `<div class="text-center p-5 text-secondary w-100" style="grid-column: 1/-1;">No artworks found.</div>`;
+                  return;
+                }
+
+                grid.innerHTML = items.map(a => `
+                  <div class="card phpfiles-card art-card-item h-100" data-id="${a.public_id}" data-is-series="${a.is_series ? '1' : '0'}" data-series-id="${a.series_public_id || a.series_id || ''}">
+                    <div style="position: relative; width: 100%; aspect-ratio: 1/1; overflow: hidden; border-radius: 5px 5px 0 0; background: #08080c;">
+                      <img src="?action=get_art_image&path=${encodeURIComponent(a.cover_image)}" class="phpfiles-card-thumb" alt="${escapeHTML(a.display_title || a.title)}" loading="lazy">
+                      <div class="position-absolute top-0 start-0 m-2">
+                        ${a.page_count > 1 ? `<span class="art-page-count-badge"><i class="bi bi-images me-1"></i> ${a.page_count}</span>` : ''}
+                      </div>
+                      <button class="art-more-btn position-absolute top-0 end-0 m-2" data-id="${a.public_id}"><i class="bi bi-three-dots-vertical fs-5"></i></button>
+                      <div class="position-absolute bottom-0 start-0 w-100 p-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%);">
+                        <span class="text-secondary small fw-bold" style="font-size: 0.7rem;"><i class="bi bi-eye-fill me-1"></i>${formatSongCount(a.views || 0)}</span>
+                        <span class="text-secondary small fw-bold" style="font-size: 0.7rem;"><i class="bi bi-heart-fill text-danger me-1"></i>${a.fav_count || 0}</span>
+                      </div>
+                    </div>
+                    <div class="p-2 text-start" style="background: #111116;">
+                      <h6 class="fw-bold text-white text-truncate mb-0" style="font-size: 0.85rem;">${escapeHTML(a.display_title || a.title)}</h6>
+                    </div>
+                  </div>
+                `).join('');
+
+                grid.querySelectorAll('.art-card-item').forEach(card => {
+                  card.addEventListener('click', (e) => {
+                    if (e.target.closest('.art-more-btn')) return;
+                    if (card.dataset.isSeries === '1' && card.dataset.seriesId) {
+                      loadView({type: 'view_series', param: card.dataset.seriesId, sort: '', filter: ''});
+                    } else {
+                      loadView({type: 'view_art', param: card.dataset.id, sort: '', filter: ''});
+                    }
+                  });
+                });
+              };
+
+              window.loadStudioWorks();
+              document.getElementById("studio-search-inp")?.addEventListener("input", () => {
+                clearTimeout(window.studioSearchTimeout);
+                window.studioSearchTimeout = setTimeout(window.loadStudioWorks, 300);
+              });
+              document.getElementById("studio-sort-sel")?.addEventListener("change", window.loadStudioWorks);
+
+              allContentloaded = true;
+              break;
+            }
 
             case "view_art_full":
               updateContentTitle("Artwork Gallery", false);
@@ -84438,7 +87124,8 @@ SOFTWARE.</div>
               break;
 
             case "upload_art_page":
-              updateContentTitle("Upload Artwork", !!currentUser);
+              const isUploadChapter = !!currentView.series_name;
+              updateContentTitle(isUploadChapter ? `Upload Chapter: ${currentView.series_name}` : "Upload Artwork", !!currentUser);
               if (currentUser) {
                 contentArea.innerHTML = `
                   <style>
@@ -84446,7 +87133,12 @@ SOFTWARE.</div>
                     .form-check-input:checked { background-color: var(--ytm-accent) !important; border-color: var(--ytm-accent) !important; }
                   </style>
                   <div class="container-fluid px-3 px-md-4 mt-4 mb-5">
-                    <h3 class="text-white fw-bold mb-4"><i class="bi bi-cloud-arrow-up text-primary me-2"></i> Upload Artwork</h3>
+                    <div class="mb-4">
+                      <button class="btn btn-link text-white text-decoration-none p-0 d-inline-flex align-items-center gap-2" onclick="loadView({type: 'get_arts', param: '', sort: 'newest', filter: '${isUploadChapter ? 'manga' : 'image'}'})">
+                        <i class="bi bi-arrow-left fs-4"></i> <span class="fw-bold">${isUploadChapter ? 'Back to Manga' : 'Back to Illustrations'}</span>
+                      </button>
+                    </div>
+                    <h3 class="text-white fw-bold mb-4"><i class="bi bi-cloud-arrow-up text-primary me-2"></i> ${isUploadChapter ? 'Upload Chapter' : 'Upload Artwork'}</h3>
                     <form id="page-upload-art-form">
                       <div class="row g-4">
                         <!-- Left Column: Image Dropzone & Preview -->
@@ -84465,16 +87157,16 @@ SOFTWARE.</div>
                         <div class="col-12 col-lg-7">
                           <div class="p-4 rounded-4" style="background: var(--ytm-surface-2);">
                             
-                            <div class="row g-3 mb-4">
+                           <div class="row g-3 mb-4">
                               <div class="col-md-8">
                                 <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TITLE</label>
-                                <input type="text" id="art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required placeholder="Artwork title">
+                                <input type="text" id="art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required placeholder="${isUploadChapter ? 'Chapter title (e.g. Chapter 1: The Beginning)' : 'Artwork title'}">
                               </div>
                               <div class="col-md-4">
                                 <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">POST TYPE</label>
-                                <select id="art-type" class="form-select bg-dark text-white border-0 py-2 px-3 rounded-3">
+                                <select id="art-type" class="form-select bg-dark text-white border-0 py-2 px-3 rounded-3" ${isUploadChapter ? 'disabled' : ''}>
                                   <option value="image">Illustration</option>
-                                  <option value="manga">Manga / Comic</option>
+                                  <option value="manga" ${isUploadChapter ? 'selected' : ''}>Manga / Comic</option>
                                 </select>
                               </div>
                             </div>
@@ -84484,7 +87176,7 @@ SOFTWARE.</div>
                               <input type="text" id="art-tags" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="anime, original, highres (comma separated)">
                             </div>
 
-                            <div id="art-manga-fields" class="d-none">
+                            <div id="art-manga-fields" class="${isUploadChapter ? '' : 'd-none'}">
                               <div class="row g-3 mb-4">
                                 <div class="col-md-6">
                                   <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">CHARACTERS</label>
@@ -84502,7 +87194,7 @@ SOFTWARE.</div>
                                 </div>
                                 <div class="col-md-6">
                                   <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SERIES</label>
-                                  <input type="text" id="art-series" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Series name">
+                                  <input type="text" id="art-series" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" placeholder="Series name" ${isUploadChapter ? `value="${escapeHTML(currentView.series_name)}" readonly` : ''}>
                                 </div>
                               </div>
                             </div>
@@ -84628,9 +87320,13 @@ SOFTWARE.</div>
                     }
                   </style>
                   <div class="container-fluid px-3 px-md-4 mt-4 mb-5">
+                    <div class="mb-4">
+                      <button class="btn btn-link text-white text-decoration-none p-0 d-inline-flex align-items-center gap-2" onclick="loadView({type: '${artData.type === 'manga' && artData.series_id ? 'view_series' : 'view_art'}', param: '${artData.type === 'manga' && artData.series_id ? artData.series_id : artData.public_id}'})">
+                        <i class="bi bi-arrow-left fs-4"></i> <span class="fw-bold">Back to ${artData.type === 'manga' ? 'Series' : 'Artwork'}</span>
+                      </button>
+                    </div>
                     <div class="d-flex justify-content-between align-items-center mb-4">
-                      <h3 class="text-white fw-bold m-0"><i class="bi bi-pencil-square text-warning me-2"></i> Edit Artwork</h3>
-                      <button class="btn btn-outline-light btn-sm rounded-pill px-4 fw-bold" onclick="loadView({type: 'view_art', param: '${artData.public_id}'})">Cancel</button>
+                      <h3 class="text-white fw-bold m-0"><i class="bi bi-pencil-square text-warning me-2"></i> Edit ${artData.type === 'manga' ? 'Chapter' : 'Artwork'}</h3>
                     </div>
                     
                     <form id="page-edit-art-form">
@@ -84664,9 +87360,18 @@ SOFTWARE.</div>
                         <div class="col-12 col-lg-6">
                           <div class="p-4 rounded-4" style="background: var(--ytm-surface-2);">
                             
-                            <div class="mb-4">
-                              <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TITLE</label>
-                              <input type="text" id="edit-art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required value="${escapeHTML(decodeHTML(artData.title))}">
+                            <div class="row g-3 mb-4">
+                              <div class="col-md-8">
+                                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">TITLE</label>
+                                <input type="text" id="edit-art-title" class="form-control bg-dark text-white border-0 py-2 px-3 rounded-3" required value="${escapeHTML(decodeHTML(artData.title))}">
+                              </div>
+                              <div class="col-md-4">
+                                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">POST TYPE</label>
+                                <select id="edit-art-type" class="form-select bg-dark text-white border-0 py-2 px-3 rounded-3">
+                                  <option value="image" ${artData.type === 'image' ? 'selected' : ''}>Illustration</option>
+                                  <option value="manga" ${artData.type === 'manga' ? 'selected' : ''}>Manga / Comic</option>
+                                </select>
+                              </div>
                             </div>
                             
                             <div class="mb-4">
@@ -87796,6 +90501,10 @@ SOFTWARE.</div>
             link.classList.contains("note-filter-link") ||
             link.classList.contains("task-filter-link") ||
             link.classList.contains("blog-filter-link") ||
+            link.classList.contains("imageditor-filter-link") ||
+            link.classList.contains("arts-filter-link") ||
+            link.classList.contains("arts-meta-link") ||
+            link.classList.contains("arts-profile-link") ||
             link.getAttribute("data-bs-toggle") === "collapse" ||
             link.getAttribute("data-bs-toggle") === "modal" ||
             [
@@ -87928,7 +90637,14 @@ SOFTWARE.</div>
             searchInputMobile.value = query;
             hideMobileSidebar();
             
-            if (currentView.type === "get_arts") {
+            const isArtworkSearch = ["get_arts", "view_art", "view_art_full", "read_series", "view_series", "arts_meta", "art_profile", "upload_art_page", "edit_art_page"].includes(currentView.type);
+            if (isArtworkSearch) {
+              if (currentView.type !== "get_arts") {
+                currentView.type = "get_arts";
+                currentView.filter = "all";
+                currentView.exact_filter = "";
+                currentView.exact_val = "";
+              }
               if (currentView.exact_filter) {
                 currentView.exact_val = query.trim();
                 currentView.searchQuery = "";
@@ -88069,9 +90785,16 @@ SOFTWARE.</div>
           if (isDesktop) searchInputMobile.value = query;
           else searchInputDesktop.value = query;
     
-          if (currentView.type === "get_arts") {
+          const isArtworkSearch = ["get_arts", "view_art", "view_art_full", "read_series", "view_series", "arts_meta", "art_profile", "upload_art_page", "edit_art_page"].includes(currentView.type);
+          if (isArtworkSearch) {
             clearTimeout(window.artAdvSearchTimeout);
             window.artAdvSearchTimeout = setTimeout(() => {
+              if (currentView.type !== "get_arts") {
+                currentView.type = "get_arts";
+                currentView.filter = "all";
+                currentView.exact_filter = "";
+                currentView.exact_val = "";
+              }
               if (currentView.exact_filter) {
                 currentView.exact_val = query;
                 currentView.searchQuery = "";
@@ -89040,10 +91763,10 @@ SOFTWARE.</div>
               hideMobileSidebar();
               return;
             }
-            const userLink = e.target.closest(".user-profile-link");
+            const userLink = target.closest(".user-profile-link");
             if (userLink) {
               const userId = userLink.dataset.userid;
-              const artistName = decodeURIComponent(userLink.dataset.artist);
+              const artistName = decodeURIComponent(userLink.dataset.artist || "");
               const commentsModal = bootstrap.Modal.getInstance(
                 document.getElementById("comments-modal"),
               );
@@ -89052,6 +91775,30 @@ SOFTWARE.</div>
                 document.getElementById("connections-modal"),
               );
               if (connectionsModal) connectionsModal.hide();
+
+              // When browsing inside PHPShares, navigate to the PHPMusic Studio Profile
+              const inArtSection = [
+                "get_arts",
+                "view_art",
+                "view_art_full",
+                "read_series",
+                "view_series",
+                "arts_meta",
+                "art_profile"
+              ].includes(currentView.type);
+
+              if (inArtSection && userId) {
+                loadView({
+                  type: "art_profile",
+                  param: userId,
+                  filter_user_id: userId,
+                  artist_name: artistName,
+                  sort: "newest",
+                  filter: "all",
+                });
+                return;
+              }
+
               loadView({
                 type: "artist_songs",
                 param: artistName,
@@ -93611,6 +96358,32 @@ SOFTWARE.</div>
           });
         }
     
+        const artsProfileLink = document.querySelector(".arts-profile-link");
+        if (artsProfileLink) {
+          artsProfileLink.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!currentUser) {
+              showToast("Please log in to view your studio profile", "error");
+              return;
+            }
+            document
+              .querySelectorAll(".arts-meta-link, .arts-filter-link, .arts-profile-link")
+              .forEach((el) => el.classList.remove("active", "text-white"));
+            artsProfileLink.classList.add("active", "text-white");
+
+            loadView({
+              type: "art_profile",
+              param: currentUser.id,
+              filter_user_id: currentUser.id,
+              artist_name: currentUser.artist,
+              sort: "newest",
+              filter: "all",
+            });
+            hideMobileSidebar();
+          });
+        }
+
         const navUploadBtn = document.getElementById("nav-upload-btn");
         if (navUploadBtn) {
           navUploadBtn.addEventListener("click", (e) => {
@@ -96982,7 +99755,7 @@ SOFTWARE.</div>
     
         window.uploadFileInChunks = async (file, onProgress) => {
           const chunkSize = 2 * 1024 * 1024; // 2MB chunk slice
-          const totalChunks = Math.ceil(file.size / chunkSize);
+          const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
           const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
           for (let i = 0; i < totalChunks; i++) {
@@ -97764,6 +100537,7 @@ SOFTWARE.</div>
           const data = await fetchData("?action=get_session", {}, true);
           if (data && data.status === "loggedin") {
             currentUser = data.user;
+            window.currentUser = currentUser;
             try {
               localStorage.setItem("ytm_currentUser", JSON.stringify(currentUser));
               if ("caches" in window) {
@@ -99115,6 +101889,10 @@ SOFTWARE.</div>
             e.preventDefault();
             e.stopPropagation();
             const meta = artsMetaLink.dataset.meta;
+            document
+              .querySelectorAll(".arts-meta-link, .arts-filter-link")
+              .forEach((el) => el.classList.remove("active", "text-white"));
+            artsMetaLink.classList.add("active", "text-white");
             loadView({ type: "arts_meta", param: meta, sort: "", filter: "" });
             hideMobileSidebar();
             return;
@@ -99201,9 +101979,14 @@ SOFTWARE.</div>
               }).then(r => r.json());
 
               if (res && res.status === "success") {
-                showToast("Artwork published successfully!", "success");
+                showToast("Published successfully!", "success");
                 window.artFilesToUpload = [];
-                loadView({type: 'view_art', param: res.public_id, sort: '', filter: ''});
+                requestCache.clear(); // Clear cache to reflect updates without hard reload
+                if (res.type === 'manga' && res.series_public_id) {
+                  loadView({type: 'view_series', param: res.series_public_id});
+                } else {
+                  loadView({type: 'view_art', param: res.public_id, sort: '', filter: ''});
+                }
               } else {
                 throw new Error(res?.message || "Failed to publish artwork.");
               }
@@ -99277,6 +102060,7 @@ SOFTWARE.</div>
               const fd = new FormData();
               fd.append("public_id", document.getElementById("edit-art-public-id").value);
               fd.append("title", document.getElementById("edit-art-title").value);
+              fd.append("type", document.getElementById("edit-art-type").value);
               fd.append("tags", document.getElementById("edit-art-tags").value);
               fd.append("description", document.getElementById("edit-art-desc").value);
               fd.append("characters", document.getElementById("edit-art-characters") ? document.getElementById("edit-art-characters").value : "");
@@ -99292,8 +102076,13 @@ SOFTWARE.</div>
               const result = await res.json();
 
               if (result && result.status === "success") {
-                showToast("Artwork updated successfully!", "success");
-                loadView({type: 'view_art', param: document.getElementById("edit-art-public-id").value, sort: '', filter: ''});
+                showToast("Updated successfully!", "success");
+                requestCache.clear(); // Clear cache to reflect updates without hard reload
+                if (result.type === 'manga' && result.series_public_id) {
+                  loadView({type: 'view_series', param: result.series_public_id});
+                } else {
+                  loadView({type: 'view_art', param: document.getElementById("edit-art-public-id").value, sort: '', filter: ''});
+                }
               } else {
                 throw new Error(result.message || "Failed to update artwork.");
               }
@@ -102350,16 +105139,20 @@ SOFTWARE.</div>
           if (e.state && e.state.viewConfig) {
             loadView(e.state.viewConfig, false);
           } else {
-            loadView(
-              {
-                type: "get_songs",
-                param: "",
-                sort: "random",
-                filter_user_id: "",
-                artist_name: "",
-              },
-              false,
-            );
+            if (currentView && currentView.type && currentView.type !== "get_songs") {
+              loadView(currentView, false);
+            } else {
+              loadView(
+                {
+                  type: "get_songs",
+                  param: "",
+                  sort: "random",
+                  filter_user_id: "",
+                  artist_name: "",
+                },
+                false,
+              );
+            }
           }
         });
     
@@ -102939,6 +105732,14 @@ SOFTWARE.</div>
         const showArtistTooltip = async (target, artistRaw, userId) => {
           if (window.innerWidth < 992) return;
 
+          const isArtContext = target.closest('#arts-grid, .art-card-item, .phpmusic-viewer-layout, #arts-meta-grid, #studio-artworks-grid, .phpfiles-art-grid, .phpfiles-card') || [
+            "get_arts", "view_art", "view_art_full", "read_series", 
+            "view_series", "arts_meta", "art_profile", "upload_art_page", "edit_art_page"
+          ].includes(currentView.type);
+
+          artistTooltip.dataset.isArt = isArtContext ? "1" : "0";
+          artistTooltip.dataset.userId = userId || "";
+
           const sessionId = ++activeTooltipSession;
 
           const artistsList = decodeURIComponent(artistRaw)
@@ -103000,7 +105801,7 @@ SOFTWARE.</div>
 
               html += `
                 <div class="artist-tooltip-card ${i < artistsList.length - 1 ? "border-bottom border-secondary pb-3 mb-3" : ""}">
-                  <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" style="cursor: pointer; overflow: hidden;">
+                  <div class="d-flex align-items-center gap-3 artist-tt-click" data-artist="${encodeURIComponent(data.name)}" data-userid="${data.user_id || userId || ""}" style="cursor: pointer; overflow: hidden;">
                     <img src="${data.image_url}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); flex-shrink: 0;">
                     <div style="min-width: 0; flex-grow: 1; overflow: hidden;">
                        <div class="marquee-container w-100 mb-1">
@@ -103114,13 +105915,33 @@ SOFTWARE.</div>
               e.stopPropagation();
               artistTooltip.style.opacity = "0";
               artistTooltip.style.display = "none";
-              loadView({
-                type: "artist_songs",
-                param: decodeURIComponent(clickArea.dataset.artist),
-                sort: "album_asc",
-                filter_user_id: "",
-                artist_name: "",
-              });
+
+              const isArtContext = artistTooltip.dataset.isArt === "1" || [
+                "get_arts", "view_art", "view_art_full", "read_series", 
+                "view_series", "arts_meta", "art_profile", "upload_art_page", "edit_art_page"
+              ].includes(currentView.type);
+
+              const targetArtistName = decodeURIComponent(clickArea.dataset.artist);
+              const targetUserId = clickArea.dataset.userid || artistTooltip.dataset.userId || "";
+
+              if (isArtContext) {
+                loadView({
+                  type: "art_profile",
+                  param: targetUserId,
+                  filter_user_id: targetUserId,
+                  artist_name: targetArtistName,
+                  sort: "newest",
+                  filter: "all",
+                });
+              } else {
+                loadView({
+                  type: "artist_songs",
+                  param: targetArtistName,
+                  sort: "album_asc",
+                  filter_user_id: "",
+                  artist_name: "",
+                });
+              }
             }
           }
         });
