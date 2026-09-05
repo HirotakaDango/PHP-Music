@@ -485,6 +485,10 @@ if (isset($_GET['page']) && $_GET['page'] === 'forbidden') {
   exit;
 }
 
+// Define essential constants early so early-access pages (?access=requirements) have database & directory paths
+if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
+if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
+
 // FFMPEG DETECTION & PORTABLE RUNTIME ENGINE (Zero Composer Dependency)
 function is_cli_exec_available() {
   if (!function_exists('exec')) return false;
@@ -608,9 +612,9 @@ function ensure_ffmpeg() {
   return false;
 }
 
-function is_ffmpeg_supported() {
+function is_ffmpeg_supported($auto_download = false) {
   static $ffmpeg_path = null;
-  if ($ffmpeg_path !== null) return $ffmpeg_path;
+  if ($ffmpeg_path !== null && file_exists($ffmpeg_path)) return $ffmpeg_path;
 
   if (!is_cli_exec_available()) {
     $ffmpeg_path = false;
@@ -645,36 +649,38 @@ function is_ffmpeg_supported() {
     return $ffmpeg_path;
   }
 
-  // 3. Automatically download static binary based on OS if missing
-  $downloaded = ensure_ffmpeg();
-  if ($downloaded && file_exists($downloaded)) {
-    $ffmpeg_path = realpath($downloaded);
-    return $ffmpeg_path;
+  // 3. Only download on demand when transcoding, never on passive page loads
+  if ($auto_download) {
+    $downloaded = ensure_ffmpeg();
+    if ($downloaded && file_exists($downloaded)) {
+      $ffmpeg_path = realpath($downloaded);
+      return $ffmpeg_path;
+    }
   }
 
-  $ffmpeg_path = false;
   return false;
 }
 
-function is_ffmpeg_enabled() {
+function is_ffmpeg_enabled($auto_download = false) {
   // Automatically disabled if host cannot run or find FFmpeg
-  if (!is_ffmpeg_supported()) return false;
+  if (!is_ffmpeg_supported($auto_download)) return false;
   try {
+    if (!defined('DB_FILE') || !file_exists(DB_FILE)) return true;
     $db = get_db();
     $stmt = $db->query("SELECT value FROM site_settings WHERE key = 'ffmpeg_enabled' LIMIT 1");
     $val = $stmt ? $stmt->fetchColumn() : false;
     if ($val === false) return true; // Default ON when supported
     return (bool)(int)$val;
-  } catch (Exception $e) {
+  } catch (Throwable $e) {
     return true;
   }
 }
 
-function get_ffmpeg_binary() {
-  if (!is_ffmpeg_enabled()) {
+function get_ffmpeg_binary($auto_download = false) {
+  if (!is_ffmpeg_enabled($auto_download)) {
     return false;
   }
-  return is_ffmpeg_supported();
+  return is_ffmpeg_supported($auto_download);
 }
 
 function resolve_song_file_by_bitrate($song_id, $original_file, $preferred_kbps = null) {
@@ -21508,7 +21514,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     // Transcode Individual Song Bitrate
     if (isset($_POST['transcode_single_song']) && isset($_POST['song_id'])) {
       $db = get_db();
-      $ffmpeg_bin = get_ffmpeg_binary();
+      $ffmpeg_bin = get_ffmpeg_binary(true);
 
       if (!$ffmpeg_bin) {
         $_SESSION['admin_flash_msg'] = "Transcoding failed: FFmpeg is not available or CLI execution is disabled by the server.";
@@ -21610,7 +21616,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     // Bulk Transcode Selected or Filtered Tracks
     if (isset($_POST['transcode_bulk_songs']) && isset($_POST['song_ids']) && is_array($_POST['song_ids'])) {
       $db = get_db();
-      $ffmpeg_bin = get_ffmpeg_binary();
+      $ffmpeg_bin = get_ffmpeg_binary(true);
 
       if (!$ffmpeg_bin) {
         $_SESSION['admin_flash_msg'] = "Bulk transcoding failed: FFmpeg engine is not available on this server.";
@@ -50873,8 +50879,9 @@ HTML;
           $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $is_collaborative, $replaygain]);
           $new_song_id = $db->lastInsertId();
 
-          // Automatic Multi-Bitrate Transcoding via FFmpeg (Downsample only; never upscale lower bitrates)
-          if ($ffmpeg_bin && is_ffmpeg_enabled() && file_exists($filePath)) {
+          // Automatic Multi-Bitrate Transcoding via FFmpeg (Auto-download binary if missing)
+          $ffmpeg_bin = get_ffmpeg_binary(true);
+          if ($ffmpeg_bin && file_exists($filePath)) {
             $source_kbps = (int)round(($bitrate ?: 0) / 1000);
             $is_lossless = in_array($ext, ['flac', 'wav']);
 
