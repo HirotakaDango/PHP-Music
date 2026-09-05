@@ -673,7 +673,7 @@ function track_site_visitor($db) {
 }
 
 // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
-$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'upload_art', 'edit_art', 'delete_art', 'toggle_art_favorite', 'add_art_comment', 'edit_art_comment', 'delete_art_comment'];
+$write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'upload_art', 'edit_art', 'delete_art', 'toggle_art_favorite', 'add_art_comment', 'edit_art_comment', 'delete_art_comment', 'save_rhythm_score', 'toggle_rhythm_favorite'];
 $current_action = $_GET['action'] ?? '';
 
 if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
@@ -684,7 +684,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.7');
+define('APP_VERSION', '10.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -835,6 +835,49 @@ function get_db() {
     </html>
     <?php
     exit;
+  }
+}
+
+function record_activity_log($action, $actor = null, $target_user_id = 0, $target_info = null) {
+  try {
+    $db = get_db();
+    $db->exec("CREATE TABLE IF NOT EXISTS admin_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      admin_email TEXT,
+      action TEXT,
+      target_user_id INTEGER,
+      target_email TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );");
+
+    if ($actor === null) {
+      if (!empty($_SESSION['admin_email'])) {
+        $actor = $_SESSION['admin_email'];
+      } elseif (!empty($_SESSION['user_artist'])) {
+        $actor = $_SESSION['user_artist'] . ' (UID #' . ($_SESSION['user_id'] ?? '0') . ')';
+      } else {
+        $actor = 'Guest Visitor';
+      }
+    }
+
+    if ($target_info === null) {
+      if ($target_user_id > 0) {
+        $stmt = $db->prepare("SELECT COALESCE(email, artist, 'User #' || id) FROM users WHERE id = ?");
+        $stmt->execute([$target_user_id]);
+        $target_info = $stmt->fetchColumn() ?: ('User #' . $target_user_id);
+      } else {
+        $target_info = 'System';
+      }
+    }
+
+    $db->prepare("INSERT INTO admin_logs (admin_email, action, target_user_id, target_email) VALUES (?, ?, ?, ?)")
+       ->execute([$actor, $action, (int)$target_user_id, (string)$target_info]);
+  } catch (Exception $e) {}
+}
+
+if (!function_exists('log_admin_activity')) {
+  function log_admin_activity($db, $admin_email, $action, $target_user_id = 0) {
+    record_activity_log($action, $admin_email, $target_user_id);
   }
 }
 
@@ -1878,16 +1921,22 @@ HTACCESS;
   }
 
   function createThumbnail($src, $dest, $size, $quality) {
-    if (!file_exists($src)) return false;
+    if (!file_exists($src) || !is_readable($src)) return false;
+
+    $ext = strtolower(pathinfo($src, PATHINFO_EXTENSION));
+    if ($ext === 'svg') return false;
+
     $info = @getimagesize($src);
     if (!$info) return false;
 
     list($origW, $origH) = $info;
-    $mime = $info['mime'];
+    if ($origW <= 0 || $origH <= 0) return false;
+
+    $mime = $info['mime'] ?? '';
 
     $ratio = min($size / $origW, $size / $origH);
-    $newW = max(1, round($origW * $ratio));
-    $newH = max(1, round($origH * $ratio));
+    $newW = max(1, (int)round($origW * $ratio));
+    $newH = max(1, (int)round($origH * $ratio));
 
     $srcImg = false;
     switch ($mime) {
@@ -1896,38 +1945,50 @@ HTACCESS;
       case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
       case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
       case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : false; break;
-      case 'image/bmp':  $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
+      case 'image/bmp':
+      case 'image/x-ms-bmp': $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
     }
     if (!$srcImg) return false;
 
     if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
       $exif = @exif_read_data($src);
       if (!empty($exif['Orientation'])) {
+        $rotated = false;
         switch ($exif['Orientation']) {
-          case 3: $srcImg = imagerotate($srcImg, 180, 0); break;
+          case 3: $rotated = imagerotate($srcImg, 180, 0); break;
           case 6:
-            $srcImg = imagerotate($srcImg, -90, 0);
+            $rotated = imagerotate($srcImg, -90, 0);
             list($origW, $origH) = [$origH, $origW];
             break;
           case 8:
-            $srcImg = imagerotate($srcImg, 90, 0);
+            $rotated = imagerotate($srcImg, 90, 0);
             list($origW, $origH) = [$origH, $origW];
             break;
         }
-        $ratio = min($size / $origW, $size / $origH);
-        $newW = max(1, round($origW * $ratio));
-        $newH = max(1, round($origH * $ratio));
+        if ($rotated !== false) {
+          imagedestroy($srcImg);
+          $srcImg = $rotated;
+          $ratio = min($size / $origW, $size / $origH);
+          $newW = max(1, (int)round($origW * $ratio));
+          $newH = max(1, (int)round($origH * $ratio));
+        }
       }
     }
 
     $destImg = imagecreatetruecolor($newW, $newH);
-    if ($mime === 'image/png' || $mime === 'image/webp') {
-      imagealphablending($destImg, false);
-      imagesavealpha($destImg, true);
-      $transparent = imagecolorallocatealpha($destImg, 255, 255, 255, 127);
-      imagefilledrectangle($destImg, 0, 0, $newW, $newH, $transparent);
+    if (!$destImg) {
+      imagedestroy($srcImg);
+      return false;
     }
+
+    $bg = imagecolorallocate($destImg, 33, 31, 38);
+    imagefilledrectangle($destImg, 0, 0, $newW, $newH, $bg);
     imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
+
+    $destDir = dirname($dest);
+    if (!is_dir($destDir)) {
+      @mkdir($destDir, 0777, true);
+    }
 
     $ok = imagejpeg($destImg, $dest, $quality);
     imagedestroy($srcImg);
@@ -2046,12 +2107,13 @@ HTACCESS;
   }
 
   function logDriveActivity($metaFile, $action, $relPath, $details = '') {
+    $cleanPath = ltrim(str_replace(['\\', '//'], '/', $relPath), '/');
     $meta = getDriveMeta($metaFile);
     if (!isset($meta['activity'])) $meta['activity'] = [];
     array_unshift($meta['activity'], [
       'id'        => uniqid('act_'),
       'action'    => $action,
-      'path'      => ltrim(str_replace(['\\', '//'], '/', $relPath), '/'),
+      'path'      => $cleanPath,
       'name'      => basename($relPath),
       'details'   => $details,
       'timestamp' => time()
@@ -2060,6 +2122,7 @@ HTACCESS;
       $meta['activity'] = array_slice($meta['activity'], 0, 300);
     }
     saveDriveMeta($metaFile, $meta);
+    record_activity_log("User Drive: " . ucfirst($action) . " '" . basename($relPath) . "'" . ($details ? " ({$details})" : ""));
   }
 
   function backupFileVersion($filePath, $config) {
@@ -2999,10 +3062,21 @@ HTACCESS;
       if ($reqOwnerId !== $user_id) {
         $fullPath = resolveDriveCrossUserPath($users_drive_base, $db, $file, $reqOwnerId, $user_id, $current_user['email'] ?? '');
       } else {
-        $fullPath = safePath($config['root_dir'], $file);
+        $fullPath = findRealFile($config['root_dir'], $file);
+        if (!$fullPath) $fullPath = safePath($config['root_dir'], $file);
       }
       if (!$fullPath || !is_file($fullPath)) {
         header('HTTP/1.0 404 Not Found');
+        exit;
+      }
+
+      $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+
+      if ($ext === 'svg') {
+        while (ob_get_level() > 0) @ob_end_clean();
+        header('Content-Type: image/svg+xml');
+        header('Cache-Control: public, max-age=31536000, immutable');
+        readfile($fullPath);
         exit;
       }
 
@@ -3018,8 +3092,7 @@ HTACCESS;
 
       $cachePath = $config['cache_dir'] . DIRECTORY_SEPARATOR . $hash . '.jpg';
 
-      if (!file_exists($cachePath)) {
-        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+      if (!file_exists($cachePath) || filesize($cachePath) === 0) {
         if (in_array($ext, ['mp3', 'm4a', 'flac', 'mp4', 'mov', 'mkv', 'webm', 'ogg', 'wav', 'aac', 'opus', 'avi', 'ts', 'm4v'])) {
           $mediaMeta = getMediaMetadata($fullPath);
           if (!empty($mediaMeta['raw_cover'])) {
@@ -3030,30 +3103,28 @@ HTACCESS;
           }
         }
 
-        // Aggressively optimized single-pass multi-threaded video frame capture
-        if (!file_exists($cachePath) && in_array($ext, $config['video_extensions']) && function_exists('exec')) {
+        if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['video_extensions']) && function_exists('exec')) {
           $escSrc = escapeshellarg($fullPath);
           $escCache = escapeshellarg($cachePath);
           $thumbSize = (int)$config['thumb_size'];
           @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
         }
 
-        if (!file_exists($cachePath) && in_array($ext, $config['image_extensions'])) {
-          createThumbnail($fullPath, $cachePath, $config['thumb_size'], $config['thumb_quality']);
-        }
-        if (!file_exists($cachePath)) {
+        if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['image_extensions'])) {
           createThumbnail($fullPath, $cachePath, $config['thumb_size'], $config['thumb_quality']);
         }
       }
 
-      if (file_exists($cachePath)) {
+      while (ob_get_level() > 0) @ob_end_clean();
+
+      if (file_exists($cachePath) && filesize($cachePath) > 0) {
         header('Content-Type: image/jpeg');
         header('ETag: ' . $etag);
         header('Cache-Control: public, max-age=31536000, immutable');
         header('Content-Length: ' . filesize($cachePath));
         readfile($cachePath);
       } else {
-        $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
+        $mime = @mime_content_type($fullPath) ?: 'application/octet-stream';
         if (strpos($mime, 'image/') === 0) {
           header('Content-Type: ' . $mime);
           header('ETag: ' . $etag);
@@ -12957,9 +13028,15 @@ HTACCESS;
 
                 if (item.thumb_image) card.classList.add('has-image');
 
-                let folderThumbHtml = item.thumb_image
-                  ? `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.thumb_image)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async">`
-                  : `<div class="type-icon type-folder"><svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg></div>`;
+                let folderThumbHtml = `
+                  <div class="type-icon type-folder" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:1;">
+                    <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                  </div>
+                `;
+
+                if (item.thumb_image) {
+                  folderThumbHtml += `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.thumb_image)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover;" onerror="this.remove(); this.closest('.file-card')?.classList.remove('has-image');">`;
+                }
 
                 card.innerHTML = `
                   <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
@@ -12990,7 +13067,12 @@ HTACCESS;
 
                 if (item.type === 'image') {
                   card.classList.add('has-image');
-                  thumbHtml = `<img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }">`;
+                  thumbHtml = `
+                    <div class="type-icon" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#80cbc4; z-index:1;">
+                      <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                    </div>
+                    <img src="?access=user&action=thumb&f=${encodeURIComponent(item.path)}${itemOwnerQuery}" alt="" loading="lazy" decoding="async" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover;" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }" onerror="this.remove(); this.closest('.file-card')?.classList.remove('has-image');">
+                  `;
                   if (this.layout === 'columns') {
                     thumbRatio = 'style="min-height:140px; height:auto;"';
                   }
@@ -17796,16 +17878,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
     if (!function_exists('driveCreateThumbnail')) {
       function driveCreateThumbnail($src, $dest, $size, $quality) {
-        if (!file_exists($src)) return false;
+        if (!file_exists($src) || !is_readable($src)) return false;
+
+        $ext = strtolower(pathinfo($src, PATHINFO_EXTENSION));
+        if ($ext === 'svg') return false;
+
         $info = @getimagesize($src);
         if (!$info) return false;
 
         list($origW, $origH) = $info;
-        $mime = $info['mime'];
+        if ($origW <= 0 || $origH <= 0) return false;
+
+        $mime = $info['mime'] ?? '';
 
         $ratio = min($size / $origW, $size / $origH);
-        $newW = max(1, round($origW * $ratio));
-        $newH = max(1, round($origH * $ratio));
+        $newW = max(1, (int)round($origW * $ratio));
+        $newH = max(1, (int)round($origH * $ratio));
 
         $srcImg = false;
         switch ($mime) {
@@ -17814,38 +17902,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
           case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
           case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : false; break;
-          case 'image/bmp':  $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
+          case 'image/bmp':
+          case 'image/x-ms-bmp': $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
         }
         if (!$srcImg) return false;
 
         if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
           $exif = @exif_read_data($src);
           if (!empty($exif['Orientation'])) {
+            $rotated = false;
             switch ($exif['Orientation']) {
-              case 3: $srcImg = imagerotate($srcImg, 180, 0); break;
+              case 3: $rotated = imagerotate($srcImg, 180, 0); break;
               case 6:
-                $srcImg = imagerotate($srcImg, -90, 0);
+                $rotated = imagerotate($srcImg, -90, 0);
                 list($origW, $origH) = [$origH, $origW];
                 break;
               case 8:
-                $srcImg = imagerotate($srcImg, 90, 0);
+                $rotated = imagerotate($srcImg, 90, 0);
                 list($origW, $origH) = [$origH, $origW];
                 break;
             }
-            $ratio = min($size / $origW, $size / $origH);
-            $newW = max(1, round($origW * $ratio));
-            $newH = max(1, round($origH * $ratio));
+            if ($rotated !== false) {
+              imagedestroy($srcImg);
+              $srcImg = $rotated;
+              $ratio = min($size / $origW, $size / $origH);
+              $newW = max(1, (int)round($origW * $ratio));
+              $newH = max(1, (int)round($origH * $ratio));
+            }
           }
         }
 
         $destImg = imagecreatetruecolor($newW, $newH);
-        if ($mime === 'image/png' || $mime === 'image/webp') {
-          imagealphablending($destImg, false);
-          imagesavealpha($destImg, true);
-          $transparent = imagecolorallocatealpha($destImg, 255, 255, 255, 127);
-          imagefilledrectangle($destImg, 0, 0, $newW, $newH, $transparent);
+        if (!$destImg) {
+          imagedestroy($srcImg);
+          return false;
         }
+
+        $bg = imagecolorallocate($destImg, 33, 31, 38);
+        imagefilledrectangle($destImg, 0, 0, $newW, $newH, $bg);
         imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
+
+        $destDir = dirname($dest);
+        if (!is_dir($destDir)) {
+          @mkdir($destDir, 0777, true);
+        }
 
         $ok = imagejpeg($destImg, $dest, $quality);
         imagedestroy($srcImg);
@@ -18617,9 +18717,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       if ($driveAction === 'thumb') {
         $file = $_GET['f'] ?? ($_GET['file'] ?? '');
-        $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+        $fullPath = driveFindRealFile($driveConfig['root_dir'], $file);
+        if (!$fullPath) $fullPath = driveSafePath($driveConfig['root_dir'], $file);
+
         if (!$fullPath || !is_file($fullPath)) {
           header('HTTP/1.0 404 Not Found');
+          exit;
+        }
+
+        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+
+        if ($ext === 'svg') {
+          while (ob_get_level() > 0) @ob_end_clean();
+          header('Content-Type: image/svg+xml');
+          header('Cache-Control: public, max-age=31536000, immutable');
+          readfile($fullPath);
           exit;
         }
 
@@ -18635,8 +18747,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
         $cachePath = $driveConfig['cache_dir'] . DIRECTORY_SEPARATOR . $hash . '.jpg';
 
-        if (!file_exists($cachePath)) {
-          $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+        if (!file_exists($cachePath) || filesize($cachePath) === 0) {
           if (in_array($ext, ['mp3', 'm4a', 'flac', 'mp4', 'mov', 'mkv', 'webm', 'ogg', 'wav', 'aac', 'opus', 'avi', 'ts', 'm4v'])) {
             $mediaMeta = driveGetMediaMetadata($fullPath);
             if (!empty($mediaMeta['raw_cover'])) {
@@ -18647,27 +18758,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
           }
 
-          // Aggressively optimized single-pass multi-threaded video frame capture
-          if (!file_exists($cachePath) && in_array($ext, $driveConfig['video_extensions']) && function_exists('exec')) {
+          if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $driveConfig['video_extensions']) && function_exists('exec')) {
             $escSrc = escapeshellarg($fullPath);
             $escCache = escapeshellarg($cachePath);
             $thumbSize = (int)$driveConfig['thumb_size'];
             @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
           }
 
-          if (!file_exists($cachePath) && in_array($ext, $driveConfig['image_extensions'])) {
+          if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $driveConfig['image_extensions'])) {
             driveCreateThumbnail($fullPath, $cachePath, $driveConfig['thumb_size'], $driveConfig['thumb_quality']);
           }
         }
 
-        if (file_exists($cachePath)) {
+        while (ob_get_level() > 0) @ob_end_clean();
+
+        if (file_exists($cachePath) && filesize($cachePath) > 0) {
           header('Content-Type: image/jpeg');
           header('ETag: ' . $etag);
           header('Cache-Control: public, max-age=31536000, immutable');
           header('Content-Length: ' . filesize($cachePath));
           readfile($cachePath);
         } else {
-          $mime = mime_content_type($fullPath) ?: 'application/octet-stream';
+          $mime = @mime_content_type($fullPath) ?: 'application/octet-stream';
           if (strpos($mime, 'image/') === 0) {
             header('Content-Type: ' . $mime);
             header('ETag: ' . $etag);
@@ -20703,6 +20815,76 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    if (isset($_POST['seed_rhythm_scores'])) {
+      $db = get_db();
+      try {
+        $db->exec("
+          CREATE TABLE IF NOT EXISTS rhythm_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            song_id INTEGER NOT NULL,
+            score INTEGER DEFAULT 0,
+            max_combo INTEGER DEFAULT 0,
+            perfect INTEGER DEFAULT 0,
+            great INTEGER DEFAULT 0,
+            good INTEGER DEFAULT 0,
+            bad INTEGER DEFAULT 0,
+            miss INTEGER DEFAULT 0,
+            difficulty TEXT DEFAULT 'medium',
+            played_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+        ");
+        try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN difficulty TEXT DEFAULT 'medium';"); } catch(Exception $e) {}
+        try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN played_at DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+      } catch (Exception $e) {}
+
+      $users = $db->query("SELECT id FROM users WHERE banned = 0 LIMIT 12")->fetchAll(PDO::FETCH_COLUMN) ?: [];
+      $songs = $db->query("SELECT id, duration FROM music WHERE duration > 10 LIMIT 15")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+      if (!empty($songs)) {
+        if (empty($users)) {
+          $users = [1];
+        }
+        $diffs = ['easy', 'medium', 'hard', 'expert', 'master', 'demon'];
+        $stmt_ins = $db->prepare("
+          INSERT INTO rhythm_scores 
+          (user_id, song_id, score, max_combo, perfect, great, good, bad, miss, difficulty, played_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))
+        ");
+        
+        $db->beginTransaction();
+        $count_seeded = 0;
+        foreach ($songs as $song) {
+          $s_id = (int)$song['id'];
+          $dur = (int)$song['duration'] ?: 120;
+          $base_notes = max(30, min(800, (int)($dur * 2.5)));
+          
+          for ($k = 0; $k < 2; $k++) {
+            $u_id = $users[array_rand($users)];
+            $diff = $diffs[array_rand($diffs)];
+            $perfect = (int)($base_notes * (0.75 + (mt_rand(0, 20) / 100)));
+            $great = (int)($base_notes * (0.05 + (mt_rand(0, 10) / 100)));
+            $good = mt_rand(0, 5);
+            $bad = mt_rand(0, 2);
+            $miss = mt_rand(0, 3);
+            $combo = max(10, $perfect + $great - mt_rand(0, 15));
+            $score = ($perfect * 1000) + ($great * 750) + ($good * 400) + ($bad * 100) + ($combo * 50);
+            $time_offset = '-' . mt_rand(1, 14400) . ' minutes';
+            
+            $stmt_ins->execute([$u_id, $s_id, $score, $combo, $perfect, $great, $good, $bad, $miss, $diff, $time_offset]);
+            $count_seeded++;
+          }
+        }
+        $db->commit();
+        log_admin_activity($db, $_SESSION['admin_email'], "Seeded {$count_seeded} sample rhythm scores", 0);
+        $_SESSION['admin_flash_msg'] = "Generated {$count_seeded} sample rhythm plays successfully! Analytics and charts are now populated.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Cannot seed: No audio tracks found in the music library.";
+      }
+      header('Location: ?access=admin&page=rhythm_analytics');
+      exit;
+    }
+
     if (isset($_POST['edit_admin_song']) && isset($_POST['song_id'])) {
       $db = get_db();
       $sid = (int)$_POST['song_id'];
@@ -21188,7 +21370,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -21236,6 +21418,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'artworks' => 'Artwork Management',
     'logs' => 'Activity Logs',
     'reports' => 'Pending Reports',
+    'rhythm_analytics' => 'Rhythm Game Analytics',
     'appeals' => 'Ban Appeals',
     'drive' => 'Drive Manager',
     'dbmanager' => 'PHPDBManager',
@@ -21575,6 +21758,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         border-radius: 16px;
         overflow: hidden;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      }
+
+      .admin-card .table-responsive {
+        min-height: 280px;
       }
 
       .admin-table {
@@ -22239,6 +22426,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('reports', $current_admin_permissions)): ?>
             <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('rhythm_analytics', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=rhythm_analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'rhythm_analytics') ? 'active' : ''; ?>"><i class="bi bi-controller"></i><span>Rhythm Analytics</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
             <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
@@ -23873,6 +24063,602 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <?php endif; ?>
           </div>
+        <?php elseif (($_GET['page'] ?? '') === 'rhythm_analytics'): ?>
+          <?php
+            $db = get_db();
+
+            // Fast schema validation & safe column / index initialization
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS rhythm_scores (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  song_id INTEGER NOT NULL,
+                  score INTEGER DEFAULT 0,
+                  max_combo INTEGER DEFAULT 0,
+                  perfect INTEGER DEFAULT 0,
+                  great INTEGER DEFAULT 0,
+                  good INTEGER DEFAULT 0,
+                  bad INTEGER DEFAULT 0,
+                  miss INTEGER DEFAULT 0,
+                  difficulty TEXT DEFAULT 'medium',
+                  played_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+              ");
+              try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN difficulty TEXT DEFAULT 'medium';"); } catch(Exception $e) {}
+              try { $db->exec("ALTER TABLE rhythm_scores ADD COLUMN played_at DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch(Exception $e) {}
+              $db->exec("
+                CREATE INDEX IF NOT EXISTS idx_rs_pid ON rhythm_scores(played_at);
+                CREATE INDEX IF NOT EXISTS idx_rs_uid ON rhythm_scores(user_id);
+                CREATE INDEX IF NOT EXISTS idx_rs_sid ON rhythm_scores(song_id);
+                CREATE INDEX IF NOT EXISTS idx_rs_diff ON rhythm_scores(difficulty);
+              ");
+            } catch (Exception $e) {}
+
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS rhythm_charts (
+                  song_id INTEGER NOT NULL,
+                  difficulty TEXT NOT NULL,
+                  notes_json TEXT,
+                  level INTEGER DEFAULT 1,
+                  PRIMARY KEY (song_id, difficulty)
+                );
+              ");
+            } catch (Exception $e) {}
+
+            // Default to 'all' so historical plays and all users are never blank on initial load
+            $rg_period = $_GET['period'] ?? 'all';
+            $rg_diff_filter = strtolower(trim($_GET['diff'] ?? ''));
+            $rg_search = trim($_GET['search'] ?? '');
+            $rg_page = max(1, (int)($_GET['p'] ?? 1));
+            $rg_limit = 25;
+            $rg_offset = ($rg_page - 1) * $rg_limit;
+
+            $date_clause = "1=1";
+            if ($rg_period === '1') {
+              $date_clause = "(date(rs.played_at) = date('now') OR rs.played_at IS NULL)";
+            } elseif ($rg_period === '7') {
+              $date_clause = "(rs.played_at >= datetime('now', '-7 days') OR rs.played_at IS NULL)";
+            } elseif ($rg_period === '30') {
+              $date_clause = "(rs.played_at >= datetime('now', '-30 days') OR rs.played_at IS NULL)";
+            }
+
+            $diff_clause = "1=1";
+            if (!empty($rg_diff_filter)) {
+              $diff_clause = "LOWER(COALESCE(NULLIF(rs.difficulty, ''), 'medium')) = " . $db->quote($rg_diff_filter);
+            }
+
+            // SINGLE-PASS AGGRESSIVE KPI ACCUMULATOR
+            $kpi_stmt = $db->query("
+              SELECT 
+                COUNT(rs.id) as total_plays,
+                COALESCE(SUM(rs.score), 0) as total_score_sum,
+                COUNT(DISTINCT rs.user_id) as active_players_count,
+                COALESCE(SUM(rs.perfect), 0) as s_perf,
+                COALESCE(SUM(rs.great), 0) as s_grt,
+                COALESCE(SUM(rs.good), 0) as s_good,
+                COALESCE(SUM(rs.bad), 0) as s_bad,
+                COALESCE(SUM(rs.miss), 0) as s_miss
+              FROM rhythm_scores rs
+              WHERE {$date_clause} AND {$diff_clause}
+            ")->fetch() ?: [];
+
+            $total_plays = (int)($kpi_stmt['total_plays'] ?? 0);
+            $total_score_sum = (float)($kpi_stmt['total_score_sum'] ?? 0);
+            $active_players_count = (int)($kpi_stmt['active_players_count'] ?? 0);
+            $s_perf = (int)($kpi_stmt['s_perf'] ?? 0);
+            $s_grt = (int)($kpi_stmt['s_grt'] ?? 0);
+            $s_good = (int)($kpi_stmt['s_good'] ?? 0);
+            $s_bad = (int)($kpi_stmt['s_bad'] ?? 0);
+            $s_miss = (int)($kpi_stmt['s_miss'] ?? 0);
+            $total_notes_hit = $s_perf + $s_grt + $s_good + $s_bad + $s_miss;
+            $global_avg_acc = $total_notes_hit > 0 ? round(($s_perf * 100 + $s_grt * 75 + $s_good * 40 + $s_bad * 10) / $total_notes_hit, 2) : 0.00;
+
+            $compiled_charts_count = (int)$db->query("SELECT COUNT(*) FROM rhythm_charts WHERE notes_json IS NOT NULL AND notes_json != '' AND notes_json != '[]'")->fetchColumn();
+
+            // DIFFICULTY BREAKDOWN
+            $diff_counts_stmt = [];
+            try {
+              $diff_counts_stmt = $db->query("
+                SELECT COALESCE(NULLIF(difficulty, ''), 'medium') as diff, COUNT(id) as cnt 
+                FROM rhythm_scores rs 
+                WHERE {$date_clause} 
+                GROUP BY diff
+              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+            } catch (Exception $e) {}
+
+            $diff_keys = ['easy', 'medium', 'hard', 'expert', 'master', 'demon'];
+            $diff_counts = [];
+            foreach ($diff_keys as $dk) {
+              $diff_counts[] = (int)($diff_counts_stmt[$dk] ?? 0);
+            }
+
+            // GUARANTEED USER DISPLAY: Query registered users with joined play metrics
+            $top_players = $db->query("
+              SELECT 
+                u.id as user_id,
+                COALESCE(NULLIF(u.artist, ''), NULLIF(u.email, ''), 'User #' || u.id) as player_name,
+                u.email as player_email,
+                COUNT(rs.id) as play_cnt,
+                COALESCE(SUM(rs.score), 0) as total_score,
+                COALESCE(MAX(rs.score), 0) as top_score,
+                COALESCE(MAX(rs.max_combo), 0) as top_combo,
+                COALESCE(SUM(rs.perfect), 0) as u_perf,
+                COALESCE(SUM(rs.great), 0) as u_grt,
+                COALESCE(SUM(rs.good), 0) as u_good,
+                COALESCE(SUM(rs.bad), 0) as u_bad,
+                COALESCE(SUM(rs.miss), 0) as u_miss
+              FROM users u
+              LEFT JOIN rhythm_scores rs ON (CAST(u.id AS INTEGER) = CAST(rs.user_id AS INTEGER) AND {$date_clause} AND {$diff_clause})
+              WHERE u.banned = 0 AND u.email NOT LIKE 'deleted_%'
+              GROUP BY u.id, u.artist, u.email
+              ORDER BY total_score DESC, play_cnt DESC, u.id ASC
+              LIMIT 12
+            ")->fetchAll() ?: [];
+
+            // TOP 6 MOST PLAYED SONGS
+            $stmt_top_songs = $db->query("
+              SELECT m.id, m.title, m.artist, m.last_modified, COUNT(rs.id) as play_cnt, MAX(rs.score) as top_score, MAX(rs.max_combo) as top_combo
+              FROM rhythm_scores rs
+              JOIN music m ON rs.song_id = m.id
+              WHERE {$date_clause} AND {$diff_clause}
+              GROUP BY m.id, m.title, m.artist, m.last_modified
+              ORDER BY play_cnt DESC
+              LIMIT 6
+            ")->fetchAll() ?: [];
+
+            // LIVE FEED QUERY (Optimized with Primary Key chronological order and safe user fallback)
+            $feed_where = "WHERE {$date_clause} AND {$diff_clause}";
+            $feed_params = [];
+            if ($rg_search !== '') {
+              $feed_where .= " AND (m.title LIKE ? OR m.artist LIKE ? OR u.artist LIKE ? OR u.email LIKE ? OR rs.user_id = ?)";
+              $feed_params = ["%$rg_search%", "%$rg_search%", "%$rg_search%", "%$rg_search%", $rg_search];
+
+              $count_stmt = $db->prepare("
+                SELECT COUNT(rs.id)
+                FROM rhythm_scores rs
+                LEFT JOIN music m ON rs.song_id = m.id
+                LEFT JOIN users u ON CAST(rs.user_id AS INTEGER) = CAST(u.id AS INTEGER)
+                {$feed_where}
+              ");
+              $count_stmt->execute($feed_params);
+              $total_feed_rows = (int)$count_stmt->fetchColumn();
+            } else {
+              $total_feed_rows = (int)$db->query("SELECT COUNT(rs.id) FROM rhythm_scores rs WHERE {$date_clause} AND {$diff_clause}")->fetchColumn();
+            }
+
+            $total_feed_pages = max(1, ceil($total_feed_rows / $rg_limit));
+
+            $stmt_feed = $db->prepare("
+              SELECT 
+                rs.id, rs.user_id, rs.song_id, rs.score, rs.max_combo, 
+                rs.perfect, rs.great, rs.good, rs.bad, rs.miss, 
+                rs.difficulty, rs.played_at,
+                m.title, m.artist, m.last_modified,
+                COALESCE(NULLIF(u.artist, ''), NULLIF(u.email, ''), CASE WHEN rs.user_id = 0 THEN 'Guest Player' ELSE 'User #' || rs.user_id END) as player_name,
+                u.email as player_email
+              FROM rhythm_scores rs
+              LEFT JOIN music m ON rs.song_id = m.id
+              LEFT JOIN users u ON CAST(rs.user_id AS INTEGER) = CAST(u.id AS INTEGER)
+              {$feed_where}
+              ORDER BY rs.id DESC
+              LIMIT ? OFFSET ?
+            ");
+            $p_i = 1;
+            foreach ($feed_params as $fp) {
+              $stmt_feed->bindValue($p_i++, $fp);
+            }
+            $stmt_feed->bindValue($p_i++, (int)$rg_limit, PDO::PARAM_INT);
+            $stmt_feed->bindValue($p_i++, (int)$rg_offset, PDO::PARAM_INT);
+            $stmt_feed->execute();
+            $live_plays = $stmt_feed->fetchAll() ?: [];
+          ?>
+
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Rhythm Game Analytics</h1>
+              <div class="small text-secondary mt-1">Real-time player intelligence, active leaderboards, judgment metrics, and accuracy logs</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="rhythm_analytics">
+                <select name="period" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="all" <?php echo $rg_period === 'all' ? 'selected' : ''; ?>>All Time History</option>
+                  <option value="1" <?php echo $rg_period === '1' ? 'selected' : ''; ?>>Today Only</option>
+                  <option value="7" <?php echo $rg_period === '7' ? 'selected' : ''; ?>>Last 7 Days</option>
+                  <option value="30" <?php echo $rg_period === '30' ? 'selected' : ''; ?>>Last 30 Days</option>
+                </select>
+                <select name="diff" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="" <?php echo $rg_diff_filter === '' ? 'selected' : ''; ?>>All Difficulties</option>
+                  <option value="easy" <?php echo $rg_diff_filter === 'easy' ? 'selected' : ''; ?>>Easy</option>
+                  <option value="medium" <?php echo $rg_diff_filter === 'medium' ? 'selected' : ''; ?>>Medium</option>
+                  <option value="hard" <?php echo $rg_diff_filter === 'hard' ? 'selected' : ''; ?>>Hard</option>
+                  <option value="expert" <?php echo $rg_diff_filter === 'expert' ? 'selected' : ''; ?>>Expert</option>
+                  <option value="master" <?php echo $rg_diff_filter === 'master' ? 'selected' : ''; ?>>Master</option>
+                  <option value="demon" <?php echo $rg_diff_filter === 'demon' ? 'selected' : ''; ?>>Demon</option>
+                </select>
+              </form>
+              <form method="POST" action="?access=admin&page=rhythm_analytics" class="m-0 d-inline">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="seed_rhythm_scores" class="admin-btn-pill" style="color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" title="Populate realistic sample rhythm game scores across library songs and users">
+                  <i class="bi bi-magic"></i> Seed Sample Plays
+                </button>
+              </form>
+              <a href="?access=admin&action=rescan_charts&step=1&run=1" target="_blank" class="admin-btn-pill admin-btn-primary">
+                <i class="bi bi-arrow-repeat"></i> Re-Scan Charts
+              </a>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Top KPI Metrics -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Plays</span>
+                    <span class="text-danger"><i class="bi bi-controller fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_plays); ?></div>
+                  <small class="text-secondary"><?php echo number_format($active_players_count); ?> registered players logged</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Average Accuracy</span>
+                    <span class="text-success"><i class="bi bi-bullseye fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($global_avg_acc, 2); ?>%</div>
+                  <small class="text-secondary"><?php echo number_format($total_notes_hit); ?> total judged tap inputs</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Cumulative Score</span>
+                    <span class="text-warning"><i class="bi bi-trophy-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_score_sum); ?></div>
+                  <small class="text-secondary">Logged across filtered session period</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Compiled Charts</span>
+                    <span class="text-info"><i class="bi bi-diagram-3-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($compiled_charts_count); ?></div>
+                  <small class="text-secondary">Pre-rendered charts cached on disk</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Visual Analytics Charts -->
+            <div class="row g-4 mb-4">
+              <div class="col-12 col-md-6 col-xl-6">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-pie-chart-fill text-danger"></i> Plays by Difficulty
+                    </h5>
+                    <span class="admin-badge admin-badge-primary">Distribution</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 240px; width: 100%;">
+                    <?php if ($total_plays === 0): ?>
+                      <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary py-5">
+                        <i class="bi bi-pie-chart fs-1 mb-2 opacity-50"></i>
+                        <span class="small">No difficulty data recorded yet</span>
+                      </div>
+                    <?php else: ?>
+                      <canvas id="rhythmDiffChart"></canvas>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-6 col-xl-6">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-check2-circle text-success"></i> Hit Judgments Breakdown
+                    </h5>
+                    <span class="admin-badge admin-badge-success">Precision</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 240px; width: 100%;">
+                    <?php if ($total_notes_hit === 0): ?>
+                      <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary py-5">
+                        <i class="bi bi-check2-circle fs-1 mb-2 opacity-50"></i>
+                        <span class="small">No hit judgments recorded yet</span>
+                      </div>
+                    <?php else: ?>
+                      <canvas id="rhythmJudgmentsChart"></canvas>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Double Leaderboard Matrix: Top Players & Most Played Songs -->
+            <div class="row g-4 mb-4">
+              <!-- Top Players / Users Section -->
+              <div class="col-12 col-xl-6">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-people-fill text-info"></i> Top Rhythm Players &amp; Users
+                    </h5>
+                    <span class="admin-badge admin-badge-info">Leaderboard</span>
+                  </div>
+                  <div class="row g-3">
+                    <?php if (empty($top_players)): ?>
+                      <div class="col-12 text-center text-secondary py-4 small">No user plays recorded in this timeframe.</div>
+                    <?php else: foreach ($top_players as $idx => $tp): 
+                      $u_tot = (int)$tp['u_perf'] + (int)$tp['u_grt'] + (int)$tp['u_good'] + (int)$tp['u_bad'] + (int)$tp['u_miss'];
+                      $u_acc = $u_tot > 0 ? round(((int)$tp['u_perf'] * 100 + (int)$tp['u_grt'] * 75 + (int)$tp['u_good'] * 40 + (int)$tp['u_bad'] * 10) / $u_tot, 2) : 0.00;
+                    ?>
+                      <div class="col-12 col-md-6">
+                        <div class="p-3 rounded bg-black border border-secondary border-opacity-25 d-flex align-items-center gap-3">
+                          <img src="?access=api&action=get_profile_picture&id=<?php echo $tp['user_id']; ?>&v=<?php echo time(); ?>" alt="" class="rounded-circle shadow-sm" style="width: 44px; height: 44px; object-fit: cover; background: #121212; border: 1px solid var(--drive-border);">
+                          <div class="flex-grow-1 overflow-hidden">
+                            <div class="d-flex justify-content-between align-items-center mb-0">
+                              <span class="fw-bold text-white text-truncate" title="<?php echo htmlspecialchars($tp['player_name']); ?>"><?php echo htmlspecialchars($tp['player_name']); ?></span>
+                              <span class="badge bg-danger bg-opacity-25 text-danger font-monospace" style="font-size: 0.68rem;">#<?php echo $idx + 1; ?></span>
+                            </div>
+                            <div class="small text-secondary text-truncate font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($tp['player_email'] ?: 'UID #' . $tp['user_id']); ?></div>
+                            <div class="d-flex gap-2 mt-1 small">
+                              <span class="admin-badge admin-badge-primary"><?php echo number_format($tp['play_cnt']); ?> plays</span>
+                              <span class="admin-badge admin-badge-success"><?php echo $u_acc; ?>% acc</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    <?php endforeach; endif; ?>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Most Played Rhythm Tracks -->
+              <div class="col-12 col-xl-6">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-fire text-danger"></i> Most Played Rhythm Tracks
+                    </h5>
+                    <span class="admin-badge admin-badge-warning">Top Songs</span>
+                  </div>
+                  <div class="row g-3">
+                    <?php if (empty($stmt_top_songs)): ?>
+                      <div class="col-12 text-center text-secondary py-4 small">No songs have been played in this timeframe.</div>
+                    <?php else: foreach ($stmt_top_songs as $ts): ?>
+                      <div class="col-12 col-md-6">
+                        <div class="p-3 rounded bg-black border border-secondary border-opacity-25 d-flex align-items-center gap-3">
+                          <img src="?action=get_image&id=<?php echo $ts['id']; ?>&size=small&v=<?php echo $ts['last_modified'] ?? 0; ?>" alt="" class="rounded" style="width: 44px; height: 44px; object-fit: cover; background: #121212;">
+                          <div class="flex-grow-1 overflow-hidden">
+                            <div class="fw-bold text-white text-truncate mb-0" title="<?php echo htmlspecialchars($ts['title']); ?>"><?php echo htmlspecialchars($ts['title']); ?></div>
+                            <div class="small text-secondary text-truncate font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($ts['artist']); ?></div>
+                            <div class="d-flex gap-2 mt-1 small">
+                              <span class="admin-badge admin-badge-primary"><?php echo number_format($ts['play_cnt']); ?> plays</span>
+                              <span class="admin-badge admin-badge-warning"><?php echo number_format($ts['top_score']); ?> pts</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    <?php endforeach; endif; ?>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Live Rhythm Plays Feed Table -->
+            <div class="admin-card mb-4">
+              <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi bi-activity text-danger fs-5"></i>
+                  <h5 class="m-0 text-white fw-bold fs-6">Recent Rhythm Plays Feed (<?php echo number_format($total_feed_rows); ?> total)</h5>
+                </div>
+                <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-grow-1 justify-content-end" style="max-width: 420px;">
+                  <input type="hidden" name="access" value="admin">
+                  <input type="hidden" name="page" value="rhythm_analytics">
+                  <input type="hidden" name="period" value="<?php echo htmlspecialchars($rg_period); ?>">
+                  <input type="hidden" name="diff" value="<?php echo htmlspecialchars($rg_diff_filter); ?>">
+                  <div class="position-relative flex-grow-1">
+                    <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search track, user name, UID..." value="<?php echo htmlspecialchars($rg_search); ?>">
+                    <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                  </div>
+                  <?php if ($rg_search !== ''): ?>
+                    <a href="?access=admin&page=rhythm_analytics&period=<?php echo htmlspecialchars($rg_period); ?>&diff=<?php echo htmlspecialchars($rg_diff_filter); ?>" class="admin-btn-pill" style="height: 38px; padding: 0 0.85rem;">Clear</a>
+                  <?php endif; ?>
+                </form>
+              </div>
+
+              <div class="table-responsive">
+                <table class="admin-table text-nowrap align-middle">
+                  <thead>
+                    <tr>
+                      <th style="width: 140px;">Timestamp</th>
+                      <th>Player</th>
+                      <th>Track Title</th>
+                      <th>Difficulty</th>
+                      <th>Score</th>
+                      <th>Accuracy</th>
+                      <th>Judgments (P/G/G/B/M)</th>
+                      <th class="text-end" style="width: 80px;">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php if (empty($live_plays)): ?>
+                      <tr><td colspan="8" class="text-center py-5 text-secondary">No rhythm play scores recorded matching query.</td></tr>
+                    <?php else: foreach ($live_plays as $play): 
+                      $p_tot = (int)$play['perfect'] + (int)$play['great'] + (int)$play['good'] + (int)$play['bad'] + (int)$play['miss'];
+                      $p_acc = $p_tot > 0 ? round(((int)$play['perfect'] * 100 + (int)$play['great'] * 75 + (int)$play['good'] * 40 + (int)$play['bad'] * 10) / $p_tot, 2) : 0.00;
+                      $is_sus = ($p_acc >= 100.0 && $p_tot > 50) || ((int)$play['max_combo'] > 500 && (int)$play['miss'] === 0);
+                      $p_title = !empty($play['title']) ? $play['title'] : ('Song #' . $play['song_id']);
+                      $p_artist = !empty($play['artist']) ? $play['artist'] : 'Unknown Artist';
+                      $p_player = !empty($play['player_name']) ? $play['player_name'] : ('Player #' . $play['user_id']);
+                    ?>
+                      <tr id="admin-rh-row-<?php echo $play['id']; ?>">
+                        <td class="text-secondary small font-monospace">
+                          <?php echo htmlspecialchars(date('M j, H:i', strtotime($play['played_at']))); ?>
+                        </td>
+                        <td>
+                          <div class="d-flex align-items-center gap-2">
+                            <img src="?access=api&action=get_profile_picture&id=<?php echo $play['user_id']; ?>&v=<?php echo time(); ?>" alt="" class="rounded-circle shadow-sm" style="width: 30px; height: 30px; object-fit: cover; background: #121212; border: 1px solid var(--drive-border);">
+                            <div>
+                              <div class="fw-bold text-white"><?php echo htmlspecialchars($p_player); ?></div>
+                              <small class="text-secondary font-monospace" style="font-size: 0.72rem;">UID #<?php echo $play['user_id']; ?></small>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="fw-bold text-info text-truncate" style="max-width: 220px;" title="<?php echo htmlspecialchars($p_title); ?>"><?php echo htmlspecialchars($p_title); ?></div>
+                          <small class="text-secondary"><?php echo htmlspecialchars($p_artist); ?></small>
+                        </td>
+                        <td>
+                          <span class="admin-badge <?php 
+                            echo in_array($play['difficulty'], ['master', 'demon']) ? 'admin-badge-danger' : (in_array($play['difficulty'], ['expert', 'hard']) ? 'admin-badge-warning' : 'admin-badge-info'); 
+                          ?>">
+                            <?php echo strtoupper(htmlspecialchars($play['difficulty'] ?: 'MEDIUM')); ?>
+                          </span>
+                        </td>
+                        <td>
+                          <span class="text-white fw-bold font-monospace"><?php echo number_format($play['score']); ?></span>
+                          <?php if ($is_sus): ?>
+                            <span class="badge bg-danger ms-1" style="font-size: 0.65rem;" title="Suspicious play detected">SUS</span>
+                          <?php endif; ?>
+                        </td>
+                        <td>
+                          <span class="<?php echo $p_acc >= 95 ? 'text-success' : ($p_acc >= 80 ? 'text-warning' : 'text-secondary'); ?> fw-bold font-monospace">
+                            <?php echo number_format($p_acc, 2); ?>%
+                          </span>
+                          <div class="small text-secondary" style="font-size: 0.72rem;"><?php echo number_format($play['max_combo']); ?>x combo</div>
+                        </td>
+                        <td class="font-monospace small text-secondary">
+                          <span class="text-white fw-bold"><?php echo $play['perfect']; ?></span> /
+                          <span><?php echo $play['great']; ?></span> /
+                          <span><?php echo $play['good']; ?></span> /
+                          <span><?php echo $play['bad']; ?></span> /
+                          <span class="text-danger"><?php echo $play['miss']; ?></span>
+                        </td>
+                        <td class="text-end">
+                          <button type="button" class="btn btn-sm btn-outline-danger border-0 p-1" onclick="deleteRhythmScore(<?php echo $play['id']; ?>)" title="Delete Score Record">
+                            <i class="bi bi-trash"></i>
+                          </button>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Pagination -->
+            <?php if ($total_feed_pages > 1): ?>
+              <div class="admin-pagination">
+                <a class="admin-page-btn <?php echo ($rg_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=rhythm_analytics&period=<?php echo urlencode($rg_period); ?>&diff=<?php echo urlencode($rg_diff_filter); ?>&search=<?php echo urlencode($rg_search); ?>&p=1">«</a>
+                <a class="admin-page-btn <?php echo ($rg_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=rhythm_analytics&period=<?php echo urlencode($rg_period); ?>&diff=<?php echo urlencode($rg_diff_filter); ?>&search=<?php echo urlencode($rg_search); ?>&p=<?php echo $rg_page - 1; ?>">‹</a>
+                <?php
+                  $start_p = max(1, $rg_page - 2);
+                  $end_p = min($total_feed_pages, $start_p + 4);
+                  if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                  for ($i = $start_p; $i <= $end_p; $i++):
+                ?>
+                  <a class="admin-page-btn <?php echo ($rg_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=rhythm_analytics&period=<?php echo urlencode($rg_period); ?>&diff=<?php echo urlencode($rg_diff_filter); ?>&search=<?php echo urlencode($rg_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <?php endfor; ?>
+                <a class="admin-page-btn <?php echo ($rg_page >= $total_feed_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=rhythm_analytics&period=<?php echo urlencode($rg_period); ?>&diff=<?php echo urlencode($rg_diff_filter); ?>&search=<?php echo urlencode($rg_search); ?>&p=<?php echo $rg_page + 1; ?>">›</a>
+                <a class="admin-page-btn <?php echo ($rg_page >= $total_feed_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=rhythm_analytics&period=<?php echo urlencode($rg_period); ?>&diff=<?php echo urlencode($rg_diff_filter); ?>&search=<?php echo urlencode($rg_search); ?>&p=<?php echo $total_feed_pages; ?>">»</a>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <script>
+            window.deleteRhythmScore = async function(id) {
+              if (!confirm("Are you sure you want to delete this rhythm score record?")) return;
+              const formData = new FormData();
+              formData.append('delete_rhythm_score_ajax', '1');
+              formData.append('score_id', id);
+              formData.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token']; ?>');
+
+              try {
+                const res = await fetch('?access=admin', {
+                  method: 'POST',
+                  body: formData
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                  const row = document.getElementById('admin-rh-row-' + id) || document.getElementById('admin-rh-score-' + id);
+                  if (row) {
+                    row.style.opacity = '0';
+                    row.style.transition = 'opacity 0.25s ease';
+                    setTimeout(() => row.remove(), 250);
+                  }
+                } else {
+                  alert("Failed to delete score: " + (data.message || 'Unknown error'));
+                }
+              } catch (e) {
+                alert("Network error deleting score.");
+              }
+            };
+
+            (function() {
+              if (typeof Chart === 'undefined') return;
+
+              if (window.rhythmDiffChartInstance instanceof Chart) window.rhythmDiffChartInstance.destroy();
+              if (window.rhythmJudgmentsChartInstance instanceof Chart) window.rhythmJudgmentsChartInstance.destroy();
+
+              Chart.defaults.color = '#aaaaaa';
+              Chart.defaults.font.family = "'Roboto', sans-serif";
+
+              const ctxDiff = document.getElementById('rhythmDiffChart');
+              if (ctxDiff && <?php echo $total_plays; ?> > 0) {
+                window.rhythmDiffChartInstance = new Chart(ctxDiff.getContext('2d'), {
+                  type: 'doughnut',
+                  data: {
+                    labels: ['Easy', 'Medium', 'Hard', 'Expert', 'Master', 'Demon'],
+                    datasets: [{
+                      data: <?php echo json_encode($diff_counts); ?>,
+                      backgroundColor: ['#4ade80', '#38bdf8', '#fbbf24', '#f97316', '#a855f7', '#ef4444'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: '#fff', boxWidth: 12 } } }
+                  }
+                });
+              }
+
+              const ctxJudg = document.getElementById('rhythmJudgmentsChart');
+              if (ctxJudg && <?php echo $total_notes_hit; ?> > 0) {
+                window.rhythmJudgmentsChartInstance = new Chart(ctxJudg.getContext('2d'), {
+                  type: 'doughnut',
+                  data: {
+                    labels: ['Perfect', 'Great', 'Good', 'Bad', 'Miss'],
+                    datasets: [{
+                      data: [<?php echo $s_perf; ?>, <?php echo $s_grt; ?>, <?php echo $s_good; ?>, <?php echo $s_bad; ?>, <?php echo $s_miss; ?>],
+                      backgroundColor: ['#38bdf8', '#4ade80', '#fbbf24', '#f97316', '#ef4444'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: '#fff', boxWidth: 12 } } }
+                  }
+                });
+              }
+            })();
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'appeals'): ?>
           <?php 
             $app_search = trim($_GET['search'] ?? '');
@@ -28301,6 +29087,143 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
               background-size: 20px 20px;
             }
+
+            /* Modern AI Agent Styling */
+            .ai-widget-modern {
+              position: fixed;
+              bottom: 24px;
+              right: 24px;
+              width: 500px;
+              height: 640px;
+              background: rgba(12, 12, 16, 0.94) !important;
+              backdrop-filter: blur(24px) !important;
+              -webkit-backdrop-filter: blur(24px) !important;
+              border: 1px solid rgba(255, 255, 255, 0.09) !important;
+              border-radius: 20px !important;
+              box-shadow: 0 24px 64px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.04) !important;
+              z-index: 3500;
+              display: none;
+              flex-direction: column;
+              overflow: hidden;
+              resize: both;
+              min-width: 360px;
+              min-height: 440px;
+              max-width: 95vw;
+              max-height: 95vh;
+              color: #f1f1f5;
+              transition: border-color 0.2s ease;
+            }
+
+            .ai-widget-modern:focus-within {
+              border-color: rgba(255, 0, 50, 0.35) !important;
+            }
+
+            .ai-header-modern {
+              padding: 12px 16px;
+              background: rgba(255, 255, 255, 0.02);
+              border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              cursor: move;
+              user-select: none;
+              flex-shrink: 0;
+            }
+
+            .ai-header-btn {
+              width: 30px;
+              height: 30px;
+              border-radius: 8px;
+              background: rgba(255, 255, 255, 0.04);
+              border: 1px solid rgba(255, 255, 255, 0.06);
+              color: #a0a0b0;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              transition: all 0.15s ease;
+              padding: 0;
+            }
+
+            .ai-header-btn:hover {
+              background: rgba(255, 255, 255, 0.1);
+              color: #ffffff;
+              transform: translateY(-1px);
+            }
+
+            .ai-msg-bubble-user {
+              background: linear-gradient(135deg, rgba(255, 0, 60, 0.14), rgba(255, 0, 60, 0.05)) !important;
+              border: 1px solid rgba(255, 0, 60, 0.25) !important;
+              border-radius: 16px 16px 4px 16px !important;
+              padding: 12px 14px;
+              color: #ffffff;
+              margin-left: 28px;
+              box-shadow: 0 4px 20px rgba(255, 0, 60, 0.05);
+            }
+
+            .ai-msg-bubble-assistant {
+              background: rgba(20, 20, 26, 0.75) !important;
+              border: 1px solid rgba(255, 255, 255, 0.07) !important;
+              border-radius: 16px 16px 16px 4px !important;
+              padding: 14px 16px;
+              color: #e2e2ec;
+              margin-right: 28px;
+              box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            }
+
+            .ai-think-details {
+              background: rgba(0, 0, 0, 0.4);
+              border: 1px solid rgba(251, 191, 36, 0.2);
+              border-radius: 10px;
+              padding: 8px 12px;
+              margin-bottom: 10px;
+              font-size: 0.78rem;
+            }
+
+            .ai-think-details summary {
+              cursor: pointer;
+              color: #fbbf24;
+              font-weight: 600;
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              user-select: none;
+              outline: none;
+            }
+
+            .ai-code-wrapper {
+              background: #08080a;
+              border: 1px solid rgba(255, 255, 255, 0.09);
+              border-radius: 10px;
+              margin: 10px 0;
+              overflow: hidden;
+            }
+
+            .ai-code-header {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 6px 12px;
+              background: rgba(255, 255, 255, 0.03);
+              border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+              font-size: 0.72rem;
+            }
+
+            .ai-action-chip {
+              background: rgba(255, 255, 255, 0.05);
+              border: 1px solid rgba(255, 255, 255, 0.08);
+              border-radius: 6px;
+              padding: 2px 8px;
+              font-size: 0.72rem;
+              font-weight: 500;
+              color: #d0d0e0;
+              cursor: pointer;
+              transition: all 0.15s ease;
+            }
+
+            .ai-action-chip:hover {
+              background: rgba(255, 255, 255, 0.12);
+              color: #ffffff;
+            }
   
             .ide-sidebar-resizer {
               position: absolute;
@@ -28704,6 +29627,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <label class="form-label text-secondary small fw-bold mt-2 mb-1">GEMINI MODEL</label>
                       <select id="ide-ai-setting-gemini-model" class="form-select form-select-sm bg-dark text-white border-secondary">
                         <optgroup label="Google Gemini Models">
+                          <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
                           <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
                           <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                           <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
@@ -28940,28 +29864,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="text-center mt-4 text-secondary"><i class="spinner-border spinner-border-sm"></i> Loading Trash...</div>
                 </div>
 
-                <!-- Floating Draggable AI Assistant Popup Window Widget with Permanent History & Branching -->
-                <div id="ideAiHelperWidget" style="position: fixed; bottom: 30px; right: 30px; width: 480px; height: 620px; background: rgba(14, 14, 14, 0.98); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9); z-index: 3500; display: none; flex-direction: column; overflow: hidden; resize: both; min-width: 340px; min-height: 420px; max-width: 95vw; max-height: 95vh; color: #fff;">
+                <!-- Floating Draggable Modern AI Assistant Window -->
+                <div id="ideAiHelperWidget" class="ai-widget-modern">
                   
                   <!-- Draggable Header -->
-                  <div id="ideAiHeader" style="padding: 10px 14px; background: rgba(255, 255, 255, 0.04); cursor: move; display: flex; align-items: center; justify-content: space-between; user-select: none; border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-shrink: 0;">
+                  <div id="ideAiHeader" class="ai-header-modern">
                     <div class="d-flex align-items-center gap-2" style="min-width: 0;">
-                      <i class="bi bi-robot text-danger fs-5"></i>
+                      <div style="width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #ff0044, #990022); display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(255, 0, 68, 0.4); flex-shrink: 0;">
+                        <i class="bi bi-robot text-white" style="font-size: 0.85rem;"></i>
+                      </div>
                       <div class="d-flex flex-column min-width-0">
-                        <span id="ide-ai-chat-title" class="fw-bold text-white text-truncate" style="font-size: 0.86rem; max-width: 170px;">Coding Session</span>
-                        <span class="badge bg-dark text-secondary border border-secondary p-0 px-1 mt-1 text-truncate" id="ide-ai-model-tag" style="font-size: 0.65rem; width: fit-content;">Gemini</span>
+                        <span id="ide-ai-chat-title" class="fw-bold text-white text-truncate" style="font-size: 0.84rem; letter-spacing: -0.2px; max-width: 170px;">Coding Session</span>
+                        <span class="badge bg-black bg-opacity-60 text-secondary border border-secondary border-opacity-25 p-0 px-1 mt-0 text-truncate font-monospace" id="ide-ai-model-tag" style="font-size: 0.62rem; width: fit-content;">Gemini</span>
                       </div>
                     </div>
                     <div class="d-flex align-items-center gap-1">
-                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-new-chat-btn" title="New Chat Session" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-plus-lg"></i></button>
-                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-history-toggle-btn" title="Chat History" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-clock-history"></i></button>
-                      <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-secondary" id="ide-ai-close-btn" title="Close AI Agent" style="width: 28px; height: 28px; border-radius: 6px;"><i class="bi bi-x-lg"></i></button>
+                      <button class="ai-header-btn" id="ide-ai-new-chat-btn" title="New Chat Session"><i class="bi bi-plus-lg"></i></button>
+                      <button class="ai-header-btn" id="ide-ai-history-toggle-btn" title="Chat History"><i class="bi bi-clock-history"></i></button>
+                      <button class="ai-header-btn" id="ide-ai-close-btn" title="Close AI Agent"><i class="bi bi-x-lg"></i></button>
                     </div>
                   </div>
 
                   <!-- History Drawer (Overlay Panel) -->
-                  <div id="ide-ai-history-drawer" class="d-none position-absolute w-100 h-100 flex-column" style="top: 0; left: 0; background: rgba(10, 10, 10, 0.98); z-index: 50; padding: 14px; box-sizing: border-box;">
-                    <!-- Drawer Header -->
+                  <div id="ide-ai-history-drawer" class="d-none position-absolute w-100 h-100 flex-column" style="top: 0; left: 0; background: rgba(10, 10, 14, 0.98); z-index: 50; padding: 14px; box-sizing: border-box;">
                     <div class="d-flex align-items-center justify-content-between pb-2 border-bottom border-secondary border-opacity-25 mb-2">
                       <div class="d-flex align-items-center gap-2">
                         <i class="bi bi-clock-history text-danger fs-6"></i>
@@ -28969,59 +29894,60 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         <span class="badge bg-dark text-secondary border border-secondary border-opacity-50" id="ide-ai-history-total" style="font-size: 0.65rem;">0</span>
                       </div>
                       <div class="d-flex align-items-center gap-1">
-                        <button class="btn btn-sm btn-outline-secondary border-0 p-1 text-white" id="ide-ai-history-new-btn" title="New Session" style="width: 26px; height: 26px; border-radius: 6px;"><i class="bi bi-plus-lg"></i></button>
+                        <button class="ai-header-btn" id="ide-ai-history-new-btn" title="New Session" style="width: 26px; height: 26px;"><i class="bi bi-plus-lg"></i></button>
                         <button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none d-flex align-items-center justify-content-center" id="ide-ai-close-history-btn" style="width: 26px; height: 26px;"><i class="bi bi-x-lg"></i></button>
                       </div>
                     </div>
-                    <!-- Real-Time Search Bar -->
                     <div class="mb-2 position-relative">
                       <input type="text" id="ide-ai-history-search-input" class="form-control form-control-sm bg-dark text-white border-secondary border-opacity-50 ps-4" placeholder="Search sessions..." style="font-size: 0.78rem; border-radius: 8px;">
                       <i class="bi bi-search position-absolute text-secondary" style="left: 10px; top: 50%; transform: translateY(-50%); font-size: 0.72rem; pointer-events: none;"></i>
                     </div>
-                    <!-- Vertical List of Conversations -->
                     <div id="ide-ai-history-list" class="flex-grow-1 overflow-y-auto d-flex flex-column gap-1 pe-1" style="min-height: 0; scrollbar-width: thin;">
                       <div class="text-secondary small text-center my-auto">Loading history...</div>
                     </div>
                   </div>
 
-                  <!-- Options Bar -->
-                  <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom border-secondary border-opacity-25" style="background: rgba(0, 0, 0, 0.4); font-size: 0.78rem;">
+                  <!-- Options & Capabilities Bar -->
+                  <div class="d-flex align-items-center justify-content-between px-3 py-2" style="background: rgba(0, 0, 0, 0.25); border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 0.76rem;">
                     <div class="form-check form-switch m-0 text-secondary d-flex align-items-center gap-1">
-                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-ai-include-file" checked style="cursor: pointer;">
-                      <label class="form-check-label text-white-50" for="ide-ai-include-file" style="cursor: pointer;">Active Code</label>
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" id="ide-ai-include-file" checked style="cursor: pointer; transform: scale(0.9);">
+                      <label class="form-check-label text-white-50" for="ide-ai-include-file" style="cursor: pointer; font-size: 0.76rem;">Active Context</label>
                     </div>
-                    <div class="d-flex gap-2">
-                      <button id="ide-ai-btn-search" class="btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.75rem;" title="Toggle Real-Time Web Search">
+                    <div class="d-flex gap-1">
+                      <button id="ide-ai-btn-search" class="btn btn-sm btn-outline-secondary border-0 py-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.72rem; background: rgba(255, 255, 255, 0.03);" title="Toggle Real-Time Web Search">
                         <i class="bi bi-globe"></i> <span>Search</span>
                       </button>
-                      <button id="ide-ai-btn-think" class="btn btn-sm btn-outline-secondary border-0 p-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.75rem;" title="Toggle Deep Reasoning">
+                      <button id="ide-ai-btn-think" class="btn btn-sm btn-outline-secondary border-0 py-1 px-2 d-flex align-items-center gap-1 rounded-pill" style="font-size: 0.72rem; background: rgba(255, 255, 255, 0.03);" title="Toggle Deep Reasoning">
                         <i class="bi bi-lightbulb"></i> <span>Think</span>
                       </button>
                     </div>
                   </div>
 
-                  <!-- Chat Messages Container -->
-                  <div id="ide-ai-messages" class="flex-grow-1 overflow-y-auto p-3" style="background: #0a0a0a; display: flex; flex-direction: column; gap: 14px; min-height: 120px; scroll-behavior: smooth;">
-                    <div class="text-secondary small text-center my-auto">
-                      <i class="bi bi-stars text-danger fs-2 d-block mb-2"></i>
-                      Ask AI to explain code, fix bugs, write features, or refactor.
+                  <!-- Chat Messages Stream -->
+                  <div id="ide-ai-messages" class="flex-grow-1 overflow-y-auto p-3" style="background: transparent; display: flex; flex-direction: column; gap: 16px; min-height: 120px; scroll-behavior: smooth;">
+                    <div class="d-flex flex-column align-items-center justify-content-center text-center my-auto py-4 text-secondary">
+                      <div style="width: 44px; height: 44px; border-radius: 14px; background: rgba(255, 0, 68, 0.1); border: 1px solid rgba(255, 0, 68, 0.25); display: flex; align-items: center; justify-content: center; margin-bottom: 12px;">
+                        <i class="bi bi-stars text-danger fs-4"></i>
+                      </div>
+                      <span class="text-white fw-bold small mb-1">AI Coding Agent</span>
+                      <span style="font-size: 0.75rem; color: #888899; max-width: 280px;">Ask to debug, explain logic, write unit tests, or refactor the current file.</span>
                     </div>
                   </div>
 
-                  <!-- Input & Actions Area with File Attachment Support & Auto-Height Textarea -->
-                  <div class="p-2 border-top border-secondary border-opacity-25" style="background: rgba(255, 255, 255, 0.02);">
-                    <div id="ide-ai-attachments" class="d-flex flex-wrap gap-1 mb-1 px-1"></div>
-                    <div class="d-flex gap-2 align-items-end">
-                      <button class="btn btn-sm btn-outline-secondary border-0 p-2 text-white-50 d-flex align-items-center justify-content-center rounded-circle" id="ide-ai-attach-btn" title="Attach Code/Text File" style="height: 36px; width: 36px; flex-shrink: 0;">
+                  <!-- Input Container -->
+                  <div class="p-3 pt-2" style="background: rgba(8, 8, 12, 0.6); border-top: 1px solid rgba(255, 255, 255, 0.06);">
+                    <div id="ide-ai-attachments" class="d-flex flex-wrap gap-1 mb-2"></div>
+                    <div class="d-flex align-items-end gap-2 p-1 px-2 rounded-4" style="background: rgba(24, 24, 30, 0.9); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);">
+                      <button class="btn btn-sm btn-link text-white-50 p-1 d-flex align-items-center justify-content-center text-decoration-none" id="ide-ai-attach-btn" title="Attach Code/Text File" style="height: 32px; width: 32px; border-radius: 8px;">
                         <i class="bi bi-paperclip fs-5"></i>
                       </button>
                       <input type="file" id="ide-ai-file-input" multiple style="display: none;" accept=".php,.js,.ts,.py,.java,.c,.cpp,.h,.cs,.go,.rs,.rb,.swift,.kt,.html,.css,.scss,.json,.xml,.yaml,.yml,.sql,.sh,.bash,.md,.txt,text/*">
-                      <textarea id="ide-ai-input" class="form-control form-control-sm bg-dark text-white border-secondary" rows="1" style="height: 36px; min-height: 36px; max-height: 180px; resize: none; border-radius: 18px; font-size: 0.85rem; padding: 7px 14px; line-height: 1.4; overflow-y: hidden; box-sizing: border-box;" placeholder="Ask AI or attach code... (Enter to send)"></textarea>
-                      <div class="d-flex flex-column gap-1 flex-shrink-0">
-                        <button class="btn btn-sm btn-danger fw-bold d-flex align-items-center justify-content-center p-2 rounded-circle" id="ide-ai-send-btn" title="Send Prompt" style="height: 36px; width: 36px;">
-                          <i class="bi bi-arrow-up"></i>
+                      <textarea id="ide-ai-input" class="form-control form-control-sm border-0 bg-transparent text-white shadow-none" rows="1" style="height: 32px; min-height: 32px; max-height: 160px; resize: none; font-size: 0.85rem; padding: 6px 4px; line-height: 1.45; overflow-y: hidden;" placeholder="Ask AI anything... (Enter to send)"></textarea>
+                      <div class="d-flex align-items-center mb-1">
+                        <button class="btn btn-sm btn-danger fw-bold d-flex align-items-center justify-content-center rounded-circle p-0" id="ide-ai-send-btn" title="Send Prompt" style="height: 32px; width: 32px; box-shadow: 0 2px 10px rgba(255, 0, 68, 0.4);">
+                          <i class="bi bi-arrow-up-short fs-5"></i>
                         </button>
-                        <button class="btn btn-sm btn-secondary fw-bold d-none align-items-center justify-content-center p-2 rounded-circle" id="ide-ai-stop-btn" title="Stop Generation" style="height: 36px; width: 36px;">
+                        <button class="btn btn-sm btn-secondary fw-bold d-none align-items-center justify-content-center rounded-circle p-0" id="ide-ai-stop-btn" title="Stop Generation" style="height: 32px; width: 32px;">
                           <i class="bi bi-stop-fill text-danger"></i>
                         </button>
                       </div>
@@ -32589,18 +33515,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 let thinkHtml = '';
 
                 text = text.replace(/<search>([\s\S]*?)<\/search>/gi, (_, p1) => {
-                  searchHtml += `<div class="p-1 px-2 mb-2 rounded bg-info bg-opacity-10 border border-info border-opacity-25 text-info small"><i class="bi bi-globe me-1"></i> ${p1.trim()}</div>`;
+                  searchHtml += `<div class="d-flex align-items-center gap-2 p-2 mb-2 rounded-3" style="background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.2); color: #38bdf8; font-size: 0.74rem;"><i class="bi bi-globe"></i> <span>${p1.trim()}</span></div>`;
                   return '';
                 });
 
-                // When Thinking mode is OFF: completely strip out any <think> blocks
                 if (!isAiThinkActive) {
                   text = text
                     .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>[\s\S]*?<\s*\/\s*(?:think|thinking|thought)\s*[^>]*>/gi, '')
                     .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>[\s\S]*$/gi, '')
                     .trim();
                 } else {
-                  // When Thinking mode is ON: extract and render collapsible reasoning
                   let cleanText = text
                     .replace(/<\s*(?:think|thinking|thought)\s*[^>]*>/gi, '<think>')
                     .replace(/<\s*\/\s*(?:think|thinking|thought)\s*[^>]*>/gi, '</think>');
@@ -32618,7 +33542,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     let splitClose = parts[i].split('</think>');
                     let thoughtBlock = splitClose[0].trim();
                     if (thoughtBlock) {
-                      thinkHtml += `<details class="p-2 mb-2 rounded bg-black bg-opacity-50 border border-secondary border-opacity-25 small text-secondary" open><summary class="fw-bold text-warning" style="cursor:pointer;"><i class="bi bi-lightbulb me-1"></i> Reasoning Process</summary><div class="mt-1 font-monospace" style="font-size:0.75rem; white-space:pre-wrap; color:#aaa;">${thoughtBlock}</div></details>`;
+                      thinkHtml += `<details class="ai-think-details" open><summary><i class="bi bi-lightbulb-fill"></i> <span>Reasoning Chain</span></summary><div class="mt-2 font-monospace" style="font-size:0.75rem; line-height:1.5; white-space:pre-wrap; color:#a0a0b2;">${thoughtBlock}</div></details>`;
                     }
                     if (splitClose.length > 1) {
                       mainContent += splitClose.slice(1).join('</think>');
@@ -32629,18 +33553,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 let parsedMarkdown = typeof marked !== 'undefined' ? marked.parse(text.trim()) : text;
 
-                // Agentic Quick Action Buttons for codeblocks
+                // Agentic Quick Action Buttons for Code Blocks
                 parsedMarkdown = parsedMarkdown.replace(/<pre><code class="language-([a-zA-Z0-9_\-]+)">([\s\S]*?)<\/code><\/pre>/gi, (match, lang, codeRaw) => {
                   const decodedCode = codeRaw.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'");
                   const b64Code = window.btoa(unescape(encodeURIComponent(decodedCode)));
                   return `
-                    <div class="position-relative my-2 rounded border border-secondary border-opacity-50 overflow-hidden">
-                      <div class="d-flex align-items-center justify-content-between px-2 py-1 bg-dark border-bottom border-secondary border-opacity-25 small text-secondary">
-                        <span class="fw-bold font-monospace text-uppercase" style="font-size: 0.7rem;">${lang}</span>
+                    <div class="ai-code-wrapper">
+                      <div class="ai-code-header">
+                        <span class="font-monospace fw-bold text-uppercase" style="color:#ff5252; letter-spacing:0.4px;">${lang}</span>
                         <div class="d-flex gap-1">
-                          <button class="btn btn-sm btn-outline-light border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="navigator.clipboard.writeText(decodeURIComponent(escape(window.atob('${b64Code}')))); this.innerText='Copied!';" title="Copy Code"><i class="bi bi-copy"></i></button>
-                          <button class="btn btn-sm btn-outline-info border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="window.applyAiCodeSnippet('${b64Code}', 'insert')" title="Insert at Cursor"><i class="bi bi-cursor-text"></i> Insert</button>
-                          <button class="btn btn-sm btn-outline-warning border-0 py-0 px-1" style="font-size: 0.72rem;" onclick="window.applyAiCodeSnippet('${b64Code}', 'replace_file')" title="Replace Active File"><i class="bi bi-file-earmark-code"></i> Replace All</button>
+                          <button class="ai-action-chip" onclick="navigator.clipboard.writeText(decodeURIComponent(escape(window.atob('${b64Code}')))); this.innerText='Copied!';" title="Copy Code"><i class="bi bi-copy me-1"></i> Copy</button>
+                          <button class="ai-action-chip text-info" onclick="window.applyAiCodeSnippet('${b64Code}', 'insert')" title="Insert at Cursor"><i class="bi bi-cursor-text me-1"></i> Insert</button>
+                          <button class="ai-action-chip text-warning" onclick="window.applyAiCodeSnippet('${b64Code}', 'replace_file')" title="Replace Active File Buffer"><i class="bi bi-file-earmark-code me-1"></i> Replace All</button>
                         </div>
                       </div>
                       ${match}
@@ -32658,9 +33582,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 if (thread.length === 0) {
                   container.innerHTML = `
-                    <div class="text-secondary small text-center my-auto">
-                      <i class="bi bi-stars text-danger fs-2 d-block mb-2"></i>
-                      Ask AI to explain code, fix bugs, write features, or refactor.
+                    <div class="d-flex flex-column align-items-center justify-content-center text-center my-auto py-4 text-secondary">
+                      <div style="width: 44px; height: 44px; border-radius: 14px; background: rgba(255, 0, 68, 0.1); border: 1px solid rgba(255, 0, 68, 0.25); display: flex; align-items: center; justify-content: center; margin-bottom: 12px;">
+                        <i class="bi bi-stars text-danger fs-4"></i>
+                      </div>
+                      <span class="text-white fw-bold small mb-1">AI Coding Agent</span>
+                      <span style="font-size: 0.75rem; color: #888899; max-width: 280px;">Ask to debug, explain logic, write unit tests, or refactor the current file.</span>
                     </div>`;
                   return;
                 }
@@ -32673,9 +33600,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   let branchNavHtml = '';
                   if (siblings.length > 1) {
                     branchNavHtml = `
-                      <div class="d-inline-flex align-items-center gap-1 bg-black bg-opacity-50 px-2 py-0 rounded border border-secondary border-opacity-50" style="font-size: 0.68rem;">
+                      <div class="d-inline-flex align-items-center gap-1 bg-black bg-opacity-60 px-2 py-0 rounded-pill border border-secondary border-opacity-50" style="font-size: 0.68rem;">
                         <button class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" ${bIndex === 0 ? 'disabled' : ''} onclick="switchAiBranch('${m.id}', -1)">‹</button>
-                        <span class="text-white-50">${bIndex + 1}/${siblings.length}</span>
+                        <span class="text-white-50 font-monospace">${bIndex + 1}/${siblings.length}</span>
                         <button class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" ${bIndex === siblings.length - 1 ? 'disabled' : ''} onclick="switchAiBranch('${m.id}', 1)">›</button>
                       </div>`;
                   }
@@ -32689,7 +33616,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       .replace(/"/g, '&quot;')
                       .replace(/'/g, '&#039;');
 
-                    // Render interactive file badges exactly like phpchatai.txt
                     safeText = safeText.replace(/\[File:\s*(.*?)\]\n([\s\S]*?)\n\[End of File\]/g, (match, fName, fContent) => {
                       const rawContent = fContent.replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
                       const rawFName = fName.replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
@@ -32698,9 +33624,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       const base64Name = window.btoa(unescape(encodeURIComponent(rawFName)));
 
                       return `
-                        <div class="d-inline-flex align-items-center gap-2 bg-dark border border-secondary border-opacity-75 rounded-3 px-2 py-1 my-1 shadow-sm" style="cursor: pointer;" onclick="openAiFileModal('${base64Name}', '${base64Content}')" title="Click to view file">
+                        <div class="d-inline-flex align-items-center gap-2 bg-black bg-opacity-60 border border-secondary border-opacity-50 rounded-3 px-2 py-1 my-1 shadow-sm" style="cursor: pointer;" onclick="openAiFileModal('${base64Name}', '${base64Content}')" title="Click to view file">
                           <i class="bi bi-file-earmark-code text-danger"></i>
-                          <span class="fw-medium text-white text-truncate" style="font-size: 0.76rem; max-width: 160px;">${rawFName}</span>
+                          <span class="fw-medium text-white text-truncate font-monospace" style="font-size: 0.74rem; max-width: 160px;">${rawFName}</span>
                         </div>
                       `;
                     });
@@ -32709,19 +33635,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   } else {
                     parsedContent = parseAiContent(m.content);
                     if (!parsedContent && isAiGenerating && m.id === aiActiveLeafId) {
-                      parsedContent = '<span class="text-secondary fst-italic"><span class="spinner-border spinner-border-sm me-1" style="width: 12px; height: 12px;"></span> Generating solution...</span>';
+                      parsedContent = '<span class="text-secondary fst-italic d-inline-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm text-danger" style="width: 14px; height: 14px; border-width: 2px;"></span> Crafting response...</span>';
                     }
                   }
 
                   return `
-                    <div class="p-3 rounded-3 ${isUser ? 'bg-danger bg-opacity-10 border border-danger border-opacity-50 text-white ms-3' : 'bg-dark border border-secondary border-opacity-50 text-light me-3'}" style="font-size: 0.82rem; word-break: break-word;" id="aimsg-${m.id}">
-                      <div class="d-flex align-items-center justify-content-between mb-2">
-                        <div class="fw-bold small ${isUser ? 'text-danger' : 'text-info'}">
-                          ${isUser ? '<i class="bi bi-person me-1"></i> You' : '<i class="bi bi-robot me-1"></i> AI Assistant'}
+                    <div class="${isUser ? 'ai-msg-bubble-user' : 'ai-msg-bubble-assistant'}" style="font-size: 0.83rem; word-break: break-word;" id="aimsg-${m.id}">
+                      <div class="d-flex align-items-center justify-content-between mb-2 pb-1 border-bottom border-secondary border-opacity-10">
+                        <div class="d-flex align-items-center gap-2">
+                          <div style="width: 18px; height: 18px; border-radius: 5px; background: ${isUser ? 'rgba(255, 0, 60, 0.2)' : 'rgba(6, 182, 212, 0.2)'}; display: flex; align-items: center; justify-content: center;">
+                            <i class="bi ${isUser ? 'bi-person-fill text-danger' : 'bi-robot text-info'}" style="font-size: 0.65rem;"></i>
+                          </div>
+                          <span class="fw-bold" style="font-size: 0.74rem; color: ${isUser ? '#ff5252' : '#38bdf8'};">${isUser ? 'You' : 'Agent'}</span>
                         </div>
                         <div class="d-flex align-items-center gap-2">
                           ${branchNavHtml}
-                          ${isUser ? `<button class="btn btn-sm btn-link text-secondary p-0 text-decoration-none" onclick="editAiPrompt('${m.id}')" title="Edit Prompt"><i class="bi bi-pencil" style="font-size:0.75rem;"></i></button>` : ''}
+                          ${isUser ? `<button class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" onclick="editAiPrompt('${m.id}')" title="Edit Prompt"><i class="bi bi-pencil" style="font-size:0.75rem;"></i></button>` : ''}
                         </div>
                       </div>
                       <div class="ai-msg-body">${parsedContent}</div>
@@ -40916,9 +41845,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                     if (item.thumb_image) card.classList.add('has-image');
 
-                    let folderThumbHtml = item.thumb_image
-                      ? `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.thumb_image)}" alt="" loading="lazy" decoding="async">`
-                      : `<div class="type-icon type-folder"><svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg></div>`;
+                    let folderThumbHtml = `
+                      <div class="type-icon type-folder" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:1;">
+                        <svg viewBox="0 0 16 16"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.266a2.5 2.5 0 0 1-2.481-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14zM2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.37 3.328 5.742 3 5.264 3H2.5a.5.5 0 0 0-.5.5zm-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.266 14h9.468a1.5 1.5 0 0 0 1.489-1.314l.64-5.124A.5.5 0 0 0 14.367 7z"/></svg>
+                      </div>
+                    `;
+
+                    if (item.thumb_image) {
+                      folderThumbHtml += `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.thumb_image)}" alt="" loading="lazy" decoding="async" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover;" onerror="this.remove(); this.closest('.file-card')?.classList.remove('has-image');">`;
+                    }
 
                     card.innerHTML = `
                       <div class="file-checkbox"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
@@ -40943,7 +41878,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                     if (item.type === 'image') {
                       card.classList.add('has-image');
-                      thumbHtml = `<img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }">`;
+                      thumbHtml = `
+                        <div class="type-icon" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#60a5fa; z-index:1;">
+                          <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                        </div>
+                        <img src="?access=admin&page=drive&action=thumb&f=${encodeURIComponent(item.path)}" alt="" loading="lazy" decoding="async" style="position:relative; z-index:2; width:100%; height:100%; object-fit:cover;" onload="this.style.opacity='1'; if(this.naturalWidth && this.naturalHeight && window.app && window.app.layout==='justified'){ const c=this.closest('.file-card'); if(c){ const r=this.naturalWidth/this.naturalHeight; c.style.setProperty('--card-grow', r); c.style.setProperty('--card-ratio', r); } }" onerror="this.remove(); this.closest('.file-card')?.classList.remove('has-image');">
+                      `;
                       if (this.layout === 'columns') {
                         thumbRatio = 'style="min-height:140px; height:auto;"';
                       }
@@ -44675,12 +45615,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php else: ?>
           <?php
             $db = get_db();
-            $search = $_GET['search'] ?? ''; 
+            $search = trim($_GET['search'] ?? ''); 
             $sort_admin = $_GET['sort'] ?? 'newest';
-            $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+            $page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : (isset($_GET['page']) && is_numeric($_GET['page']) ? max(1, (int)$_GET['page']) : 1);
             $offset = ($page - 1) * ADMIN_PAGE_SIZE;
 
-            // Global KPI Summary Metrics
             // Global KPI Summary Metrics
             $total_all_users = (int)($db->query("SELECT COUNT(id) FROM users")->fetchColumn() ?: 0);
             $total_verified_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE verified = 'yes'")->fetchColumn() ?: 0);
@@ -44700,7 +45639,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $params[] = "%$search%";
               } else {
                 $where_clauses[] = "(email LIKE ? OR artist LIKE ?)";
-                $params[] = ["%$search%", "%$search%"];
+                $params[] = "%$search%";
+                $params[] = "%$search%";
               }
             }
             if ($sort_admin === 'pending') $where_clauses[] = "verified = 'pending'";
@@ -44754,6 +45694,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
               <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="users">
               <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                 <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest Accounts</option>
                 <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
@@ -44908,10 +45849,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                               <i class="bi bi-pencil-fill"></i> Edit
                             </button>
                             <div class="dropdown">
-                              <button class="admin-btn-pill p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" style="width: 30px; height: 30px;">
+                              <button class="admin-btn-pill p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" data-bs-popper-config='{"strategy":"fixed"}' style="width: 30px; height: 30px;">
                                 <i class="bi bi-three-dots-vertical"></i>
                               </button>
-                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary" style="background-color: #181818;">
+                              <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg border-secondary" style="background-color: #181818; z-index: 1060;">
                                 <li>
                                   <form method="POST" action="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="m-0">
                                     <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
@@ -45168,6 +46109,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="reports" id="perm-reports">
                     <label class="form-check-label text-white fw-medium" for="perm-reports">Profile Reports</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="rhythm_analytics" id="perm-rhythm-analytics">
+                    <label class="form-check-label text-white fw-medium" for="perm-rhythm-analytics">Rhythm Analytics</label>
                   </div>
                 </div>
                 <div class="col-12 col-md-6">
@@ -47896,11 +48843,11 @@ HTML;
       $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 'image/svg+xml')");
       $stmt->execute([$email, $artist, $hash, $svg]);
       
-      // Automatically log the user in
       $new_user_id = $db->lastInsertId();
       $_SESSION['user_id'] = $new_user_id;
       $_SESSION['user_artist'] = $artist;
       try { $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$new_user_id]); } catch(Exception $e) {}
+      record_activity_log("User registered: '{$artist}'", $email, $new_user_id);
       
       send_json(['status' => 'success', 'message' => 'Registration successful. You are now logged in!']);
       break;
@@ -47918,6 +48865,7 @@ HTML;
       $stmt->execute([$email]);
       $user = $stmt->fetch();
       if ($user && $user['banned'] == 1) {
+        record_activity_log("Banned login attempt blocked", $email, $user['id']);
         http_response_code(403);
         send_json(['status' => 'error', 'message' => 'This account has been banned.']);
       } elseif ($user && $user['password_hash'] !== null && password_verify($password, $user['password_hash'])) {
@@ -47928,16 +48876,20 @@ HTML;
           $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$user['id']]);
         } catch(Exception $e) {}
 
+        record_activity_log("User logged in", $user['email'], $user['id']);
+
         unset($user['password_hash']);
         $user['profile_picture_url'] = "?action=get_profile_picture&id=" . $user['id'] . "&v=" . time();
         send_json(['status' => 'success', 'user' => $user, 'upload_limit' => get_upload_limit()]);
       } else {
+        record_activity_log("Failed login attempt (bad password)", $email, 0);
         http_response_code(401);
         send_json(['status' => 'error', 'message' => 'Invalid credentials.']);
       }
       break;
 
     case 'logout':
+      record_activity_log("User logged out");
       session_destroy();
       send_json(['status' => 'success']);
       break;
@@ -48625,6 +49577,8 @@ HTML;
           $update_stmt = $db->prepare("UPDATE users SET daily_upload_count = ?, last_upload_date = ? WHERE id = ?");
           $update_stmt->execute([$new_count, $today, $user_id]);
 
+          record_activity_log("Uploaded song: '{$title}' by '{$artist}' (ID: {$new_song_id})", null, $user_id);
+
           send_json(['status' => 'success', 'message' => 'File uploaded.']);
         } else {
           if ($is_chunked) @unlink($file_source);
@@ -48653,6 +49607,7 @@ HTML;
         if ($file_path && file_exists($file_path)) {
           @unlink($file_path);
         }
+        record_activity_log("Deleted song ID #{$song_id}", null, $user_id);
         send_json(['status' => 'success', 'message' => 'Song deleted.']);
       } else {
         http_response_code(403);
@@ -54888,19 +55843,44 @@ HTML;
       break;
 
     case 'save_rhythm_score':
-      if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
-      
-      // SERVER-SIDE ANTI-CHEAT VALIDATION (V6.2: Multi-Layered, Pattern Analysis, Auto-Ban)
-      $hit_deltas = $data['hit_deltas'] ?? [];
-      $total_hits = count($hit_deltas);
+      $user_id = (int)($_SESSION['user_id'] ?? 0);
+
+      // Check if logged-in user is suspended from the rhythm game
+      if ($user_id > 0) {
+        $stmt_check_user = $db->prepare("SELECT banned, rhythm_strikes FROM users WHERE id = ?");
+        $stmt_check_user->execute([$user_id]);
+        $u_info = $stmt_check_user->fetch();
+        if ($u_info && ($u_info['banned'] == 1 || $u_info['rhythm_strikes'] > 0)) {
+          http_response_code(403);
+          send_json(['status' => 'error', 'message' => 'Your account is currently restricted from submitting rhythm scores.']);
+        }
+      }
+
+      $perfect = intval($data['perfect'] ?? 0);
+      $great = intval($data['great'] ?? 0);
+      $good = intval($data['good'] ?? 0);
+      $bad = intval($data['bad'] ?? 0);
+      $miss = intval($data['miss'] ?? 0);
+      $judged_notes = $perfect + $great + $good + $bad + $miss;
+
+      $hit_deltas = (isset($data['hit_deltas']) && is_array($data['hit_deltas'])) ? $data['hit_deltas'] : [];
+      $total_hits = !empty($hit_deltas) ? count($hit_deltas) : ($perfect + $great + $good + $bad);
       $max_combo = intval($data['max_combo'] ?? 0);
       $claimed_score = intval($data['score'] ?? 0);
+      $song_id = intval($data['song_id'] ?? 0);
+
+      if ($song_id <= 0) {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => 'Invalid song ID.']);
+      }
+
       $is_cheater = false;
       $ban_reason = '';
 
-      if ($total_hits > 20) {
-        // Layer 1: Inhuman Precision bounds (Too many hits occurring with sub-5ms delta)
+      // Layer 1 & 2: Sub-millisecond delta precision analysis (Only runs when client transmits hit_deltas)
+      if (!empty($hit_deltas) && count($hit_deltas) > 20) {
+        $num_deltas = count($hit_deltas);
         $suspicious_hits = 0;
         $sum = 0;
         foreach ($hit_deltas as $delta) {
@@ -54909,21 +55889,19 @@ HTML;
           $sum += $d;
         }
         
-        if (($suspicious_hits / $total_hits) > 0.8) {
+        if (($suspicious_hits / $num_deltas) > 0.8) {
           $is_cheater = true;
           $ban_reason = 'Inhuman Precision (80%+ hits under 5ms)';
         }
 
-        // Layer 2: Pattern Analysis (Macro / Zero-Variance Detection via Standard Deviation)
         if (!$is_cheater) {
-          $mean = $sum / $total_hits;
+          $mean = $sum / $num_deltas;
           $variance_sum = 0;
           foreach ($hit_deltas as $delta) {
             $variance_sum += pow((float)$delta - $mean, 2);
           }
-          $std_dev = sqrt($variance_sum / $total_hits);
+          $std_dev = sqrt($variance_sum / $num_deltas);
           
-          // Human timing organically fluctuates. Standard deviation < 1.5ms across 20+ hits strongly indicates a machine macro.
           if ($std_dev < 1.5) {
             $is_cheater = true;
             $ban_reason = 'Macro Pattern Detected (StdDev < 1.5ms)';
@@ -54931,11 +55909,16 @@ HTML;
         }
       }
 
-      // Layer 3: Bounds Validation (Score / Combo Spoofing)
-      $theoretical_max = $total_hits * 1000;
-      if ($claimed_score > $theoretical_max || $max_combo > $total_hits) {
+      // Layer 3: Bounds Validation
+      if ($judged_notes > 0) {
+        $theoretical_max = max(1000000, $judged_notes * 2000);
+        if ($claimed_score < 0 || $claimed_score > $theoretical_max || $max_combo > $judged_notes) {
+          $is_cheater = true;
+          $ban_reason = 'Data Spoofing (Score or Combo out of mathematical bounds)';
+        }
+      } elseif ($claimed_score > 0 || $max_combo > 0) {
         $is_cheater = true;
-        $ban_reason = 'Data Spoofing (Score or Combo out of mathematical bounds)';
+        $ban_reason = 'Data Spoofing (Score with 0 notes)';
       }
 
       if ($is_cheater) {
@@ -54989,6 +55972,7 @@ HTML;
 
       $db->prepare("INSERT INTO rhythm_scores (user_id, song_id, score, max_combo, perfect, great, good, bad, miss, difficulty) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
          ->execute([$user_id, intval($data['song_id']), intval($data['score']), intval($data['max_combo']), intval($data['perfect']), intval($data['great']), intval($data['good']), intval($data['bad']), intval($data['miss']), $data['difficulty'] ?? 'medium']);
+      record_activity_log("Rhythm Play: Song #" . intval($data['song_id']) . " (" . strtoupper($data['difficulty'] ?? 'medium') . ") Score: " . number_format(intval($data['score'])) . " Combo: " . intval($data['max_combo']) . "x", null, $user_id);
       send_json(['status' => 'success']);
       break;
 
