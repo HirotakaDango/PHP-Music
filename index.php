@@ -284,7 +284,7 @@ if (isset($_GET['pwa'])) {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo <<<SW
-const CACHE_NAME = 'php-music-cache-v30';
+const CACHE_NAME = 'php-music-cache-v31';
 const STATIC_ASSETS =[
   './',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -370,8 +370,8 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  const isPwaCall = url.searchParams.has('pwa');
-  if (isPwaCall || event.request.headers.get('range')) {
+  const isBypassCall = url.searchParams.has('pwa') || url.searchParams.has('access');
+  if (isBypassCall || event.request.headers.get('range')) {
     event.respondWith(fetch(event.request));
     return;
   }
@@ -479,6 +479,589 @@ if (isset($_GET['page']) && $_GET['page'] === 'forbidden') {
         <p class="text-secondary small mb-4">Unauthorized inspection and developer tools are strictly prohibited on this platform.</p>
         <a href="./" class="btn btn-danger w-100 fw-bold py-2 rounded-pill">Return to Home</a>
       </div>
+    </body>
+  </html>
+  <?php
+  exit;
+}
+
+// FFMPEG DETECTION & PORTABLE RUNTIME ENGINE (Zero Composer Dependency)
+function is_cli_exec_available() {
+  if (!function_exists('exec')) return false;
+  $disabled = explode(',', ini_get('disable_functions') ?: '');
+  $disabled = array_map('trim', array_map('strtolower', $disabled));
+  if (in_array('exec', $disabled) || ini_get('safe_mode')) return false;
+  return true;
+}
+
+function ensure_ffmpeg() {
+  if (!is_cli_exec_available() || !class_exists('ZipArchive')) {
+    return false;
+  }
+
+  $is_win = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+  $is_mac = (strtoupper(substr(PHP_OS, 0, 6)) === 'DARWIN');
+  $arch = strtolower(php_uname('m') ?: '');
+  $is_64 = (PHP_INT_SIZE === 8) || strpos($arch, '64') !== false;
+
+  $bin_name = $is_win ? 'ffmpeg.exe' : 'ffmpeg';
+  $bin_dir = __DIR__ . '/bin';
+  $target_bin = $bin_dir . '/' . $bin_name;
+
+  if (file_exists($target_bin)) {
+    if (!$is_win && !is_executable($target_bin)) @chmod($target_bin, 0755);
+    return $target_bin;
+  }
+
+  // Automatically select the precompiled binary platform for the host OS
+  $platform = 'linux-64';
+  if ($is_win) {
+    $platform = $is_64 ? 'win-64' : 'win-32';
+  } elseif ($is_mac) {
+    $platform = 'macos-64';
+  } else {
+    if (strpos($arch, 'aarch64') !== false || strpos($arch, 'arm64') !== false) {
+      $platform = 'linux-arm-64';
+    } elseif (strpos($arch, 'arm') !== false) {
+      $platform = 'linux-armhf-32';
+    } elseif ($is_64) {
+      $platform = 'linux-64';
+    } else {
+      $platform = 'linux-32';
+    }
+  }
+
+  $urls = [
+    "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-{$platform}.zip",
+    "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-{$platform}.zip"
+  ];
+
+  $tmp_dir = __DIR__ . '/.tmp_uploads';
+  if (!is_dir($tmp_dir)) @mkdir($tmp_dir, 0755, true);
+  if (!is_dir($bin_dir)) @mkdir($bin_dir, 0755, true);
+
+  $tmp_zip = $tmp_dir . '/ffmpeg_dl_' . uniqid() . '.zip';
+
+  foreach ($urls as $dl_url) {
+    $data = false;
+    if (function_exists('curl_version')) {
+      $ch = curl_init();
+      curl_setopt_array($ch, [
+        CURLOPT_URL => $dl_url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT => 180,
+        CURLOPT_USERAGENT => 'PHP-Music-FFmpeg-AutoInstaller'
+      ]);
+      $data = curl_exec($ch);
+      $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+      curl_close($ch);
+      if ($code !== 200) $data = false;
+    }
+
+    if (!$data) {
+      $ctx = stream_context_create([
+        'http' => ['timeout' => 180, 'follow_location' => true, 'header' => "User-Agent: PHP-Music-FFmpeg-AutoInstaller\r\n"],
+        'ssl'  => ['verify_peer' => false, 'verify_peer_name' => false]
+      ]);
+      $data = @file_get_contents($dl_url, false, $ctx);
+    }
+
+    if ($data && strlen($data) > 100000) {
+      @file_put_contents($tmp_zip, $data);
+      if (file_exists($tmp_zip)) {
+        $zip = new ZipArchive();
+        if ($zip->open($tmp_zip) === true) {
+          for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = $zip->getNameIndex($i);
+            if (basename($entry) === $bin_name) {
+              $stream = $zip->getStream($entry);
+              if ($stream) {
+                $out = @fopen($target_bin, 'wb');
+                if ($out) {
+                  while (!feof($stream)) {
+                    $buf = fread($stream, 524288);
+                    if ($buf === false || $buf === '') break;
+                    fwrite($out, $buf);
+                  }
+                  fclose($out);
+                }
+                fclose($stream);
+              }
+              break;
+            }
+          }
+          $zip->close();
+          @unlink($tmp_zip);
+
+          if (file_exists($target_bin)) {
+            if (!$is_win) @chmod($target_bin, 0755);
+            return $target_bin;
+          }
+        }
+        @unlink($tmp_zip);
+      }
+    }
+  }
+
+  return false;
+}
+
+function is_ffmpeg_supported() {
+  static $ffmpeg_path = null;
+  if ($ffmpeg_path !== null) return $ffmpeg_path;
+
+  if (!is_cli_exec_available()) {
+    $ffmpeg_path = false;
+    return false;
+  }
+
+  $is_win = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+  $bin_name = $is_win ? 'ffmpeg.exe' : 'ffmpeg';
+
+  // 1. Check local directory candidates
+  $candidates = [
+    __DIR__ . '/' . $bin_name,
+    __DIR__ . '/bin/' . $bin_name,
+    __DIR__ . '/ffmpeg/' . $bin_name
+  ];
+
+  foreach ($candidates as $cand) {
+    if (file_exists($cand)) {
+      if (!$is_win && !is_executable($cand)) {
+        @chmod($cand, 0755);
+      }
+      $ffmpeg_path = realpath($cand);
+      return $ffmpeg_path;
+    }
+  }
+
+  // 2. Check System PATH
+  $cmd = $is_win ? 'where ffmpeg 2>NUL' : 'which ffmpeg 2>/dev/null';
+  @exec($cmd, $out, $ret);
+  if ($ret === 0 && !empty($out[0])) {
+    $ffmpeg_path = trim($out[0]);
+    return $ffmpeg_path;
+  }
+
+  // 3. Automatically download static binary based on OS if missing
+  $downloaded = ensure_ffmpeg();
+  if ($downloaded && file_exists($downloaded)) {
+    $ffmpeg_path = realpath($downloaded);
+    return $ffmpeg_path;
+  }
+
+  $ffmpeg_path = false;
+  return false;
+}
+
+function is_ffmpeg_enabled() {
+  // Automatically disabled if host cannot run or find FFmpeg
+  if (!is_ffmpeg_supported()) return false;
+  try {
+    $db = get_db();
+    $stmt = $db->query("SELECT value FROM site_settings WHERE key = 'ffmpeg_enabled' LIMIT 1");
+    $val = $stmt ? $stmt->fetchColumn() : false;
+    if ($val === false) return true; // Default ON when supported
+    return (bool)(int)$val;
+  } catch (Exception $e) {
+    return true;
+  }
+}
+
+function get_ffmpeg_binary() {
+  if (!is_ffmpeg_enabled()) {
+    return false;
+  }
+  return is_ffmpeg_supported();
+}
+
+function resolve_song_file_by_bitrate($song_id, $original_file, $preferred_kbps = null) {
+  $file_path = $original_file;
+  if (!file_exists($file_path)) {
+    $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+    if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+  }
+
+  // If FFmpeg is disabled or no transcoding directory exists, return original file
+  if (!is_ffmpeg_enabled()) {
+    return $file_path;
+  }
+
+  $transcode_base = MUSIC_DIR . '/transcode/' . (int)$song_id;
+  if (!is_dir($transcode_base)) {
+    return $file_path;
+  }
+
+  $tiers = [320, 256, 192, 128, 96];
+  $target_kbps = (int)$preferred_kbps;
+
+  // 1. Try exact requested bitrate
+  if ($target_kbps > 0) {
+    $direct_file = $transcode_base . '/' . $target_kbps . 'kbps.mp3';
+    if (file_exists($direct_file) && filesize($direct_file) > 0) {
+      return $direct_file;
+    }
+    $sub_pattern = glob($transcode_base . '/' . $target_kbps . 'kbps/*.mp3', GLOB_NOSORT);
+    if (!empty($sub_pattern) && file_exists($sub_pattern[0])) {
+      return $sub_pattern[0];
+    }
+  }
+
+  // 2. Fallback: Use the highest bitrate variant available
+  foreach ($tiers as $tier) {
+    $tier_file = $transcode_base . '/' . $tier . 'kbps.mp3';
+    if (file_exists($tier_file) && filesize($tier_file) > 0) {
+      return $tier_file;
+    }
+    $sub_pattern = glob($transcode_base . '/' . $tier . 'kbps/*.mp3', GLOB_NOSORT);
+    if (!empty($sub_pattern) && file_exists($sub_pattern[0])) {
+      return $sub_pattern[0];
+    }
+  }
+
+  return $file_path;
+}
+
+// SERVER REQUIREMENTS & SYSTEM DIAGNOSTICS PAGE (?access=requirements)
+if (isset($_GET['access']) && $_GET['access'] === 'requirements') {
+  $checks = [];
+
+  // 1. PHP Version
+  $php_version = phpversion();
+  $checks['PHP Version (>= 7.4 required, 8.1+ optimal)'] = [
+    'status' => version_compare($php_version, '7.4.0', '>='),
+    'info' => "Running PHP {$php_version}",
+    'critical' => true
+  ];
+
+  // 2. SQLite3 & PDO
+  $pdo_sqlite = extension_loaded('pdo_sqlite');
+  $checks['PDO SQLite Database Driver'] = [
+    'status' => $pdo_sqlite,
+    'info' => $pdo_sqlite ? 'Installed and active' : 'Missing pdo_sqlite extension',
+    'critical' => true
+  ];
+
+  // 3. GD Library & WebP
+  $gd_loaded = extension_loaded('gd');
+  $webp_supported = $gd_loaded && function_exists('imagewebp');
+  $checks['GD Graphics & WebP Encoder'] = [
+    'status' => $webp_supported,
+    'info' => $webp_supported ? 'Full WebP, JPEG, and PNG encoding active' : ($gd_loaded ? 'GD loaded but WebP encoding missing' : 'GD extension not loaded'),
+    'critical' => true
+  ];
+
+  // 4. cURL Extension
+  $curl_loaded = extension_loaded('curl');
+  $checks['cURL Extension (Remote Fetch & AI Assistant)'] = [
+    'status' => $curl_loaded,
+    'info' => $curl_loaded ? 'Active' : 'Missing curl extension',
+    'critical' => false
+  ];
+
+  // 5. OpenSSL
+  $openssl_loaded = extension_loaded('openssl');
+  $checks['OpenSSL Extension (Drive AES-256 Encryption)'] = [
+    'status' => $openssl_loaded,
+    'info' => $openssl_loaded ? 'Active' : 'Missing openssl extension',
+    'critical' => false
+  ];
+
+  // 6. ZipArchive
+  $zip_loaded = class_exists('ZipArchive');
+  $checks['ZipArchive (Backup, Export, Unzip)'] = [
+    'status' => $zip_loaded,
+    'info' => $zip_loaded ? 'Active' : 'Missing php-zip extension',
+    'critical' => false
+  ];
+
+  // 7. Intl / Transliterator
+  $intl_loaded = class_exists('Transliterator');
+  $checks['Intl Transliterator (Romaji & Japanese Search)'] = [
+    'status' => $intl_loaded,
+    'info' => $intl_loaded ? 'Active (Japanese/Kanji romanization enabled)' : 'Optional (Fallback ASCII normalizer in use)',
+    'critical' => false
+  ];
+
+  // 8. getID3 Metadata Engine
+  $getid3_exists = file_exists(__DIR__ . '/getid3/getid3.php');
+  $checks['getID3 Audio Engine (./getid3/getid3.php)'] = [
+    'status' => $getid3_exists,
+    'info' => $getid3_exists ? 'Installed in ./getid3' : 'Missing getid3/getid3.php (Will auto-download on first scan)',
+    'critical' => false
+  ];
+
+  // 9. CLI Execution (exec function)
+  $exec_ok = is_cli_exec_available();
+  $checks['PHP CLI Execution (`exec` function)'] = [
+    'status' => $exec_ok,
+    'info' => $exec_ok ? 'Available' : 'Disabled by host in disable_functions (Safe fallback active)',
+    'critical' => false
+  ];
+
+  // 10. FFmpeg Integration
+  $ffmpeg_bin = get_ffmpeg_binary();
+  $checks['FFmpeg Multimedia Engine (Zero-Composer)'] = [
+    'status' => (bool)$ffmpeg_bin,
+    'info' => $ffmpeg_bin ? "Detected at: {$ffmpeg_bin}" : ($exec_ok ? 'Not detected (Place static binary in root ./ffmpeg. Video frames safely fall back to browser canvas).' : 'CLI disabled by host (Automatically disabled to prevent errors).'),
+    'critical' => false
+  ];
+
+  // 11. Directory Permissions
+  $is_writable = is_writable(__DIR__);
+  $checks['Root Directory Writable'] = [
+    'status' => $is_writable,
+    'info' => $is_writable ? 'Writable' : 'Read-only! Cannot save database or media uploads',
+    'critical' => true
+  ];
+
+  // Overall status calculation
+  $critical_failed = 0;
+  $passed_count = 0;
+  foreach ($checks as $c) {
+    if ($c['status']) $passed_count++;
+    elseif ($c['critical']) $critical_failed++;
+  }
+  $all_ready = ($critical_failed === 0);
+  ?>
+  <!DOCTYPE html>
+  <html lang="en" data-bs-theme="dark">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+      <title>System &amp; Device Diagnostics - PHP Music</title>
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+      <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body { background-color: #050505; color: #f1f1f5; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 1rem 0.6rem 3rem 0.6rem; min-height: 100dvh; }
+        .req-card { background: #0e0e12; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 1.25rem 1rem; max-width: 820px; margin: 0 auto; box-shadow: 0 20px 50px rgba(0,0,0,0.85); }
+        @media (min-width: 576px) {
+          body { padding: 2rem 1rem; }
+          .req-card { padding: 2rem; border-radius: 24px; }
+        }
+        
+        .header-box { display: flex; flex-direction: column; gap: 1rem; padding-bottom: 1.25rem; border-bottom: 1px solid rgba(255, 255, 255, 0.08); margin-bottom: 1.25rem; }
+        @media (min-width: 576px) {
+          .header-box { flex-direction: row; align-items: center; justify-content: space-between; }
+        }
+        
+        .status-banner { border-radius: 16px; padding: 1rem 1.15rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+        .banner-success { background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(34, 197, 94, 0.05)); border: 1px solid rgba(34, 197, 94, 0.35); color: #4ade80; }
+        .banner-danger { background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05)); border: 1px solid rgba(239, 68, 68, 0.35); color: #f87171; }
+
+        .check-item { display: flex; flex-direction: column; padding: 0.85rem 1rem; border-radius: 14px; background: rgba(24, 24, 30, 0.75); border: 1px solid rgba(255, 255, 255, 0.06); margin-bottom: 0.55rem; gap: 0.5rem; transition: background 0.15s ease; }
+        @media (min-width: 480px) {
+          .check-item { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
+        }
+        .check-item:hover { background: rgba(30, 30, 38, 0.95); border-color: rgba(255, 255, 255, 0.12); }
+
+        .check-badge { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 700; padding: 0.25rem 0.65rem; border-radius: 20px; text-transform: uppercase; width: fit-content; flex-shrink: 0; }
+        .badge-ok { background: rgba(34, 197, 94, 0.16); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
+        .badge-warn { background: rgba(251, 191, 36, 0.16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.35); }
+        .badge-fail { background: rgba(239, 68, 68, 0.16); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+        
+        .section-header { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #888899; margin: 1.5rem 0 0.75rem 0; display: flex; align-items: center; gap: 0.4rem; }
+        .section-header::after { content: ''; flex: 1; height: 1px; background: rgba(255, 255, 255, 0.06); margin-left: 0.5rem; }
+
+        .btn-modern-pill { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; padding: 0.45rem 1.1rem; border-radius: 20px; font-size: 0.82rem; font-weight: 600; text-decoration: none; transition: all 0.15s ease; cursor: pointer; }
+        .btn-modern-primary { background: #ff0044; color: #fff; border: 1px solid #ff0044; }
+        .btn-modern-primary:hover { background: #cc0033; color: #fff; }
+        .btn-modern-secondary { background: rgba(255, 255, 255, 0.05); color: #f1f1f5; border: 1px solid rgba(255, 255, 255, 0.12); }
+        .btn-modern-secondary:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+      </style>
+    </head>
+    <body>
+      <div class="req-card">
+        <!-- Top App Bar -->
+        <div class="header-box">
+          <div class="d-flex align-items-center gap-3">
+            <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #ff0044, #990022); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; flex-shrink: 0; box-shadow: 0 4px 14px rgba(255, 0, 68, 0.35);">
+              <i class="bi bi-shield-check"></i>
+            </div>
+            <div>
+              <h4 class="fw-bold m-0 text-white" style="font-size: 1.25rem; letter-spacing: -0.3px;">Diagnostics &amp; System Health</h4>
+              <small class="text-secondary" style="font-size: 0.78rem;">Hardware, PHP extensions &amp; browser readiness</small>
+            </div>
+          </div>
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <a href="?access=requirements" class="btn-modern-pill btn-modern-secondary flex-grow-1"><i class="bi bi-arrow-clockwise"></i> Re-check</a>
+            <a href="?access=admin" class="btn-modern-pill btn-modern-secondary flex-grow-1"><i class="bi bi-shield-lock-fill"></i> Admin</a>
+            <a href="./" class="btn-modern-pill btn-modern-primary flex-grow-1"><i class="bi bi-music-note-beamed"></i> Player</a>
+          </div>
+        </div>
+
+        <!-- System Readiness Banner -->
+        <?php if ($all_ready): ?>
+          <div class="status-banner banner-success">
+            <div class="d-flex align-items-center gap-2">
+              <i class="bi bi-check-circle-fill fs-5"></i>
+              <div>
+                <strong class="d-block" style="font-size: 0.92rem;">Server Environment Ready</strong>
+                <span style="font-size: 0.76rem; opacity: 0.9;">All essential PHP modules and database drivers are fully operational.</span>
+              </div>
+            </div>
+            <span class="check-badge badge-ok"><?= $passed_count ?> / <?= count($checks) ?> Ready</span>
+          </div>
+        <?php else: ?>
+          <div class="status-banner banner-danger">
+            <div class="d-flex align-items-center gap-2">
+              <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+              <div>
+                <strong class="d-block" style="font-size: 0.92rem;">Action Required</strong>
+                <span style="font-size: 0.76rem; opacity: 0.9;"><?= $critical_failed ?> critical server requirements are missing.</span>
+              </div>
+            </div>
+            <span class="check-badge badge-fail">Attention Needed</span>
+          </div>
+        <?php endif; ?>
+
+        <!-- 1. Server & Backend Module Checks -->
+        <div class="section-header">
+          <i class="bi bi-hdd-rack text-danger"></i> Server Environment (PHP &amp; SQLite)
+        </div>
+        <div>
+          <?php foreach ($checks as $title => $data): ?>
+            <div class="check-item">
+              <div style="min-width: 0;">
+                <div class="fw-bold text-white" style="font-size: 0.88rem;"><?= htmlspecialchars($title) ?></div>
+                <div class="text-secondary small mt-1 font-monospace" style="font-size: 0.74rem; word-break: break-word;"><?= htmlspecialchars($data['info']) ?></div>
+              </div>
+              <div class="mt-1 mt-sm-0">
+                <?php if ($data['status']): ?>
+                  <span class="check-badge badge-ok"><i class="bi bi-check-circle-fill"></i> Passed</span>
+                <?php elseif (!$data['critical']): ?>
+                  <span class="check-badge badge-warn"><i class="bi bi-shield-exclamation"></i> Optional</span>
+                <?php else: ?>
+                  <span class="check-badge badge-fail"><i class="bi bi-x-circle-fill"></i> Failed</span>
+                <?php endif; ?>
+              </div>
+            </div>
+          <?php endforeach; ?>
+        </div>
+
+        <!-- 2. Client Device & Browser Capability Checks -->
+        <div class="section-header">
+          <i class="bi bi-phone text-info"></i> Client Device &amp; Browser Diagnostics
+        </div>
+        <div id="client-diagnostics-container">
+          <div class="check-item">
+            <div>
+              <div class="fw-bold text-white" style="font-size: 0.88rem;">Scanning Client Environment...</div>
+              <div class="text-secondary small mt-1 font-monospace" style="font-size: 0.74rem;">Detecting audio codecs, Web Audio API, and PWA capabilities</div>
+            </div>
+            <div>
+              <span class="check-badge badge-warn"><i class="bi bi-hourglass-split"></i> Testing</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Portability & Shared Hosting Notice -->
+        <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 small text-secondary mt-3">
+          <strong class="text-white d-block mb-1" style="font-size: 0.84rem;"><i class="bi bi-info-circle text-info me-1"></i> About Portable FFmpeg &amp; Shared Hosting:</strong>
+          <span style="font-size: 0.78rem; line-height: 1.5; display: block;">
+            If your host permits CLI execution, you can place a standalone static binary named <code class="text-danger font-monospace">ffmpeg</code> (or <code class="text-danger font-monospace">ffmpeg.exe</code> on Windows) in your root directory or <code class="text-info font-monospace">./bin/ffmpeg</code>. On restricted shared hosting where <code class="text-secondary font-monospace">exec()</code> is disabled, the app automatically disables FFmpeg calls safely, utilizing browser-native HTML5 Canvas for video frame extraction.
+          </span>
+        </div>
+      </div>
+
+      <!-- Realtime Client Device Capability Test Suite -->
+      <script>
+        (function testClientCapabilities() {
+          const clientChecks = [];
+
+          // 1. Connection Security
+          const isSecure = window.isSecureContext || location.protocol === 'https:';
+          clientChecks.push({
+            title: 'HTTPS & Secure Context',
+            info: isSecure ? 'Secure (HTTPS Active)' : 'Insecure (HTTP) - Service Workers & Microphone may be restricted',
+            status: isSecure,
+            critical: false
+          });
+
+          // 2. Web Audio API
+          const hasWebAudio = !!(window.AudioContext || window.webkitAudioContext);
+          clientChecks.push({
+            title: 'Web Audio API (Visualizer & Equalizer Engine)',
+            info: hasWebAudio ? 'Supported (AudioContext Available)' : 'Unsupported by current browser',
+            status: hasWebAudio,
+            critical: true
+          });
+
+          // 3. Audio Codecs
+          const dummyAudio = document.createElement('audio');
+          const canMp3 = !!dummyAudio.canPlayType('audio/mpeg;');
+          const canFlac = !!dummyAudio.canPlayType('audio/flac;');
+          const canM4a = !!dummyAudio.canPlayType('audio/mp4; codecs="mp4a.40.2"');
+          const canOgg = !!dummyAudio.canPlayType('audio/ogg; codecs="vorbis"');
+          const audioCodecsList = [canMp3 ? 'MP3' : null, canFlac ? 'FLAC' : null, canM4a ? 'AAC/M4A' : null, canOgg ? 'OGG' : null].filter(Boolean).join(', ');
+
+          clientChecks.push({
+            title: 'HTML5 Audio Codecs Support',
+            info: audioCodecsList ? `Native Codecs: ${audioCodecsList}` : 'Standard audio playback unavailable',
+            status: canMp3 || canFlac || canM4a,
+            critical: true
+          });
+
+          // 4. HTML5 Video & Canvas Frame Extraction
+          const dummyVideo = document.createElement('video');
+          const canMp4 = !!dummyVideo.canPlayType('video/mp4; codecs="avc1.42E01E"');
+          const canWebm = !!dummyVideo.canPlayType('video/webm; codecs="vp8, vorbis"');
+          const hasCanvas = !!window.HTMLCanvasElement;
+
+          clientChecks.push({
+            title: 'HTML5 Video & Canvas Thumbnail Engine',
+            info: (canMp4 || canWebm) && hasCanvas ? `Video playback (MP4: ${canMp4 ? 'Yes' : 'No'}, WebM: ${canWebm ? 'Yes' : 'No'}) + Canvas Frame Capture` : 'Video frame extraction limited',
+            status: (canMp4 || canWebm) && hasCanvas,
+            critical: false
+          });
+
+          // 5. Offline Storage & PWA Service Worker
+          const hasSW = 'serviceWorker' in navigator;
+          const hasCache = 'caches' in window;
+          const hasIndexedDB = !!window.indexedDB;
+
+          clientChecks.push({
+            title: 'PWA Service Worker & Offline Storage',
+            info: hasSW && hasCache && hasIndexedDB ? 'Full Offline PWA & CacheStorage Active' : 'Partial offline capability',
+            status: hasSW && hasCache && hasIndexedDB,
+            critical: false
+          });
+
+          // 6. Device Screen & Pixel Density
+          const dpr = window.devicePixelRatio || 1;
+          const screenRes = `${window.screen.width}x${window.screen.height} (${dpr >= 2 ? 'Retina ' + dpr + 'x' : dpr + 'x DPI'})`;
+          const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+          clientChecks.push({
+            title: 'Display & Touch Diagnostics',
+            info: `Resolution: ${screenRes} | Touch Input: ${isTouch ? 'Enabled' : 'Disabled / Mouse'}`,
+            status: true,
+            critical: false
+          });
+
+          // Render client diagnostic cards
+          const container = document.getElementById('client-diagnostics-container');
+          if (container) {
+            container.innerHTML = clientChecks.map(item => `
+              <div class="check-item">
+                <div style="min-width: 0;">
+                  <div class="fw-bold text-white" style="font-size: 0.88rem;">${item.title}</div>
+                  <div class="text-secondary small mt-1 font-monospace" style="font-size: 0.74rem; word-break: break-word;">${item.info}</div>
+                </div>
+                <div class="mt-1 mt-sm-0">
+                  <span class="check-badge ${item.status ? 'badge-ok' : (item.critical ? 'badge-fail' : 'badge-warn')}">
+                    <i class="bi ${item.status ? 'bi-check-circle-fill' : (item.critical ? 'bi-x-circle-fill' : 'bi-shield-exclamation')}"></i>
+                    ${item.status ? 'Supported' : (item.critical ? 'Missing' : 'Optional')}
+                  </span>
+                </div>
+              </div>
+            `).join('');
+          }
+        })();
+      </script>
     </body>
   </html>
   <?php
@@ -684,7 +1267,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '10.8');
+define('APP_VERSION', '10.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -3103,11 +3686,13 @@ HTACCESS;
           }
         }
 
-        if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['video_extensions']) && function_exists('exec')) {
+        $ff_bin = get_ffmpeg_binary();
+        if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['video_extensions']) && $ff_bin) {
+          $escFf = escapeshellarg($ff_bin);
           $escSrc = escapeshellarg($fullPath);
           $escCache = escapeshellarg($cachePath);
           $thumbSize = (int)$config['thumb_size'];
-          @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
+          @exec("{$escFf} -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
         }
 
         if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['image_extensions'])) {
@@ -17261,6 +17846,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     $_SESSION['admin_csrf_token'] = bin2hex(random_bytes(32));
   }
 
+  if (!function_exists('format_admin_bytes')) {
+    function format_admin_bytes($bytes, $precision = 2) {
+      $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+      $bytes = max((float)$bytes, 0);
+      $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+      $pow = min((int)$pow, count($units) - 1);
+      $bytes /= pow(1024, $pow);
+      return number_format($bytes, $precision, '.', '') . ' ' . $units[$pow];
+    }
+  }
+
   // Ensure DB schema is initialized so default admin exists immediately
   if (function_exists('init_db')) { init_db(get_db()); }
 
@@ -18758,11 +19354,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
           }
 
-          if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $driveConfig['video_extensions']) && function_exists('exec')) {
+          $ff_bin = get_ffmpeg_binary();
+          if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $driveConfig['video_extensions']) && $ff_bin) {
+            $escFf = escapeshellarg($ff_bin);
             $escSrc = escapeshellarg($fullPath);
             $escCache = escapeshellarg($cachePath);
             $thumbSize = (int)$driveConfig['thumb_size'];
-            @exec("ffmpeg -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
+            @exec("{$escFf} -ss 00:00:01 -noaccurate_seek -i {$escSrc} -vframes 1 -an -sn -threads 2 -vf \"scale='min({$thumbSize},iw)':-2\" -q:v 3 -y {$escCache} 2>&1");
           }
 
           if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $driveConfig['image_extensions'])) {
@@ -20885,6 +21483,219 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // Toggle FFmpeg Engine State
+    if (isset($_POST['toggle_ffmpeg'])) {
+      $db = get_db();
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS site_settings (key TEXT PRIMARY KEY, value TEXT);");
+        if (!is_ffmpeg_supported()) {
+          $db->prepare("INSERT OR REPLACE INTO site_settings (key, value) VALUES ('ffmpeg_enabled', '0')")->execute();
+          $_SESSION['admin_flash_msg'] = "FFmpeg is not supported on this host environment and remains automatically disabled.";
+        } else {
+          $new_state = is_ffmpeg_enabled() ? 0 : 1;
+          $db->prepare("INSERT OR REPLACE INTO site_settings (key, value) VALUES ('ffmpeg_enabled', ?)")->execute([(string)$new_state]);
+          $label = $new_state ? "enabled" : "disabled";
+          log_admin_activity($db, $_SESSION['admin_email'], "Toggled FFmpeg engine state to {$label}", 0);
+          $_SESSION['admin_flash_msg'] = "FFmpeg has been " . ($new_state ? "enabled" : "disabled") . " successfully.";
+        }
+      } catch (Exception $e) {
+        $_SESSION['admin_flash_msg'] = "Error updating FFmpeg state: " . $e->getMessage();
+      }
+      header('Location: ?access=admin&page=bitrate_management');
+      exit;
+    }
+
+    // Transcode Individual Song Bitrate
+    if (isset($_POST['transcode_single_song']) && isset($_POST['song_id'])) {
+      $db = get_db();
+      $ffmpeg_bin = get_ffmpeg_binary();
+
+      if (!$ffmpeg_bin) {
+        $_SESSION['admin_flash_msg'] = "Transcoding failed: FFmpeg is not available or CLI execution is disabled by the server.";
+        header('Location: ?access=admin&page=bitrate_management');
+        exit;
+      }
+
+      $song_id = (int)$_POST['song_id'];
+      $target_kbps = max(64, min(320, (int)($_POST['target_bitrate'] ?? 192)));
+
+      $stmt = $db->prepare("SELECT id, file, title, artist, bitrate FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+
+      if ($song) {
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dyn = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dyn)) $file_path = $dyn;
+        }
+
+        $current_kbps = (int)round(($song['bitrate'] ?? 0) / 1000);
+        $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
+        $is_lossless = in_array($ext, ['flac', 'wav']);
+
+        if (!$is_lossless && $current_kbps > 0 && $target_kbps >= $current_kbps) {
+          $_SESSION['admin_flash_msg'] = "Transcoding skipped: target ({$target_kbps} kbps) is higher than or equal to source ({$current_kbps} kbps). Up-converting lossy audio is useless.";
+          header('Location: ?access=admin&page=bitrate_management');
+          exit;
+        }
+
+        if (file_exists($file_path)) {
+          $tmp_dir = MUSIC_DIR . '/.tmp_uploads';
+          if (!is_dir($tmp_dir)) @mkdir($tmp_dir, 0755, true);
+          $tmp_out = $tmp_dir . '/tc_' . uniqid() . '.mp3';
+
+          $escFf = escapeshellarg($ffmpeg_bin);
+          $escIn = escapeshellarg($file_path);
+          $escOut = escapeshellarg($tmp_out);
+
+          @exec("{$escFf} -y -i {$escIn} -codec:a libmp3lame -b:a {$target_kbps}k -map_metadata 0 -threads 2 {$escOut} 2>&1", $ff_out, $ff_ret);
+
+          if ($ff_ret === 0 && file_exists($tmp_out) && filesize($tmp_out) > 0) {
+            $old_size = filesize($file_path);
+            $new_size = filesize($tmp_out);
+
+            // Replace original file on disk
+            $dest_path = pathinfo($file_path, PATHINFO_DIRNAME) . '/' . pathinfo($file_path, PATHINFO_FILENAME) . '.mp3';
+            @unlink($file_path);
+            @rename($tmp_out, $dest_path);
+
+            $new_mtime = filemtime($dest_path);
+            $new_bitrate_bps = $target_kbps * 1000;
+
+            // Re-read playtime duration if getID3 is available
+            $new_duration = null;
+            if (class_exists('getID3')) {
+              $getID3 = new getID3;
+              $info = $getID3->analyze($dest_path);
+              if (!empty($info['playtime_seconds'])) {
+                $new_duration = (int)$info['playtime_seconds'];
+              }
+            }
+
+            if ($new_duration) {
+                  $db->prepare("UPDATE music SET file = ?, bitrate = ?, duration = ?, last_modified = ? WHERE id = ?")->execute([$dest_path, $new_bitrate_bps, $new_duration, $new_mtime, $song_id]);
+                } else {
+                  $db->prepare("UPDATE music SET file = ?, bitrate = ?, last_modified = ? WHERE id = ?")->execute([$dest_path, $new_bitrate_bps, $new_mtime, $song_id]);
+                }
+
+                // Automatically generate/update transcode folder structure for this song ID
+                $transcode_base = MUSIC_DIR . '/transcode/' . $song_id;
+                if (!is_dir($transcode_base)) {
+                  @mkdir($transcode_base, 0755, true);
+                }
+                $bitrate_dir = $transcode_base . '/' . $target_kbps . 'kbps';
+                if (!is_dir($bitrate_dir)) {
+                  @mkdir($bitrate_dir, 0755, true);
+                }
+                $song_filename = pathinfo($dest_path, PATHINFO_FILENAME) . '.mp3';
+                @copy($dest_path, $bitrate_dir . '/' . $song_filename);
+                @copy($dest_path, $transcode_base . '/' . $target_kbps . 'kbps.mp3');
+
+                $diff_bytes = max(0, $old_size - $new_size);
+                log_admin_activity($db, $_SESSION['admin_email'], "Transcoded Track #{$song_id} to {$target_kbps}kbps (Saved " . format_admin_bytes($diff_bytes) . ")", 0);
+            $_SESSION['admin_flash_msg'] = "'{$song['title']}' converted to {$target_kbps} kbps MP3 (Reclaimed " . format_admin_bytes($diff_bytes) . ").";
+          } else {
+            if (file_exists($tmp_out)) @unlink($tmp_out);
+            $_SESSION['admin_flash_msg'] = "Transcoding error: FFmpeg conversion failed.";
+          }
+        } else {
+          $_SESSION['admin_flash_msg'] = "Audio file missing on disk.";
+        }
+      }
+      header('Location: ?access=admin&page=bitrate_management');
+      exit;
+    }
+
+    // Bulk Transcode Selected or Filtered Tracks
+    if (isset($_POST['transcode_bulk_songs']) && isset($_POST['song_ids']) && is_array($_POST['song_ids'])) {
+      $db = get_db();
+      $ffmpeg_bin = get_ffmpeg_binary();
+
+      if (!$ffmpeg_bin) {
+        $_SESSION['admin_flash_msg'] = "Bulk transcoding failed: FFmpeg engine is not available on this server.";
+        header('Location: ?access=admin&page=bitrate_management');
+        exit;
+      }
+
+      $target_kbps = max(64, min(320, (int)($_POST['bulk_target_bitrate'] ?? 192)));
+      $target_ids = array_map('intval', $_POST['song_ids']);
+      $processed_count = 0;
+      $total_saved_bytes = 0;
+
+      $tmp_dir = MUSIC_DIR . '/.tmp_uploads';
+      if (!is_dir($tmp_dir)) @mkdir($tmp_dir, 0755, true);
+
+      foreach ($target_ids as $sid) {
+        $stmt = $db->prepare("SELECT id, file, title, bitrate FROM music WHERE id = ?");
+        $stmt->execute([$sid]);
+        $song = $stmt->fetch();
+        if (!$song) continue;
+
+        $file_path = $song['file'];
+        if (!file_exists($file_path)) {
+          $dyn = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
+          if (file_exists($dyn)) $file_path = $dyn;
+        }
+        if (!file_exists($file_path)) continue;
+
+        $current_kbps = (int)round(($song['bitrate'] ?? 0) / 1000);
+        $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
+        $is_lossless = in_array($ext, ['flac', 'wav']);
+
+        // Skip tracks where target bitrate is higher than or equal to current bitrate
+        if (!$is_lossless && $current_kbps > 0 && $target_kbps >= $current_kbps) {
+          continue;
+        }
+
+        $tmp_out = $tmp_dir . '/bulk_tc_' . uniqid() . '.mp3';
+        $escFf = escapeshellarg($ffmpeg_bin);
+        $escIn = escapeshellarg($file_path);
+        $escOut = escapeshellarg($tmp_out);
+
+        @exec("{$escFf} -y -i {$escIn} -codec:a libmp3lame -b:a {$target_kbps}k -map_metadata 0 -threads 2 {$escOut} 2>&1", $b_out, $b_ret);
+
+        if ($b_ret === 0 && file_exists($tmp_out) && filesize($tmp_out) > 0) {
+          $old_sz = filesize($file_path);
+          $new_sz = filesize($tmp_out);
+
+          $dest_path = pathinfo($file_path, PATHINFO_DIRNAME) . '/' . pathinfo($file_path, PATHINFO_FILENAME) . '.mp3';
+          @unlink($file_path);
+          @rename($tmp_out, $dest_path);
+
+          $new_mtime = filemtime($dest_path);
+          $new_bitrate_bps = $target_kbps * 1000;
+
+          $db->prepare("UPDATE music SET file = ?, bitrate = ?, last_modified = ? WHERE id = ?")->execute([$dest_path, $new_bitrate_bps, $new_mtime, $sid]);
+
+          // Automatically generate/update transcode folder structure for this song ID
+          $transcode_base = MUSIC_DIR . '/transcode/' . $sid;
+          if (!is_dir($transcode_base)) {
+            @mkdir($transcode_base, 0755, true);
+          }
+          $bitrate_dir = $transcode_base . '/' . $target_kbps . 'kbps';
+          if (!is_dir($bitrate_dir)) {
+            @mkdir($bitrate_dir, 0755, true);
+          }
+          $song_filename = pathinfo($dest_path, PATHINFO_FILENAME) . '.mp3';
+          @copy($dest_path, $bitrate_dir . '/' . $song_filename);
+          @copy($dest_path, $transcode_base . '/' . $target_kbps . 'kbps.mp3');
+
+          $processed_count++;
+          if ($old_sz > $new_sz) {
+            $total_saved_bytes += ($old_sz - $new_sz);
+          }
+        } else {
+          if (file_exists($tmp_out)) @unlink($tmp_out);
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Bulk Transcoded {$processed_count} tracks to {$target_kbps}kbps (Saved " . format_admin_bytes($total_saved_bytes) . ")", 0);
+      $_SESSION['admin_flash_msg'] = "Transcoded {$processed_count} track(s) to {$target_kbps} kbps MP3. Saved " . format_admin_bytes($total_saved_bytes) . " of storage.";
+      header('Location: ?access=admin&page=bitrate_management');
+      exit;
+    }
+
     if (isset($_POST['edit_admin_song']) && isset($_POST['song_id'])) {
       $db = get_db();
       $sid = (int)$_POST['song_id'];
@@ -21370,7 +22181,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -21415,6 +22226,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'user_drive_management' => 'User Drive Quota & Capacity Management',
     'users' => 'User Management',
     'songs' => 'Song Management',
+    'bitrate_management' => 'Audio Bitrate & Transcoding Studio',
     'artworks' => 'Artwork Management',
     'logs' => 'Activity Logs',
     'reports' => 'Pending Reports',
@@ -22418,6 +23230,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
             <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
             <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('bitrate_management', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=bitrate_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
             <a href="?access=admin&page=artworks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
             <?php endif; ?>
@@ -22452,6 +23267,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           
           <div class="mt-auto d-flex flex-column pb-3">
             <hr class="text-secondary mx-3 mb-2 opacity-25">
+            <a href="./?access=requirements" target="_blank" class="nav-link"><i class="bi bi-shield-check"></i><span>Requirements</span></a>
             <a href="./" class="nav-link"><i class="bi bi-music-note-beamed"></i><span>Back to Player</span></a>
             <a href="?access=admin&logout=1" class="nav-link text-danger"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
           </div>
@@ -23540,16 +24356,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
           ?>
 
-          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
               <h1 class="content-title m-0 fw-bold text-white">User Drive Quota Management</h1>
               <div class="small text-secondary mt-1">Set completely custom quotas in MB, GB, TB, or Unlimited, with mass bulk operations</div>
             </div>
-            <div class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
               <button class="admin-btn-pill admin-btn-primary text-nowrap" data-bs-toggle="modal" data-bs-target="#massQuotaModal">
                 <i class="bi bi-sliders"></i> Bulk Custom Quota
               </button>
-              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-grow-1 justify-content-end">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end" style="max-width: 580px;">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="user_drive_management">
                 <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
@@ -23558,7 +24374,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <option value="id_desc" <?php echo $udm_sort === 'id_desc' ? 'selected' : ''; ?>>Newest Users</option>
                   <option value="name_asc" <?php echo $udm_sort === 'name_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
                 </select>
-                <div class="position-relative flex-grow-1">
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
                   <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user ID, email..." value="<?php echo htmlspecialchars($udm_search); ?>">
                   <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
                 </div>
@@ -23928,25 +24744,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $rep_search = trim($_GET['search'] ?? '');
             $rep_sort = $_GET['sort'] ?? 'newest';
           ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">Pending Profile Reports</h1>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Pending Profile Reports</h1>
               <div class="small text-secondary mt-1">Review reported infractions and accounts</div>
             </div>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="reports">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $rep_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $rep_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-                <option value="reported" <?php echo $rep_sort === 'reported' ? 'selected' : ''; ?>>Reported Name (A-Z)</option>
-                <option value="reporter" <?php echo $rep_sort === 'reporter' ? 'selected' : ''; ?>>Reporter Name (A-Z)</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search accounts, emails, reason..." value="<?php echo htmlspecialchars($rep_search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="reports">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $rep_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                  <option value="oldest" <?php echo $rep_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                  <option value="reported" <?php echo $rep_sort === 'reported' ? 'selected' : ''; ?>>Reported Name (A-Z)</option>
+                  <option value="reporter" <?php echo $rep_sort === 'reporter' ? 'selected' : ''; ?>>Reporter Name (A-Z)</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search accounts, emails, reason..." value="<?php echo htmlspecialchars($rep_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
           <div class="content-area-wrapper">
             <div class="admin-card mb-4">
@@ -24664,24 +25482,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $app_search = trim($_GET['search'] ?? '');
             $app_sort = $_GET['sort'] ?? 'newest';
           ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">Pending Ban Appeals</h1>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Pending Ban Appeals</h1>
               <div class="small text-secondary mt-1">Review requests for unban submissions</div>
             </div>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="appeals">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $app_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $app_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-                <option value="user_name" <?php echo $app_sort === 'user_name' ? 'selected' : ''; ?>>User Name (A-Z)</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user, email, appeal..." value="<?php echo htmlspecialchars($app_search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="appeals">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $app_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                  <option value="oldest" <?php echo $app_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                  <option value="user_name" <?php echo $app_sort === 'user_name' ? 'selected' : ''; ?>>User Name (A-Z)</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search user, email, appeal..." value="<?php echo htmlspecialchars($app_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
           <div class="content-area-wrapper">
             <div class="admin-card mb-4">
@@ -24862,27 +25682,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $songs = $stmt->fetchAll();
           ?>
 
-          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
               <h1 class="content-title m-0 fw-bold text-white">Song Management Studio</h1>
               <div class="small text-secondary mt-1">Full library administration, live audio inspection, bulk transfers, and metadata controls</div>
             </div>
-            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="songs">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest First</option>
-                <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
-                <option value="title_asc" <?php echo $sort_songs === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
-                <option value="artist_asc" <?php echo $sort_songs === 'artist_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
-                <option value="plays_desc" <?php echo $sort_songs === 'plays_desc' ? 'selected' : ''; ?>>Most Played</option>
-                <option value="duration_desc" <?php echo $sort_songs === 'duration_desc' ? 'selected' : ''; ?>>Longest Tracks</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search track, artist, album, uploader..." value="<?php echo htmlspecialchars($search_songs); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="songs">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                  <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
+                  <option value="title_asc" <?php echo $sort_songs === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
+                  <option value="artist_asc" <?php echo $sort_songs === 'artist_asc' ? 'selected' : ''; ?>>Artist (A-Z)</option>
+                  <option value="plays_desc" <?php echo $sort_songs === 'plays_desc' ? 'selected' : ''; ?>>Most Played</option>
+                  <option value="duration_desc" <?php echo $sort_songs === 'duration_desc' ? 'selected' : ''; ?>>Longest Tracks</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search track, artist, album, uploader..." value="<?php echo htmlspecialchars($search_songs); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
 
           <div class="content-area-wrapper">
@@ -25181,6 +26003,457 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               new bootstrap.Modal(document.getElementById('admin-multi-edit-modal')).show();
             }
           </script>
+        <?php elseif (($_GET['page'] ?? '') === 'bitrate_management'): ?>
+          <?php
+            $db = get_db();
+            $ffmpeg_bin = get_ffmpeg_binary();
+            $has_ffmpeg = (bool)$ffmpeg_bin;
+
+            $bm_search = trim($_GET['search'] ?? '');
+            $bm_filter = $_GET['bitrate_filter'] ?? '';
+            $bm_sort = $_GET['sort'] ?? 'bitrate_desc';
+            $bm_page = max(1, (int)($_GET['p'] ?? 1));
+            $bm_limit = 25;
+            $bm_offset = ($bm_page - 1) * $bm_limit;
+
+            // Global Bitrate Analytics
+            $total_tracks_count = (int)($db->query("SELECT COUNT(id) FROM music")->fetchColumn() ?: 0);
+            $avg_bitrate_bps = (int)($db->query("SELECT AVG(bitrate) FROM music WHERE bitrate > 0")->fetchColumn() ?: 0);
+            $avg_bitrate_kbps = round($avg_bitrate_bps / 1000);
+
+            $hi_res_count = (int)($db->query("SELECT COUNT(id) FROM music WHERE bitrate > 320000 OR file LIKE '%.flac' OR file LIKE '%.wav'")->fetchColumn() ?: 0);
+            $standard_count = (int)($db->query("SELECT COUNT(id) FROM music WHERE (bitrate >= 192000 AND bitrate <= 320000) AND file NOT LIKE '%.flac' AND file NOT LIKE '%.wav'")->fetchColumn() ?: 0);
+            $compact_count = (int)($db->query("SELECT COUNT(id) FROM music WHERE bitrate > 0 AND bitrate < 192000")->fetchColumn() ?: 0);
+
+            $where_clauses = ["1=1"];
+            $params = [];
+
+            if ($bm_search !== '') {
+              if (is_numeric($bm_search)) {
+                $where_clauses[] = "(m.id = ? OR m.user_id = ? OR m.title LIKE ? OR m.artist LIKE ?)";
+                $params = [(int)$bm_search, (int)$bm_search, "%$bm_search%", "%$bm_search%"];
+              } else {
+                $where_clauses[] = "(m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ? OR u.email LIKE ? OR u.artist LIKE ?)";
+                $params = ["%$bm_search%", "%$bm_search%", "%$bm_search%", "%$bm_search%", "%$bm_search%"];
+              }
+            }
+
+            if ($bm_filter === 'hi_res') {
+              $where_clauses[] = "(m.bitrate > 320000 OR m.file LIKE '%.flac' OR m.file LIKE '%.wav')";
+            } elseif ($bm_filter === '320') {
+              $where_clauses[] = "(m.bitrate >= 300000 AND m.bitrate <= 320000)";
+            } elseif ($bm_filter === '256') {
+              $where_clauses[] = "(m.bitrate >= 240000 AND m.bitrate < 300000)";
+            } elseif ($bm_filter === '192') {
+              $where_clauses[] = "(m.bitrate >= 180000 AND m.bitrate < 240000)";
+            } elseif ($bm_filter === '128') {
+              $where_clauses[] = "(m.bitrate > 0 AND m.bitrate < 180000)";
+            } elseif ($bm_filter === 'unknown') {
+              $where_clauses[] = "(m.bitrate IS NULL OR m.bitrate <= 0)";
+            }
+
+            $where_sql = "WHERE " . implode(' AND ', $where_clauses);
+
+            $sort_map = [
+              'bitrate_desc' => 'ORDER BY COALESCE(m.bitrate, 0) DESC, m.id DESC',
+              'bitrate_asc'  => 'ORDER BY COALESCE(m.bitrate, 0) ASC, m.id DESC',
+              'id_desc'      => 'ORDER BY m.id DESC',
+              'duration_desc'=> 'ORDER BY m.duration DESC',
+              'title_asc'    => 'ORDER BY m.title COLLATE NOCASE ASC'
+            ];
+            $order_sql = $sort_map[$bm_sort] ?? 'ORDER BY COALESCE(m.bitrate, 0) DESC, m.id DESC';
+
+            $stmt_count = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id {$where_sql}");
+            $stmt_count->execute($params);
+            $total_bm_records = (int)$stmt_count->fetchColumn();
+            $total_bm_pages = max(1, ceil($total_bm_records / $bm_limit));
+
+            // Execute query with direct LIMIT & OFFSET concatenation to prevent SQLite PDO parameter offset bugs
+            $stmt_list = $db->prepare("
+              SELECT m.id, m.file, m.title, m.artist, m.album, m.duration, m.bitrate, m.user_id, m.last_modified, u.artist as uploader_name, u.email as uploader_email
+              FROM music m
+              LEFT JOIN users u ON m.user_id = u.id
+              {$where_sql}
+              {$order_sql}
+              LIMIT " . (int)$bm_limit . " OFFSET " . (int)$bm_offset . "
+            ");
+            $stmt_list->execute($params);
+            $tracks = $stmt_list->fetchAll();
+          ?>
+
+          <?php
+            $is_supported = (bool)is_ffmpeg_supported();
+            $is_enabled = is_ffmpeg_enabled();
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Audio Bitrate &amp; Transcoding Studio</h1>
+              <div class="small text-secondary mt-1">Convert audio tracks, compress bitrates to optimize storage, and batch-encode with FFmpeg</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <?php if ($is_supported): ?>
+                <form method="POST" action="?access=admin&page=bitrate_management" class="m-0 d-inline">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="toggle_ffmpeg" value="1">
+                  <?php if ($is_enabled): ?>
+                    <button type="submit" class="admin-btn-pill text-nowrap" style="color: #f87171; border-color: color-mix(in srgb, #ef4444 30%, transparent);" title="Temporarily turn OFF FFmpeg">
+                      <i class="bi bi-power"></i> Turn OFF FFmpeg
+                    </button>
+                  <?php else: ?>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary text-nowrap" title="Turn ON FFmpeg">
+                      <i class="bi bi-power"></i> Turn ON FFmpeg
+                    </button>
+                  <?php endif; ?>
+                </form>
+              <?php else: ?>
+                <button type="button" class="admin-btn-pill text-nowrap" disabled style="opacity: 0.4; cursor: not-allowed; pointer-events: auto; border-color: rgba(255, 255, 255, 0.15);" title="FFmpeg is unsupported on this server (CLI exec is disabled or binary is missing)">
+                  <i class="bi bi-power"></i> Turn ON FFmpeg
+                </button>
+              <?php endif; ?>
+
+              <?php if ($has_ffmpeg): ?>
+                <button type="button" class="admin-btn-pill admin-btn-primary text-nowrap" onclick="openBulkTranscodeModal()">
+                  <i class="bi bi-soundwave"></i> Batch Transcode
+                </button>
+              <?php elseif (!$is_supported): ?>
+                <a href="?access=requirements" class="admin-btn-pill text-nowrap" style="color: #f87171; border-color: color-mix(in srgb, #ef4444 30%, transparent);" title="Check server requirements">
+                  <i class="bi bi-exclamation-triangle-fill"></i> FFmpeg Unsupported
+                </a>
+              <?php else: ?>
+                <span class="admin-badge admin-badge-warning text-nowrap"><i class="bi bi-pause-circle-fill"></i> FFmpeg Disabled</span>
+              <?php endif; ?>
+
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="bitrate_management">
+                <select name="bitrate_filter" class="admin-pill-select" style="min-width: 130px;" onchange="this.form.submit()">
+                  <option value="" <?php echo $bm_filter === '' ? 'selected' : ''; ?>>All Bitrates</option>
+                  <option value="hi_res" <?php echo $bm_filter === 'hi_res' ? 'selected' : ''; ?>>Hi-Res / FLAC (&gt;320k)</option>
+                  <option value="320" <?php echo $bm_filter === '320' ? 'selected' : ''; ?>>320 kbps (HQ)</option>
+                  <option value="256" <?php echo $bm_filter === '256' ? 'selected' : ''; ?>>256 kbps</option>
+                  <option value="192" <?php echo $bm_filter === '192' ? 'selected' : ''; ?>>192 kbps (Standard)</option>
+                  <option value="128" <?php echo $bm_filter === '128' ? 'selected' : ''; ?>>128 kbps (Eco)</option>
+                  <option value="unknown" <?php echo $bm_filter === 'unknown' ? 'selected' : ''; ?>>Unknown / Unset</option>
+                </select>
+                <select name="sort" class="admin-pill-select" style="min-width: 140px;" onchange="this.form.submit()">
+                  <option value="bitrate_desc" <?php echo $bm_sort === 'bitrate_desc' ? 'selected' : ''; ?>>Highest Bitrate</option>
+                  <option value="bitrate_asc" <?php echo $bm_sort === 'bitrate_asc' ? 'selected' : ''; ?>>Lowest Bitrate</option>
+                  <option value="id_desc" <?php echo $bm_sort === 'id_desc' ? 'selected' : ''; ?>>Newest Uploads</option>
+                  <option value="duration_desc" <?php echo $bm_sort === 'duration_desc' ? 'selected' : ''; ?>>Longest Tracks</option>
+                  <option value="title_asc" <?php echo $bm_sort === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
+                </select>
+                <div class="position-relative" style="min-width: 180px; max-width: 240px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Search track, artist..." value="<?php echo htmlspecialchars($bm_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0 d-flex align-items-center justify-content-center" style="width: 20px; height: 20px;"><i class="bi bi-search" style="font-size: 0.8rem;"></i></button>
+                </div>
+                <?php if ($bm_search !== '' || $bm_filter !== ''): ?>
+                  <a href="?access=admin&page=bitrate_management" class="admin-btn-pill" style="height: 38px; padding: 0 0.75rem;" title="Reset filters">Clear</a>
+                <?php endif; ?>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- FFmpeg Warning / Capability Banner -->
+            <?php if (!$is_supported): ?>
+              <div class="alert alert-danger shadow-lg border-danger d-flex align-items-center justify-content-between p-3 mb-4 rounded-4" role="alert">
+                <div class="d-flex align-items-center gap-3">
+                  <i class="bi bi-exclamation-triangle-fill fs-3 text-danger"></i>
+                  <div>
+                    <h6 class="fw-bold m-0 text-white">FFmpeg Engine Unsupported on this Server</h6>
+                    <span class="small text-secondary">Audio transcoding is automatically disabled because your hosting disables CLI <code class="text-danger">exec()</code> or FFmpeg binary is missing. Place a static binary in <code class="text-info">./ffmpeg</code> or check requirements.</span>
+                  </div>
+                </div>
+                <a href="?access=requirements" class="btn btn-sm btn-outline-light rounded-pill px-3 fw-bold flex-shrink-0">Check Requirements</a>
+              </div>
+            <?php elseif (!$is_enabled): ?>
+              <div class="p-3 mb-4 rounded-4 bg-dark bg-opacity-50 border border-warning border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi bi-pause-circle-fill text-warning fs-5"></i>
+                  <span class="text-white small fw-bold">FFmpeg is Manually Turned OFF:</span>
+                  <span class="text-secondary small">Audio transcoding and FFmpeg upload optimizations are currently paused.</span>
+                </div>
+                <span class="admin-badge admin-badge-warning">Turned OFF</span>
+              </div>
+            <?php else: ?>
+              <div class="p-3 mb-4 rounded-4 bg-dark bg-opacity-50 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi bi-check-circle-fill text-success fs-5"></i>
+                  <span class="text-white small fw-bold">FFmpeg Engine Active:</span>
+                  <code class="text-info font-monospace small"><?php echo htmlspecialchars($ffmpeg_bin); ?></code>
+                </div>
+                <span class="admin-badge admin-badge-success">Transcoding &amp; Upload Engine Active</span>
+              </div>
+            <?php endif; ?>
+
+            <!-- Metrics KPI Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Average Bitrate</span>
+                    <span class="text-danger"><i class="bi bi-speedometer2 fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo $avg_bitrate_kbps; ?> <span class="fs-6 text-secondary fw-normal">kbps</span></div>
+                  <small class="text-secondary">Across <?php echo number_format($total_tracks_count); ?> audio library tracks</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Hi-Res &amp; FLAC Tracks</span>
+                    <span class="text-warning"><i class="bi bi-soundwave fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($hi_res_count); ?> <span class="fs-6 text-secondary fw-normal">tracks</span></div>
+                  <small class="text-secondary">&gt;320 kbps or Lossless (Prime for compression)</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Standard Quality</span>
+                    <span class="text-success"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($standard_count); ?> <span class="fs-6 text-secondary fw-normal">tracks</span></div>
+                  <small class="text-secondary">192 kbps to 320 kbps MP3 format</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Compact / Eco Mode</span>
+                    <span class="text-info"><i class="bi bi-hdd-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($compact_count); ?> <span class="fs-6 text-secondary fw-normal">tracks</span></div>
+                  <small class="text-secondary">Low-bandwidth streaming (&lt;192 kbps)</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Bitrate Management Form & Table -->
+            <form method="POST" action="?access=admin&page=bitrate_management" id="admin-bm-form">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <input type="hidden" name="transcode_bulk_songs" value="1">
+              <input type="hidden" name="bulk_target_bitrate" id="admin-bm-bulk-bitrate" value="192">
+
+              <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.bm-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                <?php if ($has_ffmpeg): ?>
+                  <button type="button" class="admin-btn-pill text-info" style="border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="triggerQuickBulkTranscode(128)"><i class="bi bi-soundwave"></i> Convert to 128k</button>
+                  <button type="button" class="admin-btn-pill text-success" style="border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="triggerQuickBulkTranscode(192)"><i class="bi bi-soundwave"></i> Convert to 192k</button>
+                  <button type="button" class="admin-btn-pill text-warning" style="border-color: color-mix(in srgb, #f59e0b 30%, transparent);" onclick="triggerQuickBulkTranscode(256)"><i class="bi bi-soundwave"></i> Convert to 256k</button>
+                  <button type="button" class="admin-btn-pill text-danger" style="border-color: color-mix(in srgb, #ef4444 30%, transparent);" onclick="triggerQuickBulkTranscode(320)"><i class="bi bi-soundwave"></i> Convert to 320k</button>
+                <?php endif; ?>
+              </div>
+
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th style="width: 40px;" class="text-center"></th>
+                        <th style="width: 70px;">ID</th>
+                        <th>Track Details</th>
+                        <th>Format &amp; Ext</th>
+                        <th>Bitrate</th>
+                        <th>Duration</th>
+                        <th>File Size</th>
+                        <th>Uploader</th>
+                        <th class="text-end" style="width: 140px;">Transcode</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($tracks)): ?>
+                        <tr><td colspan="9" class="text-center py-5 text-secondary">No audio tracks match the filter.</td></tr>
+                      <?php else: foreach ($tracks as $t):
+                        $bps = (int)($t['bitrate'] ?? 0);
+                        $kbps = round($bps / 1000);
+                        $raw_file = (string)($t['file'] ?? '');
+                        $ext = strtolower(pathinfo($raw_file, PATHINFO_EXTENSION));
+
+                        // Multi-path resolution (handles relative paths & Windows backslashes)
+                        $actual_file = $raw_file;
+                        if (!file_exists($actual_file)) {
+                          $clean_rel = ltrim(str_replace(['\\', '//'], '/', $raw_file), '/');
+                          if (file_exists(MUSIC_DIR . '/' . $clean_rel)) {
+                            $actual_file = MUSIC_DIR . '/' . $clean_rel;
+                          } else {
+                            $dyn = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($clean_rel))) . '/' . basename(dirname($clean_rel)) . '/' . basename($clean_rel);
+                            if (file_exists($dyn)) {
+                              $actual_file = $dyn;
+                            }
+                          }
+                        }
+                        $size_bytes = file_exists($actual_file) ? @filesize($actual_file) : 0;
+                        $formatted_size = function_exists('format_admin_bytes') ? format_admin_bytes($size_bytes) : number_format($size_bytes / 1048576, 2) . ' MB';
+                      ?>
+                        <tr>
+                          <td class="text-center">
+                            <input type="checkbox" name="song_ids[]" value="<?php echo $t['id']; ?>" class="form-check-input bm-cb" style="cursor:pointer; transform: scale(1.1);">
+                          </td>
+                          <td class="text-secondary font-monospace small">#<?php echo $t['id']; ?></td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <img src="?action=get_image&id=<?php echo $t['id']; ?>&size=small&v=<?php echo $t['last_modified'] ?? 0; ?>" alt="" class="rounded" style="width: 34px; height: 34px; object-fit: cover; background: #000;">
+                              <div>
+                                <div class="fw-bold text-white text-truncate" style="max-width: 220px;" title="<?php echo htmlspecialchars($t['title']); ?>"><?php echo htmlspecialchars($t['title']); ?></div>
+                                <small class="text-secondary text-truncate d-block" style="max-width: 200px; font-size: 0.72rem;"><?php echo htmlspecialchars($t['artist'] ?: 'Unknown'); ?></small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <span class="admin-badge <?php echo in_array($ext, ['flac', 'wav']) ? 'admin-badge-warning' : 'admin-badge-info'; ?>">
+                              <?php echo strtoupper($ext ?: 'MP3'); ?>
+                            </span>
+                          </td>
+                          <td>
+                            <?php if ($kbps > 320 || in_array($ext, ['flac', 'wav'])): ?>
+                              <span class="admin-badge admin-badge-warning font-monospace" style="font-size: 0.76rem;"><?php echo $kbps > 0 ? $kbps . ' kbps' : 'Lossless'; ?></span>
+                            <?php elseif ($kbps >= 256): ?>
+                              <span class="admin-badge admin-badge-success font-monospace" style="font-size: 0.76rem;"><?php echo $kbps; ?> kbps</span>
+                            <?php elseif ($kbps >= 192): ?>
+                              <span class="admin-badge admin-badge-primary font-monospace" style="font-size: 0.76rem;"><?php echo $kbps; ?> kbps</span>
+                            <?php elseif ($kbps > 0): ?>
+                              <span class="admin-badge admin-badge-secondary font-monospace" style="font-size: 0.76rem;"><?php echo $kbps; ?> kbps</span>
+                            <?php else: ?>
+                              <span class="text-secondary small">—</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="font-monospace small text-secondary">
+                            <?php echo gmdate("i:s", (int)$t['duration']); ?>
+                          </td>
+                          <td class="font-monospace small text-white">
+                            <?php echo $size_bytes > 0 ? $formatted_size : '<span class="text-secondary">0 B</span>'; ?>
+                          </td>
+                          <td>
+                            <div class="fw-bold text-white small"><?php echo htmlspecialchars($t['uploader_name'] ?: ('User #' . $t['user_id'])); ?></div>
+                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($t['uploader_email'] ?: ('UID #' . $t['user_id'])); ?></small>
+                          </td>
+                          <td class="text-end">
+                            <?php if ($has_ffmpeg): ?>
+                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;" onclick="openSingleTranscodeModal(<?php echo $t['id']; ?>, '<?php echo addslashes(htmlspecialchars($t['title'])); ?>', <?php echo $kbps; ?>, <?php echo in_array($ext, ['flac', 'wav']) ? 'true' : 'false'; ?>)">
+                                <i class="bi bi-sliders"></i> Convert
+                              </button>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-secondary" title="FFmpeg executable is missing or disabled">Disabled</span>
+                            <?php endif; ?>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Pagination -->
+              <?php if ($total_bm_pages > 1): ?>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($bm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=bitrate_management&search=<?php echo urlencode($bm_search); ?>&bitrate_filter=<?php echo urlencode($bm_filter); ?>&sort=<?php echo urlencode($bm_sort); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($bm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=bitrate_management&search=<?php echo urlencode($bm_search); ?>&bitrate_filter=<?php echo urlencode($bm_filter); ?>&sort=<?php echo urlencode($bm_sort); ?>&p=<?php echo $bm_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $bm_page - 2);
+                    $end_p = min($total_bm_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($bm_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=bitrate_management&search=<?php echo urlencode($bm_search); ?>&bitrate_filter=<?php echo urlencode($bm_filter); ?>&sort=<?php echo urlencode($bm_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($bm_page >= $total_bm_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=bitrate_management&search=<?php echo urlencode($bm_search); ?>&bitrate_filter=<?php echo urlencode($bm_filter); ?>&sort=<?php echo urlencode($bm_sort); ?>&p=<?php echo $bm_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($bm_page >= $total_bm_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=bitrate_management&search=<?php echo urlencode($bm_search); ?>&bitrate_filter=<?php echo urlencode($bm_filter); ?>&sort=<?php echo urlencode($bm_sort); ?>&p=<?php echo $total_bm_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+            </form>
+          </div>
+
+          <!-- Single Track Transcode Modal -->
+          <div class="modal fade" id="singleTranscodeModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-soundwave text-danger me-2"></i> Transcode Audio</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=bitrate_management">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="transcode_single_song" value="1">
+                  <input type="hidden" name="song_id" id="stc-song-id" value="">
+                  <div class="modal-body p-3">
+                    <div class="mb-3">
+                      <span class="text-secondary small fw-bold">TRACK</span>
+                      <div class="text-white fw-bold small text-truncate mt-1" id="stc-song-title">Song Title</div>
+                      <span class="text-info small font-monospace" id="stc-song-current">Current: 320 kbps</span>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">TARGET BITRATE</label>
+                      <select name="target_bitrate" class="admin-pill-select w-100">
+                        <option value="96">96 kbps (Compact)</option>
+                        <option value="128">128 kbps (Eco / Mobile)</option>
+                        <option value="192" selected>192 kbps (Balanced Standard)</option>
+                        <option value="256">256 kbps (High Quality)</option>
+                        <option value="320">320 kbps (Maximum MP3 Quality)</option>
+                      </select>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2" onclick="this.innerHTML='<span class=\'spinner-border spinner-border-sm me-2\'></span>Transcoding...';">
+                      Start Conversion
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function openSingleTranscodeModal(id, title, currentKbps, isLossless = false) {
+              document.getElementById('stc-song-id').value = id;
+              document.getElementById('stc-song-title').textContent = '#' + id + ' ' + title;
+              document.getElementById('stc-song-current').textContent = 'Current: ' + (currentKbps > 0 ? currentKbps + ' kbps' : (isLossless ? 'Lossless' : 'Unknown'));
+
+              const sel = document.querySelector('#singleTranscodeModal select[name="target_bitrate"]');
+              if (sel) {
+                Array.from(sel.options).forEach(opt => {
+                  const val = parseInt(opt.value);
+                  if (!isLossless && currentKbps > 0 && val >= currentKbps) {
+                    opt.disabled = true;
+                    opt.textContent = `${val} kbps (Unavailable: source is ${currentKbps}k)`;
+                  } else {
+                    opt.disabled = false;
+                    opt.textContent = `${val} kbps`;
+                  }
+                });
+                const firstEnabled = Array.from(sel.options).find(opt => !opt.disabled);
+                if (firstEnabled) sel.value = firstEnabled.value;
+              }
+              new bootstrap.Modal(document.getElementById('singleTranscodeModal')).show();
+            }
+
+            function triggerQuickBulkTranscode(kbps) {
+              const checked = document.querySelectorAll('.bm-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one song to transcode.');
+                return;
+              }
+              if (confirm('Transcode ' + checked.length + ' selected track(s) to ' + kbps + ' kbps MP3? Original audio will be re-encoded.')) {
+                document.getElementById('admin-bm-bulk-bitrate').value = kbps;
+                document.getElementById('admin-bm-form').submit();
+              }
+            }
+
+            function openBulkTranscodeModal() {
+              const checked = document.querySelectorAll('.bm-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one song from the table to transcode.');
+                return;
+              }
+              const kbps = prompt("Enter target bitrate in kbps (e.g. 128, 192, 256, 320):", "192");
+              if (kbps && !isNaN(parseInt(kbps))) {
+                triggerQuickBulkTranscode(parseInt(kbps));
+              }
+            }
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'artworks'): ?>
           <?php
             $db = get_db();
@@ -25249,31 +26522,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $allSeries = $db->query("SELECT id, title FROM art_series ORDER BY title COLLATE NOCASE ASC")->fetchAll(PDO::FETCH_KEY_PAIR);
           ?>
 
-          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
               <h1 class="content-title m-0 fw-bold text-white">Artwork &amp; Manga Studio</h1>
               <div class="small text-secondary mt-1">Manage PHPShares image galleries, manga chapters, tag indexing, and series</div>
             </div>
-            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 680px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="artworks">
-              <input type="hidden" name="view" value="<?php echo htmlspecialchars($view_mode); ?>">
-              <select name="type" class="admin-pill-select" onchange="this.form.submit()" title="Filter by Format">
-                <option value="" <?php echo $type_filter === '' ? 'selected' : ''; ?>>All Formats (<?php echo number_format($total_artworks); ?>)</option>
-                <option value="image" <?php echo $type_filter === 'image' ? 'selected' : ''; ?>>Illustrations (<?php echo number_format($total_illustrations); ?>)</option>
-                <option value="manga" <?php echo $type_filter === 'manga' ? 'selected' : ''; ?>>Manga (<?php echo number_format($total_manga_works); ?>)</option>
-              </select>
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()" title="Sort Order">
-                <option value="newest" <?php echo $sort_artworks === 'newest' ? 'selected' : ''; ?>>Newest First</option>
-                <option value="oldest" <?php echo $sort_artworks === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
-                <option value="title_asc" <?php echo $sort_artworks === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
-                <option value="views_desc" <?php echo $sort_artworks === 'views_desc' ? 'selected' : ''; ?>>Most Viewed</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, tag, series, parody..." value="<?php echo htmlspecialchars($search_artworks); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 680px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="artworks">
+                <input type="hidden" name="view" value="<?php echo htmlspecialchars($view_mode); ?>">
+                <select name="type" class="admin-pill-select" onchange="this.form.submit()" title="Filter by Format">
+                  <option value="" <?php echo $type_filter === '' ? 'selected' : ''; ?>>All Formats (<?php echo number_format($total_artworks); ?>)</option>
+                  <option value="image" <?php echo $type_filter === 'image' ? 'selected' : ''; ?>>Illustrations (<?php echo number_format($total_illustrations); ?>)</option>
+                  <option value="manga" <?php echo $type_filter === 'manga' ? 'selected' : ''; ?>>Manga (<?php echo number_format($total_manga_works); ?>)</option>
+                </select>
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()" title="Sort Order">
+                  <option value="newest" <?php echo $sort_artworks === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                  <option value="oldest" <?php echo $sort_artworks === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
+                  <option value="title_asc" <?php echo $sort_artworks === 'title_asc' ? 'selected' : ''; ?>>Title (A-Z)</option>
+                  <option value="views_desc" <?php echo $sort_artworks === 'views_desc' ? 'selected' : ''; ?>>Most Viewed</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search title, tag, series, parody..." value="<?php echo htmlspecialchars($search_artworks); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
 
           <div class="content-area-wrapper">
@@ -25619,25 +26894,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $log_search = trim($_GET['search'] ?? '');
             $log_sort = $_GET['sort'] ?? 'newest';
           ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">Admin Activity Logs</h1>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Admin Activity Logs</h1>
               <div class="small text-secondary mt-1">Audit log of system actions and administrator changes</div>
             </div>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 580px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="logs">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $log_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $log_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-                <option value="admin" <?php echo $log_sort === 'admin' ? 'selected' : ''; ?>>Admin (A-Z)</option>
-                <option value="action" <?php echo $log_sort === 'action' ? 'selected' : ''; ?>>Action (A-Z)</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search admin, action, target..." value="<?php echo htmlspecialchars($log_search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="logs">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $log_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                  <option value="oldest" <?php echo $log_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                  <option value="admin" <?php echo $log_sort === 'admin' ? 'selected' : ''; ?>>Admin (A-Z)</option>
+                  <option value="action" <?php echo $log_sort === 'action' ? 'selected' : ''; ?>>Action (A-Z)</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search admin, action, target..." value="<?php echo htmlspecialchars($log_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
           <div class="content-area-wrapper">
             <div class="admin-card mb-4">
@@ -26353,28 +27630,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             })();
           </script>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
-          <div class="page-header admin-toolbar-wrap">
-            <div>
-              <h1 class="content-title m-0 fw-bold">API Key Management</h1>
+          <?php 
+            $api_sort = $_GET['sort'] ?? 'newest'; 
+            $api_search = $_GET['search'] ?? '';
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">API Key Management</h1>
               <div class="small text-secondary mt-1">Generate, moderate, and track access for developer applications</div>
             </div>
-            <?php 
-              $api_sort = $_GET['sort'] ?? 'newest'; 
-              $api_search = $_GET['search'] ?? '';
-            ?>
-            <form method="GET" action="" class="d-flex w-100 gap-2" style="max-width: 500px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="api">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
-                <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search API tokens, apps..." value="<?php echo htmlspecialchars($api_search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 500px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="api">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                  <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                  <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search API tokens, apps..." value="<?php echo htmlspecialchars($api_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
           <div class="content-area-wrapper">
             <div class="admin-card p-4 mb-4">
@@ -45681,7 +46960,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           ?>
 
           <!-- Drive-Themed User Management Studio Header -->
-          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
               <div class="d-flex align-items-center gap-3">
                 <h1 class="content-title m-0 fw-bold text-white">User Directory &amp; Accounts</h1>
@@ -45692,24 +46971,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
               <div class="small text-secondary mt-1">Manage artist identities, storage quotas, role authorizations, and ban controls</div>
             </div>
-            <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 ms-auto flex-grow-1 justify-content-end" style="max-width: 580px;">
-              <input type="hidden" name="access" value="admin">
-              <input type="hidden" name="page" value="users">
-              <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest Accounts</option>
-                <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
-                <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
-                <option value="reset_req" <?php echo $sort_admin === 'reset_req' ? 'selected' : ''; ?>>Reset Requests</option>
-                <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified Only</option>
-                <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
-                <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned Accounts</option>
-                <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Active Accounts</option>
-              </select>
-              <div class="position-relative flex-grow-1">
-                <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search artist, email, ID..." value="<?php echo htmlspecialchars($search); ?>">
-                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-              </div>
-            </form>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="users">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest Accounts</option>
+                  <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
+                  <option value="pending" <?php echo $sort_admin === 'pending' ? 'selected' : ''; ?>>Pending Uploads</option>
+                  <option value="reset_req" <?php echo $sort_admin === 'reset_req' ? 'selected' : ''; ?>>Reset Requests</option>
+                  <option value="verified" <?php echo $sort_admin === 'verified' ? 'selected' : ''; ?>>Verified Only</option>
+                  <option value="unverified" <?php echo $sort_admin === 'unverified' ? 'selected' : ''; ?>>Unverified</option>
+                  <option value="banned" <?php echo $sort_admin === 'banned' ? 'selected' : ''; ?>>Banned Accounts</option>
+                  <option value="not_banned" <?php echo $sort_admin === 'not_banned' ? 'selected' : ''; ?>>Active Accounts</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search artist, email, ID..." value="<?php echo htmlspecialchars($search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
           </div>
 
           <div class="content-area-wrapper">
@@ -46097,6 +47378,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="songs" id="perm-songs">
                     <label class="form-check-label text-white fw-medium" for="perm-songs">Song Management</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="bitrate_management" id="perm-bitrate">
+                    <label class="form-check-label text-white fw-medium" for="perm-bitrate">Bitrate Management</label>
                   </div>
                 </div>
                 <div class="col-12 col-md-6">
@@ -46505,6 +47792,9 @@ try {
                 <input type="password" id="setup-password" class="form-control" required minlength="6" placeholder="Minimum 6 characters">
               </div>
               <button type="submit" id="setup-btn" class="btn btn-danger w-100 fw-bold py-3 rounded-pill shadow-lg">Initialize Server</button>
+              <div class="text-center mt-3">
+                <a href="./?access=requirements" target="_blank" class="btn btn-outline-secondary w-100 py-2 rounded-pill text-white fw-bold small" style="border-color: #333;"><i class="bi bi-shield-check text-info me-1"></i> Check Server Requirements</a>
+              </div>
             </form>
           </div>
           <script>
@@ -46827,6 +48117,12 @@ function ensure_all_user_drives($db) {
 
 function init_db($db) {
   ensure_all_user_drives($db);
+  $db->exec("
+    CREATE TABLE IF NOT EXISTS site_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  ");
   // 1. Core Analytics & Daily Visitor Schema
   $db->exec("
     CREATE TABLE IF NOT EXISTS daily_visitor_stats (
@@ -48726,7 +50022,12 @@ HTML;
           }
           $user['uploads_remaining'] = max(0, DAILY_UPLOAD_LIMIT - $uploads_today);
           $user['profile_picture_url'] = "?action=get_profile_picture&id=" . $user['id'] . "&v=" . time();
-          send_json(['status' => 'loggedin', 'user' => $user, 'upload_limit' => get_upload_limit()]);
+          send_json([
+            'status' => 'loggedin',
+            'user' => $user,
+            'upload_limit' => get_upload_limit(),
+            'ffmpeg_enabled' => (bool)is_ffmpeg_enabled()
+          ]);
         } else {
           session_destroy();
           send_json(['status' => 'loggedout']);
@@ -49530,6 +50831,37 @@ HTML;
           }
 
           $raw_image_data = isset($info['comments']['picture'][0]['data']) ? $info['comments']['picture'][0]['data'] : null;
+
+          // FFmpeg Upload Enhancement Engine (Duration, Bitrate & Cover Extraction Fallback)
+          $ffmpeg_bin = get_ffmpeg_binary();
+          if ($ffmpeg_bin && file_exists($filePath)) {
+            $escFf = escapeshellarg($ffmpeg_bin);
+            $escIn = escapeshellarg($filePath);
+
+            // 1. Precise Duration & Bitrate Probe Fallback
+            if (empty($duration) || empty($bitrate)) {
+              @exec("{$escFf} -i {$escIn} 2>&1", $ff_probe_out);
+              $probe_text = implode("\n", (array)$ff_probe_out);
+              if (empty($duration) && preg_match('/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/', $probe_text, $d_match)) {
+                $duration = (int)($d_match[1] * 3600 + $d_match[2] * 60 + (float)$d_match[3]);
+              }
+              if (empty($bitrate) && preg_match('/bitrate:\s*(\d+)\s*kb\/s/', $probe_text, $b_match)) {
+                $bitrate = (int)$b_match[1] * 1000;
+              }
+            }
+
+            // 2. High-Fidelity Embedded Artwork Extraction via FFmpeg
+            if (!$raw_image_data) {
+              $tmp_cov = MUSIC_DIR . '/.tmp_uploads/cov_up_' . uniqid() . '.jpg';
+              $escOut = escapeshellarg($tmp_cov);
+              @exec("{$escFf} -y -i {$escIn} -an -vcodec copy {$escOut} 2>&1", $cov_o, $cov_r);
+              if ($cov_r === 0 && file_exists($tmp_cov) && filesize($tmp_cov) > 0) {
+                $raw_image_data = @file_get_contents($tmp_cov);
+                @unlink($tmp_cov);
+              }
+            }
+          }
+
           $webp_image_data = process_image_to_webp($raw_image_data);
 
           $filePath = str_replace('\\', '/', $filePath);
@@ -49540,6 +50872,47 @@ HTML;
           $stmt = $db->prepare("INSERT INTO music (user_id, file, title, artist, album, genre, year, duration, bitrate, image, last_modified, is_private, is_collaborative, replaygain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
           $stmt->execute([$user_id, $filePath, $title, $artist, $album, $genre, $year, $duration, $bitrate, $webp_image_data, $actual_mtime, $is_private, $is_collaborative, $replaygain]);
           $new_song_id = $db->lastInsertId();
+
+          // Automatic Multi-Bitrate Transcoding via FFmpeg (Downsample only; never upscale lower bitrates)
+          if ($ffmpeg_bin && is_ffmpeg_enabled() && file_exists($filePath)) {
+            $source_kbps = (int)round(($bitrate ?: 0) / 1000);
+            $is_lossless = in_array($ext, ['flac', 'wav']);
+
+            // Only transcode to tiers strictly lower than the source audio
+            $target_tiers = [96, 128, 192, 256, 320];
+            $eligible_tiers = [];
+            foreach ($target_tiers as $tier) {
+              if ($is_lossless || ($source_kbps > 0 && $tier < $source_kbps)) {
+                $eligible_tiers[] = $tier;
+              }
+            }
+
+            if (!empty($eligible_tiers)) {
+              $transcode_base = MUSIC_DIR . '/transcode/' . $new_song_id;
+              if (!is_dir($transcode_base)) {
+                @mkdir($transcode_base, 0755, true);
+              }
+
+              $escFf = escapeshellarg($ffmpeg_bin);
+              $escIn = escapeshellarg($filePath);
+              $song_filename = pathinfo($filePath, PATHINFO_FILENAME) . '.mp3';
+
+              foreach ($eligible_tiers as $kbps) {
+                $bitrate_dir = $transcode_base . '/' . $kbps . 'kbps';
+                if (!is_dir($bitrate_dir)) {
+                  @mkdir($bitrate_dir, 0755, true);
+                }
+                $out_path = $bitrate_dir . '/' . $song_filename;
+                $direct_alias = $transcode_base . '/' . $kbps . 'kbps.mp3';
+                $escOut = escapeshellarg($out_path);
+
+                @exec("{$escFf} -y -i {$escIn} -codec:a libmp3lame -b:a {$kbps}k -map_metadata 0 -threads 2 {$escOut} 2>&1", $tc_out, $tc_ret);
+                if ($tc_ret === 0 && file_exists($out_path)) {
+                  @copy($out_path, $direct_alias);
+                }
+              }
+            }
+          }
 
           if ($is_private == 0) {
             $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, ?)")->execute([$user_id, 'uploaded a new song', $title]);
@@ -49607,6 +50980,8 @@ HTML;
         if ($file_path && file_exists($file_path)) {
           @unlink($file_path);
         }
+        // Remove transcoded versions folder for this song
+        delete_directory_recursive(MUSIC_DIR . '/transcode/' . $song_id);
         record_activity_log("Deleted song ID #{$song_id}", null, $user_id);
         send_json(['status' => 'success', 'message' => 'Song deleted.']);
       } else {
@@ -49617,16 +50992,13 @@ HTML;
 
     case 'download_song':
       $song_id = intval($_GET['id'] ?? 0);
+      $requested_bitrate = isset($_GET['bitrate']) ? (int)$_GET['bitrate'] : 0;
       $stmt = $db->prepare("SELECT file, title, artist FROM music WHERE id = ?");
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
       if ($song) {
-        $file_path = $song['file'];
-        if (!file_exists($file_path)) {
-          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
-          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
-        }
+        $file_path = resolve_song_file_by_bitrate($song_id, $song['file'], $requested_bitrate);
 
         if (file_exists($file_path)) {
           while (ob_get_level() > 0) { @ob_end_clean(); }
@@ -54744,17 +56116,13 @@ HTML;
 
     case 'get_stream':
       $id = intval($_GET['id'] ?? 0);
+      $requested_bitrate = isset($_GET['bitrate']) ? (int)$_GET['bitrate'] : 0;
       $stmt = $db->prepare("SELECT file, user_id, is_private, artist FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $song_stream = $stmt->fetch();
       
       if ($song_stream) {
-        $file_path = $song_stream['file'];
-        // Dynamic path resolution to prevent breaking if server/folder changes
-        if (!file_exists($file_path)) {
-          $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
-          if (file_exists($dynamic_path)) $file_path = $dynamic_path;
-        }
+        $file_path = resolve_song_file_by_bitrate($id, $song_stream['file'], $requested_bitrate);
 
         if (file_exists($file_path)) {
           $is_collab = false;
@@ -68848,6 +70216,18 @@ function perform_cover_scan($db) {
               <div class="tab-pane fade phpmusic-settings-pane" id="settings-audio" role="tabpanel">
                 <div class="phpmusic-settings-section">
                   <h6 class="phpmusic-settings-section-title"><i class="bi bi-speaker-fill text-info"></i> Playback Controls</h6>
+                  <div class="mb-4 mt-3 d-none" id="setting-bitrate-group">
+                    <label class="form-label text-secondary small fw-bold mb-1">STREAMING &amp; DOWNLOAD BITRATE</label>
+                    <select class="form-select bg-dark text-white border-secondary" id="preferred-bitrate-select">
+                      <option value="auto">Auto / Highest Available</option>
+                      <option value="320">320 kbps (HQ)</option>
+                      <option value="256">256 kbps</option>
+                      <option value="192">192 kbps (Standard)</option>
+                      <option value="128">128 kbps (Eco)</option>
+                      <option value="96">96 kbps (Compact)</option>
+                    </select>
+                    <small class="text-secondary d-block mt-1">Audio streams and downloads will automatically use this bitrate tier when available.</small>
+                  </div>
                   <div class="mb-4 mt-3">
                     <label class="form-label d-flex justify-content-between text-secondary fw-bold small">
                       <span>GLOBAL VOLUME MULTIPLIER</span>
@@ -76360,6 +77740,7 @@ SOFTWARE.</div>
         let globalVolumeMultiplier = 1.0;
         let globalEQBands = [0, 0, 0, 0, 0];
         let crossfadeDuration = 3.0;
+        let preferredBitrate = "auto";
         let settingsSaveTimeout = null;
     
         const EQ_PRESETS = {
@@ -76381,6 +77762,7 @@ SOFTWARE.</div>
                 isEQEnabled: isEQEnabled,
                 isSpatialEnabled: isSpatialEnabled,
                 showNSFW: showNSFW,
+                preferredBitrate: preferredBitrate,
                 globalVolumeMultiplier: parseFloat(globalVolumeMultiplier),
                 globalEQBands: globalEQBands.map((b) => parseFloat(b)),
                 crossfadeDuration: parseFloat(crossfadeDuration),
@@ -76587,6 +77969,14 @@ SOFTWARE.</div>
             crossfadeDuration + "s";
           saveGlobalAudioSettings();
         });
+
+        const bitrateSelectEl = document.getElementById("preferred-bitrate-select");
+        if (bitrateSelectEl) {
+          bitrateSelectEl.addEventListener("change", (e) => {
+            preferredBitrate = e.target.value;
+            saveGlobalAudioSettings();
+          });
+        }
     
         document
           .getElementById("eq-preset-select")
@@ -90665,7 +92055,8 @@ SOFTWARE.</div>
           if (opfsUrl) {
             audio.src = opfsUrl;
           } else {
-            audio.src = currentSong.stream_url;
+            const bitrateQuery = (preferredBitrate && preferredBitrate !== 'auto') ? `&bitrate=${encodeURIComponent(preferredBitrate)}` : '';
+            audio.src = (currentSong.stream_url || `?action=get_stream&id=${currentSong.id}`) + bitrateQuery;
           }
           audio.load();
           audio.play().catch((e) => {
@@ -97136,7 +98527,8 @@ SOFTWARE.</div>
               }
               break;
             case "download_song":
-              window.location.href = `?action=download_song&id=${id}`;
+              const dlBitrateParam = (preferredBitrate && preferredBitrate !== 'auto') ? `&bitrate=${encodeURIComponent(preferredBitrate)}` : '';
+              window.location.href = `?action=download_song&id=${id}${dlBitrateParam}`;
               break;
             case "download_cover":
               window.location.href = `?action=download_cover&id=${id}`;
@@ -102374,9 +103766,22 @@ SOFTWARE.</div>
                 isSpatialEnabled =
                   s.isSpatialEnabled !== undefined ? s.isSpatialEnabled : false;
                 showNSFW = s.showNSFW !== undefined ? s.showNSFW : false;
-                
+                preferredBitrate = s.preferredBitrate || "auto";
+
                 const nsfwToggleEl = document.getElementById("toggle-nsfw-arts");
                 if (nsfwToggleEl) nsfwToggleEl.checked = showNSFW;
+
+                const bitrateSel = document.getElementById("preferred-bitrate-select");
+                if (bitrateSel) bitrateSel.value = preferredBitrate;
+
+                const bitrateGroup = document.getElementById("setting-bitrate-group");
+                if (bitrateGroup) {
+                  bitrateGroup.classList.toggle("d-none", !data.ffmpeg_enabled);
+                }
+                if (!data.ffmpeg_enabled) {
+                  preferredBitrate = "auto";
+                }
+
                 globalVolumeMultiplier =
                   s.globalVolumeMultiplier !== undefined
                     ? parseFloat(s.globalVolumeMultiplier)
