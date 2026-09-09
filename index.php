@@ -803,13 +803,35 @@ function get_ffmpeg_binary($auto_download = false) {
 }
 
 function resolve_song_file_by_bitrate($song_id, $original_file, $preferred_kbps = null) {
-  $file_path = $original_file;
+  $clean_orig = str_replace('\\', '/', (string)$original_file);
+  $file_path = $clean_orig;
+
+  // 1. Multi-candidate file path resolution
   if (!file_exists($file_path)) {
-    $dynamic_path = MUSIC_DIR . '/uploads/' . basename(dirname(dirname($file_path))) . '/' . basename(dirname($file_path)) . '/' . basename($file_path);
-    if (file_exists($dynamic_path)) $file_path = $dynamic_path;
+    $base_fn = basename($clean_orig);
+    $candidates = [
+      MUSIC_DIR . '/' . ltrim($clean_orig, '/'),
+      MUSIC_DIR . '/uploads/' . basename(dirname(dirname($clean_orig))) . '/' . basename(dirname($clean_orig)) . '/' . $base_fn,
+      MUSIC_DIR . '/uploads/' . basename(dirname($clean_orig)) . '/' . $base_fn,
+      MUSIC_DIR . '/uploads/' . $base_fn
+    ];
+
+    foreach ($candidates as $cand) {
+      if (file_exists($cand) && is_file($cand)) {
+        $file_path = $cand;
+        break;
+      }
+    }
   }
 
-  // If FFmpeg is disabled or no transcoding directory exists, return original file
+  $target_kbps = (int)$preferred_kbps;
+
+  // If no specific bitrate was requested (>0) and the original file exists, ALWAYS serve the original file
+  if ($target_kbps <= 0 && file_exists($file_path)) {
+    return $file_path;
+  }
+
+  // If FFmpeg is disabled or no transcoding directory exists, return verified original file
   if (!is_ffmpeg_enabled()) {
     return $file_path;
   }
@@ -820,29 +842,30 @@ function resolve_song_file_by_bitrate($song_id, $original_file, $preferred_kbps 
   }
 
   $tiers = [320, 256, 192, 128, 96];
-  $target_kbps = (int)$preferred_kbps;
 
-  // 1. Try exact requested bitrate
+  // Specific bitrate requested
   if ($target_kbps > 0) {
     $direct_file = $transcode_base . '/' . $target_kbps . 'kbps.mp3';
     if (file_exists($direct_file) && filesize($direct_file) > 0) {
       return $direct_file;
     }
     $sub_pattern = glob($transcode_base . '/' . $target_kbps . 'kbps/*.mp3', GLOB_NOSORT);
-    if (!empty($sub_pattern) && file_exists($sub_pattern[0])) {
+    if (!empty($sub_pattern) && file_exists($sub_pattern[0]) && filesize($sub_pattern[0]) > 0) {
       return $sub_pattern[0];
     }
   }
 
-  // 2. Fallback: Use the highest bitrate variant available
-  foreach ($tiers as $tier) {
-    $tier_file = $transcode_base . '/' . $tier . 'kbps.mp3';
-    if (file_exists($tier_file) && filesize($tier_file) > 0) {
-      return $tier_file;
-    }
-    $sub_pattern = glob($transcode_base . '/' . $tier . 'kbps/*.mp3', GLOB_NOSORT);
-    if (!empty($sub_pattern) && file_exists($sub_pattern[0])) {
-      return $sub_pattern[0];
+  // Fallback: If original file does not exist on disk, use highest valid transcode
+  if (!file_exists($file_path)) {
+    foreach ($tiers as $tier) {
+      $tier_file = $transcode_base . '/' . $tier . 'kbps.mp3';
+      if (file_exists($tier_file) && filesize($tier_file) > 0) {
+        return $tier_file;
+      }
+      $sub_pattern = glob($transcode_base . '/' . $tier . 'kbps/*.mp3', GLOB_NOSORT);
+      if (!empty($sub_pattern) && file_exists($sub_pattern[0]) && filesize($sub_pattern[0]) > 0) {
+        return $sub_pattern[0];
+      }
     }
   }
 
@@ -1403,7 +1426,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.1');
+define('APP_VERSION', '11.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -10774,13 +10797,15 @@ HTACCESS;
             }
     
             this.isProcessing = false;
-            const allDone = this.queue.every(i => i.status === 'completed');
-            if (allDone) {
-              const count = this.queue.length;
-              this.title.innerText = `${count} upload(s) complete`;
+            const completedCount = this.queue.filter(i => i.status === 'completed').length;
+            const totalCount = this.queue.length;
+
+            if (totalCount > 0) {
+              this.title.innerHTML = `<span style="color:#4ade80;">✓ ${completedCount} of ${totalCount} upload(s) complete</span>`;
               this.bar.style.width = '100%';
-              // Clear queue on completion to prevent duplicate processing on subsequent uploads
-              this.queue = [];
+              this.dock.classList.remove('minimized');
+              this.dock.classList.add('active');
+              this.renderDock();
               if (window.app) app.refresh();
             }
           }
@@ -29677,14 +29702,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // Ensure quota_limit column exists in api_keys table
+    try {
+      $db_chk = get_db();
+      $api_cols = $db_chk->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+      if (!in_array('quota_limit', $api_cols)) {
+        $db_chk->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
+      }
+    } catch (Exception $e) {}
+
     if (isset($_POST['generate_api_key'])) {
-       $name = htmlspecialchars(trim($_POST['key_name'] ?? 'Unnamed App'));
-       $token = 'pk_' . bin2hex(random_bytes(16));
-       $expires_at = date('Y-m-d H:i:s', strtotime('+1 month'));
-       get_db()->prepare("INSERT INTO api_keys (name, token, reset_month, user_id, status, expires_at) VALUES (?, ?, ?, ?, 'active', ?)")->execute([$name, $token, date('Y-m'), $_SESSION['admin_id'] ?? 0, $expires_at]);
-       log_admin_activity(get_db(), $_SESSION['admin_email'], "Generated API Key: $name", 0);
-       $_SESSION['admin_flash_msg'] = "Custom API Key generated successfully! Expires in 1 month.";
-       header("Location: ?access=admin&page=api"); exit;
+      $name = htmlspecialchars(trim($_POST['key_name'] ?? 'Unnamed App'));
+      $quota_limit = isset($_POST['quota_limit']) ? max(0, (int)$_POST['quota_limit']) : 1000;
+      $token = 'pk_' . bin2hex(random_bytes(16));
+      $expires_at = date('Y-m-d H:i:s', strtotime('+1 month'));
+      get_db()->prepare("INSERT INTO api_keys (name, token, reset_month, user_id, status, expires_at, quota_limit) VALUES (?, ?, ?, ?, 'active', ?, ?)")->execute([$name, $token, date('Y-m'), $_SESSION['admin_id'] ?? 0, $expires_at, $quota_limit]);
+      $quota_label = $quota_limit === 0 ? "Unlimited" : number_format($quota_limit) . " req/mo";
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Generated API Key: $name (Quota: $quota_label)", 0);
+      $_SESSION['admin_flash_msg'] = "API Key generated with {$quota_label} quota! Expires in 1 month.";
+      header("Location: ?access=admin&page=api"); exit;
+    }
+
+    if (isset($_POST['update_api_quota']) && isset($_POST['key_id'])) {
+      $key_id = (int)$_POST['key_id'];
+      $quota_limit = isset($_POST['quota_limit']) ? max(0, (int)$_POST['quota_limit']) : 1000;
+      get_db()->prepare("UPDATE api_keys SET quota_limit = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$quota_limit, $key_id]);
+      $quota_label = $quota_limit === 0 ? "Unlimited" : number_format($quota_limit) . " req/mo";
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Updated API Key ID #{$key_id} quota to {$quota_label}", 0);
+      $_SESSION['admin_flash_msg'] = "API Key #{$key_id} quota limit updated to {$quota_label}.";
+      header("Location: ?access=admin&page=api"); exit;
     }
     if (isset($_POST['verify_api_key'])) {
       $expires_at = date('Y-m-d H:i:s', strtotime('+1 month'));
@@ -29721,7 +29767,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
-    // ADVANCED SMART SYSTEM UPDATE SUITE CONTROLLER
+    // SYSTEM UPDATE SUITE CONTROLLER
     if (isset($_POST['apply_system_update'])) {
       $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
       $endpoints = [
@@ -30038,7 +30084,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'drive' => 'Drive Manager',
     'dbmanager' => 'PHPDBManager',
     'ide' => 'PHPEditor (IDE)',
-    'api' => 'API Keys',
+    'api' => 'API Keys & Analytics',
+    'playground' => 'Interactive API Playground',
     'update' => 'System & Codebase Update'
   ];
   $active_page_key = $_GET['page'] ?? 'users';
@@ -35363,40 +35410,164 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </script>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
           <?php 
+            $db = get_db();
             $api_sort = $_GET['sort'] ?? 'newest'; 
             $api_search = $_GET['search'] ?? '';
+
+            // 1. Compute Real-Time API Key Analytics & Quotas
+            $total_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys")->fetchColumn() ?: 0);
+            $active_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys WHERE status = 'active'")->fetchColumn() ?: 0);
+            $pending_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys WHERE status = 'pending'")->fetchColumn() ?: 0);
+            $banned_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys WHERE status = 'banned'")->fetchColumn() ?: 0);
+            $total_api_requests = (int)($db->query("SELECT SUM(uses) FROM api_keys")->fetchColumn() ?: 0);
+            $current_month = date('Y-m');
+            $monthly_requests = (int)($db->query("SELECT SUM(uses) FROM api_keys WHERE reset_month = '{$current_month}'")->fetchColumn() ?: 0);
+
+            // 2. Fetch Top 5 Active Consumer Applications for Charts
+            $stmt_top_apps = $db->query("
+              SELECT name, uses, status 
+              FROM api_keys 
+              ORDER BY uses DESC, id DESC 
+              LIMIT 5
+            ")->fetchAll();
+
+            $top_app_names = [];
+            $top_app_uses = [];
+            foreach ($stmt_top_apps as $top_app) {
+              $top_app_names[] = $top_app['name'] ?: 'App #' . rand(100, 999);
+              $top_app_uses[] = (int)$top_app['uses'];
+            }
           ?>
           <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
-              <h1 class="content-title m-0 fw-bold text-white">API Key Management</h1>
-              <div class="small text-secondary mt-1">Generate, moderate, and track access for developer applications</div>
+              <h1 class="content-title m-0 fw-bold text-white">API Key Management &amp; Analytics</h1>
+              <div class="small text-secondary mt-1">Generate tokens, track request consumption metrics, and test live endpoints</div>
             </div>
             <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
-              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 500px;">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end" style="max-width: 500px;">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="api">
                 <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                  <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
-                  <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest</option>
+                  <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                  <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
                   <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
                 </select>
                 <div class="position-relative flex-grow-1" style="min-width: 180px;">
-                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search API tokens, apps..." value="<?php echo htmlspecialchars($api_search); ?>">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search tokens, apps, users..." value="<?php echo htmlspecialchars($api_search); ?>">
                   <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
                 </div>
               </form>
             </div>
           </div>
+
           <div class="content-area-wrapper">
+            <!-- Analytics KPI Metric Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Tokens</span>
+                    <span class="text-danger"><i class="bi bi-key-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_keys_count); ?></div>
+                  <small class="text-secondary"><?php echo number_format($active_keys_count); ?> active &bull; <?php echo number_format($pending_keys_count); ?> pending</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Monthly Traffic</span>
+                    <span class="text-info"><i class="bi bi-arrow-down-up fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($monthly_requests); ?> <span class="fs-6 text-secondary fw-normal">calls</span></div>
+                  <small class="text-secondary">Requests logged in <?php echo date('F Y'); ?></small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">All-Time Requests</span>
+                    <span class="text-success"><i class="bi bi-activity fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_api_requests); ?></div>
+                  <small class="text-secondary">Cumulative developer API calls</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Quota Limit</span>
+                    <span class="text-warning"><i class="bi bi-speedometer2 fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white">1,000 <span class="fs-6 text-secondary fw-normal">req/mo</span></div>
+                  <small class="text-secondary">Auto-resets on the 1st of each month</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Analytics Visual Charts Row -->
+            <div class="row g-4 mb-4">
+              <div class="col-12 col-xl-4">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-pie-chart-fill text-danger"></i> Key Status Distribution
+                  </h5>
+                  <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
+                    <?php if ($total_keys_count === 0): ?>
+                      <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No API Keys Generated</div>
+                    <?php else: ?>
+                      <canvas id="apiKeyStatusChart"></canvas>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-xl-8">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-bar-chart-fill text-info"></i> Top Request Consumer Applications
+                    </h5>
+                    <span class="admin-badge admin-badge-info">Monthly Consumption</span>
+                  </div>
+                  <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
+                    <?php if (empty($top_app_uses) || array_sum($top_app_uses) === 0): ?>
+                      <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No usage activity recorded this month</div>
+                    <?php else: ?>
+                      <canvas id="apiTopConsumersChart"></canvas>
+                    <?php endif; ?>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Create API Key Banner with Custom Quota Input -->
             <div class="admin-card p-4 mb-4">
               <div class="d-flex align-items-center gap-2 mb-1">
                 <i class="bi bi-plus-circle-fill text-danger fs-5"></i>
                 <h5 class="text-white fw-bold fs-6 m-0">Generate Custom API Key</h5>
               </div>
-              <p class="text-secondary small mb-3">Custom API keys allow 1,000 monthly requests to developer and streaming endpoints.</p>
-              <form method="POST" action="?access=admin&page=api" class="d-flex gap-2">
+              <p class="text-secondary small mb-3">Set custom monthly quota limits or grant unrestricted access to endpoints.</p>
+              <form method="POST" action="?access=admin&page=api" class="d-flex gap-2 flex-wrap align-items-center">
                 <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                <input type="text" name="key_name" class="admin-pill-input flex-grow-1" placeholder="Application Name (e.g. Discord Bot, Native App)" required>
+                <input type="text" name="key_name" class="admin-pill-input flex-grow-1" placeholder="Application Name (e.g. Discord Bot, Mobile App)" required style="min-width: 220px;">
+                
+                <div class="d-flex align-items-center gap-2">
+                  <span class="text-secondary small fw-bold text-nowrap">Monthly Quota:</span>
+                  <select name="quota_limit" class="admin-pill-select" style="min-width: 140px;">
+                    <option value="500">500 req/mo</option>
+                    <option value="1000" selected>1,000 req/mo</option>
+                    <option value="5000">5,000 req/mo</option>
+                    <option value="10000">10,000 req/mo</option>
+                    <option value="50000">50,000 req/mo</option>
+                    <option value="100000">100,000 req/mo</option>
+                    <option value="0">Unlimited (No Cap)</option>
+                  </select>
+                </div>
+                
                 <button type="submit" name="generate_api_key" class="admin-btn-pill admin-btn-primary text-nowrap">Generate Key</button>
               </form>
             </div>
@@ -35405,7 +35576,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="table-responsive">
                 <table class="admin-table align-middle">
                   <thead class="border-bottom border-secondary">
-                    <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Uses/Expires</th><th class="py-3 px-4 text-end">Actions</th></tr>
+                    <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Quota &amp; Usage</th><th class="py-3 px-4 text-end">Actions</th></tr>
                   </thead>
                   <tbody>
                     <?php
@@ -35415,8 +35586,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       $db = get_db();
                       
                       try {
-                        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, quota_limit INTEGER DEFAULT 1000);");
                         $api_cols_admin = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+                        if (!in_array('quota_limit', $api_cols_admin)) {
+                          $db->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
+                        }
                         if (!in_array('updated_at', $api_cols_admin)) { 
                           $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
                           $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
@@ -35453,9 +35627,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       
                       if (empty($keys)): ?>
                         <tr><td colspan="5" class="text-center py-4 text-secondary">No API keys found.</td></tr>
-                    <?php else: foreach ($keys as $k): ?>
+                    <?php else: foreach ($keys as $k):
+                      $k_quota = isset($k['quota_limit']) ? (int)$k['quota_limit'] : 1000;
+                      $is_unlim_key = ($k_quota === 0);
+                      $k_pct = $is_unlim_key ? 0 : min(100, round(($k['uses'] / max(1, $k_quota)) * 100));
+                    ?>
                     <tr>
-                      <td class="py-3 px-4 fw-medium text-white"><?php echo htmlspecialchars($k['name']); ?></td>
+                      <td class="py-3 px-4 fw-medium text-white">
+                        <div><?php echo htmlspecialchars($k['name']); ?></div>
+                        <small class="text-secondary font-monospace" style="font-size: 0.7rem;">ID #<?php echo $k['id']; ?></small>
+                      </td>
                       <td class="py-3 px-4">
                         <div class="small text-secondary mb-1"><?php echo $k['user_id'] == 0 ? 'System Admin' : htmlspecialchars($k['user_email'] ?? 'User ID: '.$k['user_id']); ?></div>
                         <?php if ($k['status'] === 'pending'): ?>
@@ -35477,29 +35658,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         <?php endif; ?>
                       </td>
                       <td class="py-3 px-4 text-secondary small">
-                        <div class="mb-1">
-                          <div class="progress" style="height: 6px; width: 80px; display: inline-flex; background: #000; margin-right: 6px;">
-                            <div class="progress-bar bg-warning" role="progressbar" style="width: <?php echo ($k['uses']/1000)*100; ?>%;"></div>
-                          </div>
-                          <?php echo $k['uses']; ?> / 1000
+                        <div class="mb-1 d-flex align-items-center gap-2">
+                          <?php if ($is_unlim_key): ?>
+                            <span class="badge bg-success bg-opacity-25 text-success border border-success"><i class="bi bi-infinity me-1"></i> Unlimited</span>
+                            <span class="text-white fw-bold font-monospace"><?php echo number_format($k['uses']); ?> calls</span>
+                          <?php else: ?>
+                            <div class="progress" style="height: 6px; width: 70px; background: #000;">
+                              <div class="progress-bar <?php echo $k_pct > 80 ? 'bg-danger' : ($k_pct > 50 ? 'bg-warning' : 'bg-info'); ?>" role="progressbar" style="width: <?php echo $k_pct; ?>%;"></div>
+                            </div>
+                            <span class="text-white fw-bold font-monospace"><?php echo number_format($k['uses']); ?> / <?php echo number_format($k_quota); ?></span>
+                          <?php endif; ?>
                         </div>
                         <div>Exp: <?php echo $k['expires_at'] ? date('Y-m-d', strtotime($k['expires_at'])) : 'Never'; ?></div>
                       </td>
                       <td class="py-3 px-4 text-end">
-                        <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2 justify-content-end">
-                          <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                          <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
+                        <div class="d-flex gap-2 justify-content-end align-items-center flex-wrap">
+                          <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.65rem; font-size: 0.75rem;" onclick="openEditApiQuotaModal(<?php echo $k['id']; ?>, '<?php echo addslashes(htmlspecialchars($k['name'])); ?>', <?php echo $k_quota; ?>)">
+                            <i class="bi bi-sliders"></i> Quota
+                          </button>
                           
-                          <?php if ($k['status'] === 'pending'): ?>
-                            <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
-                          <?php elseif ($k['status'] === 'active'): ?>
-                            <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
-                          <?php elseif ($k['status'] === 'banned'): ?>
-                            <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
-                          <?php endif; ?>
-                          
-                          <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
-                        </form>
+                          <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2">
+                            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                            <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
+                            
+                            <?php if ($k['status'] === 'pending'): ?>
+                              <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
+                            <?php elseif ($k['status'] === 'active'): ?>
+                              <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
+                            <?php elseif ($k['status'] === 'banned'): ?>
+                              <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
+                            <?php endif; ?>
+                            
+                            <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
+                          </form>
+                        </div>
                       </td>
                     </tr>
                     <?php endforeach; endif; ?>
@@ -35507,6 +35699,69 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </table>
               </div>
             </div>
+
+            <!-- Edit API Key Quota Limit Modal -->
+            <div class="modal fade" id="editApiQuotaModal" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered modal-sm">
+                <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                  <div class="modal-header border-0 pb-1">
+                    <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-sliders text-warning me-2"></i> Custom API Quota</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  </div>
+                  <form method="POST" action="?access=admin&page=api">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="update_api_quota" value="1">
+                    <input type="hidden" name="key_id" id="edit-quota-key-id" value="">
+                    <div class="modal-body p-3">
+                      <div class="mb-3">
+                        <span class="text-secondary small fw-bold">APP NAME</span>
+                        <div class="text-white fw-bold small text-truncate mt-1" id="edit-quota-key-name">Application</div>
+                      </div>
+                      <div class="mb-3">
+                        <label class="form-label text-secondary small fw-bold mb-1">MONTHLY REQUEST QUOTA</label>
+                        <select name="quota_limit" id="edit-quota-select" class="admin-pill-select w-100 mb-2" onchange="if(this.value==='custom'){ document.getElementById('custom-quota-input-box').style.display='block'; } else { document.getElementById('custom-quota-input-box').style.display='none'; }">
+                          <option value="500">500 req/month</option>
+                          <option value="1000">1,000 req/month (Default)</option>
+                          <option value="5000">5,000 req/month</option>
+                          <option value="10000">10,000 req/month</option>
+                          <option value="50000">50,000 req/month</option>
+                          <option value="100000">100,000 req/month</option>
+                          <option value="0">Unlimited (No Limit)</option>
+                          <option value="custom">Custom Value...</option>
+                        </select>
+                        <div id="custom-quota-input-box" style="display: none;">
+                          <input type="number" id="custom-quota-input" class="admin-pill-input w-100 font-monospace" placeholder="Enter custom number..." min="0" oninput="document.getElementById('edit-quota-select').value='custom';">
+                        </div>
+                      </div>
+                      <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">
+                        Save Quota
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <script>
+              function openEditApiQuotaModal(id, name, currentQuota) {
+                document.getElementById('edit-quota-key-id').value = id;
+                document.getElementById('edit-quota-key-name').textContent = '#' + id + ' ' + name;
+                const sel = document.getElementById('edit-quota-select');
+                const customBox = document.getElementById('custom-quota-input-box');
+                const customInp = document.getElementById('custom-quota-input');
+                
+                const foundOpt = Array.from(sel.options).find(o => o.value == currentQuota);
+                if (foundOpt && foundOpt.value !== 'custom') {
+                  sel.value = currentQuota;
+                  customBox.style.display = 'none';
+                } else {
+                  sel.value = 'custom';
+                  customInp.value = currentQuota;
+                  customBox.style.display = 'block';
+                }
+                new bootstrap.Modal(document.getElementById('editApiQuotaModal')).show();
+              }
+            </script>
             <?php if ($total_api_pages > 1): ?>
             <div class="admin-pagination">
               <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=1">«</a>
@@ -35524,6 +35779,80 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <?php endif; ?>
           </div>
+
+          <script>
+            (function() {
+              if (typeof Chart === 'undefined') return;
+              if (window.apiKeyStatusChartInstance instanceof Chart) window.apiKeyStatusChartInstance.destroy();
+              if (window.apiTopConsumersChartInstance instanceof Chart) window.apiTopConsumersChartInstance.destroy();
+
+              Chart.defaults.color = '#aaaaaa';
+              Chart.defaults.font.family = "'Roboto', sans-serif";
+
+              // 1. Status Distribution Doughnut
+              const ctxStatus = document.getElementById('apiKeyStatusChart');
+              if (ctxStatus && <?php echo $total_keys_count; ?> > 0) {
+                window.apiKeyStatusChartInstance = new Chart(ctxStatus.getContext('2d'), {
+                  type: 'doughnut',
+                  data: {
+                    labels: ['Active Keys', 'Pending Review', 'Banned'],
+                    datasets: [{
+                      data: [<?php echo $active_keys_count; ?>, <?php echo $pending_keys_count; ?>, <?php echo $banned_keys_count; ?>],
+                      backgroundColor: ['#22c55e', '#38bdf8', '#ef4444'],
+                      borderColor: '#101010',
+                      borderWidth: 2
+                    }]
+                  },
+                  options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                      legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } }
+                    }
+                  }
+                });
+              }
+
+              // 2. Top Apps Horizontal Bar Chart
+              const ctxConsumers = document.getElementById('apiTopConsumersChart');
+              if (ctxConsumers && <?php echo count($top_app_uses); ?> > 0) {
+                window.apiTopConsumersChartInstance = new Chart(ctxConsumers.getContext('2d'), {
+                  type: 'bar',
+                  data: {
+                    labels: <?php echo json_encode($top_app_names); ?>,
+                    datasets: [{
+                      label: 'Requests Used (out of 1,000)',
+                      data: <?php echo json_encode($top_app_uses); ?>,
+                      backgroundColor: 'rgba(56, 189, 248, 0.75)',
+                      borderColor: '#38bdf8',
+                      borderWidth: 1,
+                      borderRadius: 6
+                    }]
+                  },
+                  options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                      x: {
+                        beginAtZero: true,
+                        max: 1000,
+                        grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                        ticks: { color: '#888899' }
+                      },
+                      y: {
+                        grid: { display: false },
+                        ticks: { color: '#ffffff', font: { weight: 'bold' } }
+                      }
+                    },
+                    plugins: {
+                      legend: { display: false }
+                    }
+                  }
+                });
+              }
+            })();
+          </script>
         <?php elseif (($_GET['page'] ?? '') === 'update'): ?>
           <?php
             $target_branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_GET['branch'] ?? 'main');
@@ -35532,7 +35861,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.1';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.2';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
@@ -35886,6 +36215,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=dashboard" class="update-tab-btn <?php echo $active_tab === 'dashboard' ? 'active' : ''; ?>">
                 <i class="bi bi-speedometer2"></i> Dashboard &amp; Audit
               </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=releases" class="update-tab-btn <?php echo $active_tab === 'releases' ? 'active' : ''; ?>">
+                <i class="bi bi-tag-fill"></i> Releases &amp; Changelog
+              </a>
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=diff" class="update-tab-btn <?php echo $active_tab === 'diff' ? 'active' : ''; ?>">
                 <i class="bi bi-file-earmark-diff"></i> Visual Code Diff
               </a>
@@ -35987,7 +36319,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
                     <i class="bi bi-clock-history text-info"></i> Recent Repository Commits &amp; Changelog
                   </h5>
-                  <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.75rem; font-size: 0.75rem;" onclick="fetchGitHubCommitLogs()">
+                  <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.75rem; font-size: 0.75rem;" onclick="fetchGitHubCommitLogs(true)">
                     <i class="bi bi-arrow-repeat"></i> Fetch Commits
                   </button>
                 </div>
@@ -36133,6 +36465,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </form>
               </div>
 
+            <!-- TAB: OFFICIAL RELEASES & CHANGELOG -->
+            <?php elseif ($active_tab === 'releases'): ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-tag-fill text-warning"></i> Official Releases &amp; Version History
+                    </h5>
+                    <div class="small text-secondary mt-1">Browse tagged releases, detailed patch notes, and install specific milestone versions.</div>
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="admin-btn-pill" style="height: 32px; padding: 0 0.85rem;" onclick="fetchGitHubReleases(true)">
+                      <i class="bi bi-arrow-repeat"></i> Refresh Releases
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Live Releases Timeline Stream -->
+                <div id="github-releases-stream" class="d-flex flex-column gap-3">
+                  <div class="text-center py-5 text-secondary">
+                    <span class="spinner-border spinner-border-sm me-2 text-danger"></span> Loading release notes from GitHub...
+                  </div>
+                </div>
+              </div>
+
             <!-- TAB 5: DIAGNOSTIC SUITE -->
             <?php elseif ($active_tab === 'diagnostics'): ?>
               <div class="admin-card p-4 mb-4">
@@ -36260,16 +36617,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
           <!-- Interactive Diff & GitHub Commit Scripts -->
           <script>
-            // Live Dry Run Testing Engine
-            async function triggerDryRunTest() {
+            // Live Dry Run Testing Engine (Attached to window for seamless SPA execution)
+            window.triggerDryRunTest = async function() {
               const consoleBox = document.getElementById('dry-run-console');
               const container = document.getElementById('dry-run-container');
               const btn = document.getElementById('btn-dry-run-test');
 
               if (!consoleBox || !container) return;
               container.classList.remove('d-none');
-              btn.disabled = true;
-              btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Running Simulation...';
+              if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Running Simulation...';
+              }
 
               consoleBox.textContent = `[STAGE 1/4] Probing multi-CDN GitHub endpoints (branch: <?php echo htmlspecialchars($target_branch); ?>)...\n`;
 
@@ -36283,23 +36642,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 let code = null;
                 for (const url of endpoints) {
                   try {
-                    const res = await fetch(url, { cache: "no-store" });
+                    const res = await fetch(url, { cache: "no-store", headers: { 'Accept': 'text/plain, */*' } });
                     if (res.ok) {
                       const text = await res.text();
-                      if (text && text.length > 10000) {
+                      if (text && text.length > 10000 && text.includes("<?php echo '<?php'; ?>")) {
                         code = text;
                         break;
                       }
                     }
-                  } catch(e) {}
+                  } catch (e) {}
                 }
 
-                if (!code) throw new Error("All remote endpoints (GitHub Raw & jsDelivr CDN) failed to respond.");
+                if (!code) throw new Error("All remote endpoints (GitHub Raw & jsDelivr CDN) failed to respond or returned invalid data.");
 
-                consoleBox.textContent += `[STAGE 2/4] Payload received: ${code.length.toLocaleString()} bytes (${(code.match(/\\n/g) || []).length + 1} lines).\n`;
+                const lineCount = (code.match(/\n/g) || []).length + 1;
+                consoleBox.textContent += `[STAGE 2/4] Payload verified: ${code.length.toLocaleString()} bytes (${lineCount.toLocaleString()} lines).\n`;
                 consoleBox.textContent += `[STAGE 3/4] Performing syntax token validation...\n`;
 
-                if (!code.includes("<" + "?php") || code.length < 10000) {
+                if (!code.includes("<?php echo '<?php'; ?>") || code.length < 10000) {
                   throw new Error("Payload is corrupted or missing PHP opening tags.");
                 }
 
@@ -36313,10 +36673,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               } catch (err) {
                 consoleBox.textContent += `\n>> ERROR: Staging simulation failed: ${err.message}`;
               } finally {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-play-circle text-info"></i> Test Run (Dry Run)';
+                if (btn) {
+                  btn.disabled = false;
+                  btn.innerHTML = '<i class="bi bi-play-circle text-info"></i> Test Run (Dry Run)';
+                }
               }
-            }
+            };
 
             // GitHub Commit History Feed Loader
             async function fetchGitHubCommitLogs() {
@@ -36424,70 +36786,167 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php endif; ?>
             })();
 
-            // Cached GitHub Commit Timeline (5-Minute sessionStorage cache prevents rate-limiting and loading delays)
-            async function fetchGitHubCommitLogs() {
+            // Cached GitHub Commit Timeline with force-refresh and multiline text wrapping
+            window.fetchGitHubCommitLogs = async function(forceRefresh = false) {
               const stream = document.getElementById('github-commit-stream');
               if (!stream) return;
 
               const cacheKey = 'gh_commits_<?php echo htmlspecialchars($target_branch); ?>';
-              const cached = sessionStorage.getItem(cacheKey);
-              if (cached) {
-                try {
-                  const data = JSON.parse(cached);
-                  if (Date.now() - data.ts < 300000) {
-                    renderCommitList(data.commits);
-                    return;
-                  }
-                } catch (e) {}
+              
+              if (!forceRefresh) {
+                const cached = sessionStorage.getItem(cacheKey);
+                if (cached) {
+                  try {
+                    const data = JSON.parse(cached);
+                    if (Date.now() - data.ts < 300000 && Array.isArray(data.commits)) {
+                      renderCommitList(data.commits);
+                      return;
+                    }
+                  } catch (e) {}
+                }
               }
 
+              stream.innerHTML = '<div class="text-center py-3 text-secondary small"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching recent commits from GitHub...</div>';
+
               try {
-                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=6");
-                if (!res.ok) throw new Error("GitHub API rate limit or network error");
+                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=8", { cache: "no-store" });
+                if (!res.ok) throw new Error("GitHub API rate limit reached or network error");
                 const commits = await res.json();
 
                 if (Array.isArray(commits)) {
                   sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), commits: commits }));
                   renderCommitList(commits);
+                } else {
+                  throw new Error("Invalid commit data received.");
                 }
               } catch (e) {
                 stream.innerHTML = `<div class="text-center py-2 text-secondary small"><i class="bi bi-info-circle me-1"></i> Public GitHub commit timeline unavailable (${e.message}).</div>`;
               }
 
               function renderCommitList(commits) {
-                if (commits.length === 0) {
+                if (!commits || commits.length === 0) {
                   stream.innerHTML = '<div class="text-center py-2 text-secondary small">No recent commits found on branch.</div>';
                   return;
                 }
+                const escapeHtml = str => (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                
                 stream.innerHTML = commits.map(c => {
-                  const msg = c.commit.message || 'No commit message';
-                  const author = c.commit.author.name || 'Developer';
-                  const dateStr = new Date(c.commit.author.date).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                  const sha = c.sha.substring(0, 7);
+                  const msg = escapeHtml(c.commit.message || 'No commit message');
+                  const author = escapeHtml(c.commit.author?.name || 'Developer');
+                  const dateStr = c.commit.author?.date ? new Date(c.commit.author.date).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                  const sha = c.sha ? c.sha.substring(0, 7) : 'commit';
 
                   return `
-                    <div class="d-flex align-items-center justify-content-between p-2 rounded-3 bg-dark bg-opacity-50 border border-secondary border-opacity-25" style="font-size: 0.82rem;">
-                      <div class="d-flex align-items-center gap-2 min-width-0 flex-grow-1 me-2">
-                        <i class="bi bi-git text-danger flex-shrink-0"></i>
-                        <div class="text-truncate">
-                          <span class="text-white fw-medium text-truncate d-block" title="${msg}">${msg}</span>
-                          <span class="text-secondary small font-monospace">${author} &bull; ${dateStr}</span>
+                    <div class="d-flex align-items-start justify-content-between p-3 rounded-3 bg-dark bg-opacity-50 border border-secondary border-opacity-25 gap-3" style="font-size: 0.82rem;">
+                      <div class="d-flex align-items-start gap-2 flex-grow-1 min-w-0" style="min-width: 0;">
+                        <i class="bi bi-git text-danger flex-shrink-0 mt-1"></i>
+                        <div class="d-flex flex-column flex-grow-1" style="min-width: 0;">
+                          <div class="text-white fw-medium mb-1" style="white-space: pre-wrap; word-break: break-word; line-height: 1.45;">${msg}</div>
+                          <div class="text-secondary small font-monospace" style="font-size: 0.72rem;">${author} &bull; ${dateStr}</div>
                         </div>
                       </div>
-                      <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
+                      <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" rel="noopener noreferrer" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
                         ${sha}
                       </a>
                     </div>
                   `;
                 }).join('');
               }
-            }
+            };
 
-            document.addEventListener('DOMContentLoaded', () => {
-              if (document.getElementById('github-commit-stream')) {
-                fetchGitHubCommitLogs();
+            // GitHub Releases & Changelog Feed Loader
+            window.fetchGitHubReleases = async function(forceRefresh = false) {
+              const stream = document.getElementById('github-releases-stream');
+              if (!stream) return;
+
+              const cacheKey = 'gh_official_releases_cache';
+              if (!forceRefresh) {
+                const cached = sessionStorage.getItem(cacheKey);
+                if (cached) {
+                  try {
+                    const data = JSON.parse(cached);
+                    if (Date.now() - data.ts < 300000 && Array.isArray(data.releases)) {
+                      renderReleaseList(data.releases);
+                      return;
+                    }
+                  } catch (e) {}
+                }
               }
-            });
+
+              stream.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching official releases from GitHub...</div>';
+
+              try {
+                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/releases?per_page=12", { cache: "no-store" });
+                if (!res.ok) throw new Error("GitHub API rate limit or network error");
+                const releases = await res.json();
+
+                if (Array.isArray(releases)) {
+                  sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), releases: releases }));
+                  renderReleaseList(releases);
+                } else {
+                  throw new Error("Invalid release data received.");
+                }
+              } catch (err) {
+                stream.innerHTML = `<div class="text-center py-4 text-secondary small"><i class="bi bi-exclamation-circle text-warning me-1"></i> Unable to load official releases (${err.message}).</div>`;
+              }
+
+              function renderReleaseList(releases) {
+                if (!releases || releases.length === 0) {
+                  stream.innerHTML = '<div class="text-center py-4 text-secondary small">No tagged releases found in repository.</div>';
+                  return;
+                }
+
+                const currentVer = '<?php echo htmlspecialchars($local_version); ?>';
+                const csrf = '<?php echo $_SESSION['admin_csrf_token']; ?>';
+                const escapeHtml = str => (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+                stream.innerHTML = releases.map((rel, idx) => {
+                  const tag = rel.tag_name || 'v1.0';
+                  const title = escapeHtml(rel.name || tag);
+                  const isLatest = idx === 0 && !rel.prerelease;
+                  const isCurrent = tag.replace(/^v/i, '') === currentVer.replace(/^v/i, '');
+                  const dateStr = rel.published_at ? new Date(rel.published_at).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+                  const bodyHtml = typeof marked !== 'undefined' ? DOMPurify.sanitize(marked.parse(rel.body || '*No release description provided.*')) : escapeHtml(rel.body || '');
+
+                  return `
+                    <div class="p-4 rounded-4 bg-dark bg-opacity-50 border border-secondary border-opacity-25" style="transition: border-color 0.2s ease;">
+                      <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 pb-2 border-bottom border-secondary border-opacity-25">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                          <span class="badge ${isCurrent ? 'bg-primary' : 'bg-danger'} font-monospace px-3 py-2 fs-6 fw-bold" style="border-radius: 10px;">
+                            ${escapeHtml(tag)}
+                          </span>
+                          <strong class="text-white fs-6">${title}</strong>
+                          ${isLatest ? '<span class="admin-badge admin-badge-success"><i class="bi bi-star-fill me-1"></i> Latest Release</span>' : ''}
+                          ${rel.prerelease ? '<span class="admin-badge admin-badge-warning">Pre-release</span>' : ''}
+                          ${isCurrent ? '<span class="admin-badge admin-badge-primary">Currently Installed</span>' : ''}
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                          <span class="text-secondary small font-monospace"><i class="bi bi-calendar-event me-1"></i>${dateStr}</span>
+                          <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Install release ${tag}? A safety rollback backup will be created automatically.');">
+                            <input type="hidden" name="csrf_token" value="${csrf}">
+                            <input type="hidden" name="target_branch" value="${escapeHtml(tag)}">
+                            <button type="submit" name="apply_system_update" class="admin-btn-pill ${isCurrent ? 'btn-outline-secondary' : 'admin-btn-primary'}" style="height: 32px; padding: 0 0.85rem; font-size: 0.78rem;">
+                              <i class="bi ${isCurrent ? 'bi-arrow-repeat' : 'bi-download'}"></i> ${isCurrent ? 'Re-install Release' : 'Install Release'}
+                            </button>
+                          </form>
+                        </div>
+                      </div>
+                      <div class="markdown-body text-light small px-1" style="font-size: 0.84rem; line-height: 1.6; color: #d0d0d8;">
+                        ${bodyHtml}
+                      </div>
+                    </div>
+                  `;
+                }).join('');
+              }
+            };
+
+            // Execute immediately on load (supports both direct load and SPA navigation)
+            if (document.getElementById('github-commit-stream')) {
+              window.fetchGitHubCommitLogs();
+            }
+            if (document.getElementById('github-releases-stream')) {
+              window.fetchGitHubReleases();
+            }
           </script>
         <?php elseif (($_GET['page'] ?? '') === 'manage'): ?>
           <style>
@@ -57727,12 +58186,17 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
           $db_fw->prepare("UPDATE api_keys SET uses = 0, reset_month = ? WHERE id = ?")->execute([$current_month, $key_row['id']]);
           $key_row['uses'] = 0;
         }
-        if ($key_row['uses'] < 1000) {
+        $quota_max = isset($key_row['quota_limit']) ? (int)$key_row['quota_limit'] : 1000;
+        if ($quota_max === 0 || $key_row['uses'] < $quota_max) {
           $db_fw->prepare("UPDATE api_keys SET uses = uses + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$key_row['id']]);
           $is_valid_api = true;
         } else {
           http_response_code(429);
-          die('{"status":"error", "message":"API limit exceeded (1,000 requests per month)."}');
+          header('Content-Type: application/json; charset=utf-8');
+          die(json_encode([
+            'status' => 'error',
+            'message' => "API monthly quota limit exceeded (" . number_format($quota_max) . " requests/month). Quota resets on the 1st of each month."
+          ]));
         }
       }
     }
@@ -59426,7 +59890,17 @@ if (isset($_GET['action'])) {
 
         $filename = uniqid('m_') . '.' . $ext;
         $filePath = $upload_dir . '/' . $filename;
-        $moved = $is_chunked ? rename($file_source, $filePath) : move_uploaded_file($file_source, $filePath);
+        
+        $moved = false;
+        if ($is_chunked) {
+          $moved = @rename($file_source, $filePath);
+          if (!$moved && file_exists($file_source)) {
+            $moved = @copy($file_source, $filePath);
+            if ($moved) @unlink($file_source);
+          }
+        } else {
+          $moved = @move_uploaded_file($file_source, $filePath);
+        }
 
         if ($moved) {
           $title = extract_safe_tag($info['comments'] ?? [], 'title', pathinfo($orig_name, PATHINFO_FILENAME));
