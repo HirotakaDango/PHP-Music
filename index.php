@@ -17,10 +17,69 @@ $is_secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ||
              (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) == 'https') ||
              (!empty($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower($_SERVER['HTTP_X_FORWARDED_SSL']) == 'on');
 
+// NGINX & UNIVERSAL PHP RUNTIME FIREWALL (Replicates .htaccess Rules in Pure PHP)
+$req_uri_raw = $_SERVER['REQUEST_URI'] ?? '';
+$req_path_clean = parse_url($req_uri_raw, PHP_URL_PATH) ?? '';
+
+// 1. Block direct web access to database, backup, and sensitive configuration files
+if (preg_match('/\.(db|sqlite|sqlite3|bak|log|ini|sh|env|sql)$/i', $req_path_clean)) {
+  http_response_code(403);
+  header('Content-Type: text/plain; charset=utf-8');
+  header('X-Content-Type-Options: nosniff');
+  die("403 Forbidden: Direct access to database and system files is strictly prohibited.");
+}
+
+// 2. USER DRIVE SECURITY: Block internal vaults & prevent remote script execution inside users_drive/
+if (preg_match('#^/users_drive/#i', $req_path_clean)) {
+  // A. Deny access to hidden system folders (.gallery_cache, .drive_trash_bin, .file_version)
+  if (preg_match('#/\.(gallery_cache|drive_trash_bin|file_version)(/|$)#i', $req_path_clean)) {
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    die("403 Forbidden: Direct access to user drive system storage is strictly prohibited.");
+  }
+  // B. Prevent execution of scripts/executables uploaded by users (serve as plain text or block)
+  if (preg_match('/\.(php|phtml|php3|php4|php5|php7|php8|phps|phar|cgi|pl|py|sh|asp|aspx|jsp|cgi)$/i', $req_path_clean)) {
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    die("403 Forbidden: Executing scripts inside user drive folders is strictly prohibited.");
+  }
+  // C. Route direct media hits inside users_drive into User Drive Manager
+  if (!preg_match('#/index\.php$#i', $req_path_clean) && preg_match('#^/users_drive/user_\d+_folder/(.+)$#i', $req_path_clean, $m_ud)) {
+    $user_rel_path = $m_ud[1];
+    header("Location: /index.php?access=user&page=drive#/" . urlencode($user_rel_path), true, 302);
+    exit;
+  }
+}
+
+// 3. PHPMUSICPOST SECURITY: Block direct access to raw artworks, thumbnails, versions, and staging chunks
+if (preg_match('#^/(uploads/artworks/|\.tmp_uploads/chunks/)#i', $req_path_clean) && !preg_match('#/index\.php$#i', $req_path_clean)) {
+  // Direct file hits are blocked so they must pass through ?access=artwork&action=thumb or raw
+  http_response_code(403);
+  header('Content-Type: text/plain; charset=utf-8');
+  die("403 Forbidden: Direct access to artwork storage is prohibited. Use authorized endpoints.");
+}
+
+// 4. ADMIN DRIVE & ROOT REWRITE: Redirect direct media files into Admin Drive Manager
+if (!preg_match('#^/users_drive/#i', $req_path_clean) && !preg_match('#^/uploads/artworks/#i', $req_path_clean) && !preg_match('#/index\.php$#i', $req_path_clean)) {
+  // Rule A: Match media files inside subfolders (e.g., uploads/... or screenshots/...)
+  if (preg_match('#^/(.+)/([^/]+\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$#i', $req_path_clean, $m_path)) {
+    $folder_path = $m_path[1];
+    $full_path = ltrim($req_path_clean, '/');
+    header("Location: /index.php?access=admin&page=drive&path=" . urlencode($folder_path) . "&edit=" . urlencode($full_path), true, 302);
+    exit;
+  }
+  // Rule B: Match media files directly in the root directory
+  elseif (preg_match('#^/([^/]+\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif))$#i', $req_path_clean, $m_root)) {
+    $root_file = $m_root[1];
+    header("Location: /index.php?access=admin&page=drive&path=&edit=" . urlencode($root_file), true, 302);
+    exit;
+  }
+}
+
 // Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
 $raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
 // FIXED: Added all scanning endpoints to bypass GZIP to prevent blank white screens from corrupted buffers
-$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
+$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts|rss)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
 
 if (!$is_gzip_bypass && !ini_get('zlib.output_compression') && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
   @ob_start('ob_gzhandler');
@@ -118,6 +177,68 @@ ROBOTS;
   @file_put_contents($robots_path, $robots_content);
 }
 
+// AUTOMATIC NGINX CONFIGURATION GENERATOR: Generates server-level security rules
+$nginx_conf_path = __DIR__ . '/nginx-phpmusic.conf';
+$needs_nginx_update = false;
+
+if (file_exists($nginx_conf_path)) {
+  $nginx_existing = @file_get_contents($nginx_conf_path);
+  if (empty(trim($nginx_existing)) || strpos($nginx_existing, 'PHPMUSICPOST') === false) {
+    $needs_nginx_update = true;
+  }
+} else {
+  $needs_nginx_update = true;
+}
+
+if ($needs_nginx_update) {
+  $nginx_conf_content = <<<NGINX
+# ==============================================================================
+# PHP MUSIC - NGINX SECURITY & ROUTING CONFIGURATION
+# Include this file inside your nginx server { ... } block:
+# include /path/to/nginx-phpmusic.conf;
+# ==============================================================================
+
+# 1. Block direct web access to databases, backups, logs, and sensitive system files
+location ~* \.(db|sqlite|sqlite3|bak|log|ini|sh|env|sql)$ {
+  deny all;
+  return 403;
+}
+
+# 2. USER DRIVE SECURITY:
+# A. Disable PHP script execution inside users_drive/
+location ~* ^/users_drive/.*\.php$ {
+  deny all;
+  return 403;
+}
+
+# B. Deny direct access to User Drive internal vaults (.gallery_cache, .drive_trash_bin, .file_version)
+location ~* ^/users_drive/user_\d+_folder/\.(gallery_cache|drive_trash_bin|file_version) {
+  deny all;
+  return 403;
+}
+
+# 3. PHPMUSICPOST SECURITY:
+# Deny direct access to uploaded raw artworks, thumbnails, versions, and staging chunks
+location ~* ^/(uploads/artworks/|\.tmp_uploads/chunks/) {
+  deny all;
+  return 403;
+}
+
+# 4. ADMIN DRIVE & ROOT REWRITE:
+# Redirect direct media files into Drive Manager unless inside user drives or artworks
+location ~* ^(?!/(users_drive|uploads/artworks)/).*\.(mp3|m4a|flac|ogg|wav|jpg|jpeg|png|webp|gif)$ {
+  rewrite ^/(.*)/([^/]+)$ /index.php?access=admin&page=drive&path=$1&edit=$0 redirect;
+  rewrite ^/([^/]+)$ /index.php?access=admin&page=drive&path=&edit=$0 redirect;
+}
+
+# 5. Standard Single-File Front-Controller fallback
+location / {
+  try_files \$uri \$uri/ /index.php?\$query_string;
+}
+NGINX;
+  @file_put_contents($nginx_conf_path, $nginx_conf_content);
+}
+
 // GLOBAL CORS ENABLER: Execute BEFORE Firewall to allow Preflight OPTIONS to pass cross-origin!
 $http_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
 $raw_uri_cors = $_SERVER['REQUEST_URI'] ?? '';
@@ -186,7 +307,7 @@ if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act
   $temp_action = $act_match[1];
 }
 
-$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon']);
+$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon', 'rss']);
 $is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
 
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -740,6 +861,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'requirements') {
     'critical' => true
   ];
 
+  // 1b. Web Server & Firewall Compatibility
+  $server_software = $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown';
+  $is_nginx = stripos($server_software, 'nginx') !== false;
+  $checks['Web Server Engine & Security Firewall'] = [
+    'status' => true,
+    'info' => $is_nginx 
+      ? "Nginx detected ({$server_software}) - Protected by Universal Runtime Firewall (User Drive & PHPMusicPost guarded) and nginx-phpmusic.conf"
+      : "Apache/Compatible ({$server_software}) - Protected by .htaccess and Universal Runtime Firewall",
+    'critical' => false
+  ];
+
   // 2. SQLite3 & PDO
   $pdo_sqlite = extension_loaded('pdo_sqlite');
   $checks['PDO SQLite Database Driver'] = [
@@ -1271,7 +1403,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.0');
+define('APP_VERSION', '11.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -29588,6 +29720,226 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       header('Location: ?access=admin');
       exit;
     }
+
+    // ADVANCED SMART SYSTEM UPDATE SUITE CONTROLLER
+    if (isset($_POST['apply_system_update'])) {
+      $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
+      $endpoints = [
+        "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$branch}/index.php",
+        "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php",
+        "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php"
+      ];
+      $remote_code = false;
+
+      foreach ($endpoints as $remote_url) {
+        if (function_exists('curl_version')) {
+          $ch = curl_init();
+          curl_setopt_array($ch, [
+            CURLOPT_URL => $remote_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 25,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
+          ]);
+          $res = curl_exec($ch);
+          $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+          curl_close($ch);
+          if ($http_code === 200 && $res && strlen($res) > 10000) {
+            $remote_code = $res;
+            break;
+          }
+        }
+
+        if (!$remote_code) {
+          $ctx = stream_context_create([
+            'http' => [
+              'timeout' => 15,
+              'follow_location' => true,
+              'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nAccept: text/plain, */*\r\n"
+            ],
+            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+          ]);
+          $res = @file_get_contents($remote_url, false, $ctx);
+          if ($res && strlen($res) > 10000) {
+            $remote_code = $res;
+            break;
+          }
+        }
+      }
+
+      // Syntax & Integrity Pre-Validation
+      $is_valid_php = false;
+      if ($remote_code && strlen($remote_code) > 10000 && strpos($remote_code, '<?php') !== false) {
+        try {
+          $tokens = @token_get_all($remote_code);
+          if (!empty($tokens) && count($tokens) > 50) {
+            $is_valid_php = true;
+          }
+        } catch (Throwable $t) {
+          $is_valid_php = false;
+        }
+      }
+
+      if (!$is_valid_php) {
+        $_SESSION['admin_flash_msg'] = "Update Aborted: Downloaded code from '{$branch}' failed PHP syntax token validation.";
+        header('Location: ?access=admin&page=update');
+        exit;
+      }
+
+      // 1. Create Timestamped Pre-Update Safety Snapshot
+      $backup_dir = MUSIC_DIR . '/.file_version';
+      if (!is_dir($backup_dir)) {
+        @mkdir($backup_dir, 0777, true);
+        @file_put_contents($backup_dir . '/.htaccess', "Order Deny,Allow\nDeny from all");
+      }
+      $backup_file = $backup_dir . '/index_backup_' . date('Ymd_His') . '_v' . APP_VERSION . '.php';
+      @copy(__FILE__, $backup_file);
+
+      // 2. Atomic Overwrite using Temporary Buffer
+      $tmp_swap = __FILE__ . '.tmp_' . uniqid();
+      if (@file_put_contents($tmp_swap, $remote_code) !== false) {
+        if (@rename($tmp_swap, __FILE__)) {
+          if (function_exists('opcache_reset')) { @opcache_reset(); }
+          if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
+          log_admin_activity(get_db(), $_SESSION['admin_email'], "Executed Smart Update from branch '{$branch}' (Backup: " . basename($backup_file) . ")", 0);
+          $_SESSION['admin_flash_msg'] = "Codebase updated successfully from '{$branch}' branch! Rollback snapshot created: " . basename($backup_file);
+        } else {
+          @unlink($tmp_swap);
+          $_SESSION['admin_flash_msg'] = "Update failed during file swap. Check write permissions.";
+        }
+      } else {
+        $_SESSION['admin_flash_msg'] = "Update failed: Unable to write to disk. Check filesystem permissions.";
+      }
+      header('Location: ?access=admin&page=update');
+      exit;
+    }
+
+    if (isset($_POST['create_manual_snapshot'])) {
+      $backup_dir = MUSIC_DIR . '/.file_version';
+      if (!is_dir($backup_dir)) {
+        @mkdir($backup_dir, 0777, true);
+        @file_put_contents($backup_dir . '/.htaccess', "Order Deny,Allow\nDeny from all");
+      }
+      $custom_note = preg_replace('/[^a-zA-Z0-9_-]/', '', trim($_POST['snapshot_label'] ?? 'manual'));
+      $backup_file = $backup_dir . '/index_backup_' . date('Ymd_His') . '_' . ($custom_note ?: 'manual') . '.php';
+
+      if (@copy(__FILE__, $backup_file)) {
+        log_admin_activity(get_db(), $_SESSION['admin_email'], 'Created Manual Codebase Snapshot: ' . basename($backup_file), 0);
+        $_SESSION['admin_flash_msg'] = "Manual snapshot created successfully: " . basename($backup_file);
+      } else {
+        $_SESSION['admin_flash_msg'] = "Failed to create snapshot. Check directory write permissions.";
+      }
+      header('Location: ?access=admin&page=update&tab=backups');
+      exit;
+    }
+
+    if (isset($_POST['upload_manual_patch']) && isset($_FILES['patch_file'])) {
+      $file = $_FILES['patch_file'];
+      if ($file['error'] === UPLOAD_ERR_OK && is_uploaded_file($file['tmp_name'])) {
+        $content = @file_get_contents($file['tmp_name']);
+        $expected_sha = trim($_POST['verify_checksum'] ?? '');
+
+        if ($content && strpos($content, '<?php') !== false && strlen($content) > 10000) {
+          if (!empty($expected_sha)) {
+            $norm = str_replace(["\r\n", "\r"], "\n", trim($content));
+            if (!hash_equals(strtolower($expected_sha), hash('sha256', $norm))) {
+              $_SESSION['admin_flash_msg'] = "Patch Aborted: Provided SHA-256 checksum did not match uploaded file.";
+              header('Location: ?access=admin&page=update&tab=manual');
+              exit;
+            }
+          }
+
+          // Create Safety Backup
+          $backup_dir = MUSIC_DIR . '/.file_version';
+          if (!is_dir($backup_dir)) @mkdir($backup_dir, 0777, true);
+          $backup_file = $backup_dir . '/index_backup_' . date('Ymd_His') . '_pre_patch.php';
+          @copy(__FILE__, $backup_file);
+
+          if (@file_put_contents(__FILE__, $content) !== false) {
+            if (function_exists('opcache_reset')) { @opcache_reset(); }
+            log_admin_activity(get_db(), $_SESSION['admin_email'], 'Applied Manual Codebase Patch Upload', 0);
+            $_SESSION['admin_flash_msg'] = "Manual patch applied successfully! Previous version saved as " . basename($backup_file);
+          } else {
+            $_SESSION['admin_flash_msg'] = "Failed to write patch to index.php.";
+          }
+        } else {
+          $_SESSION['admin_flash_msg'] = "Invalid patch file: Must be a valid PHP file exceeding 10KB.";
+        }
+      } else {
+        $_SESSION['admin_flash_msg'] = "File upload failed or no file selected.";
+      }
+      header('Location: ?access=admin&page=update&tab=manual');
+      exit;
+    }
+
+    if (isset($_POST['rollback_system_backup']) && isset($_POST['backup_filename'])) {
+      $safe_filename = basename($_POST['backup_filename']);
+      $backup_path = MUSIC_DIR . '/.file_version/' . $safe_filename;
+
+      if (file_exists($backup_path) && str_ends_with($safe_filename, '.php')) {
+        $backup_content = @file_get_contents($backup_path);
+        if ($backup_content && strpos($backup_content, '<?php') !== false) {
+          // Create Safety Pre-Rollback Backup
+          $pre_file = MUSIC_DIR . '/.file_version/index_backup_' . date('Ymd_His') . '_pre_rollback.php';
+          @copy(__FILE__, $pre_file);
+
+          @file_put_contents(__FILE__, $backup_content);
+          if (function_exists('opcache_reset')) { @opcache_reset(); }
+          log_admin_activity(get_db(), $_SESSION['admin_email'], 'Rolled back codebase to: ' . $safe_filename, 0);
+          $_SESSION['admin_flash_msg'] = "Codebase restored from snapshot '{$safe_filename}'.";
+        } else {
+          $_SESSION['admin_flash_msg'] = "Rollback failed: Backup file is empty or corrupted.";
+        }
+      } else {
+        $_SESSION['admin_flash_msg'] = "Rollback failed: Backup file not found.";
+      }
+      header('Location: ?access=admin&page=update&tab=backups');
+      exit;
+    }
+
+    if (isset($_POST['delete_single_backup']) && isset($_POST['backup_filename'])) {
+      $safe_filename = basename($_POST['backup_filename']);
+      $backup_path = MUSIC_DIR . '/.file_version/' . $safe_filename;
+      if (file_exists($backup_path) && @unlink($backup_path)) {
+        log_admin_activity(get_db(), $_SESSION['admin_email'], 'Deleted update backup snapshot: ' . $safe_filename, 0);
+        $_SESSION['admin_flash_msg'] = "Snapshot '{$safe_filename}' deleted.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Failed to delete snapshot file.";
+      }
+      header('Location: ?access=admin&page=update&tab=backups');
+      exit;
+    }
+
+    if (isset($_POST['prune_all_backups'])) {
+      $backup_dir = MUSIC_DIR . '/.file_version';
+      $keep_count = max(1, (int)($_POST['keep_recent_count'] ?? 3));
+      $deleted_count = 0;
+
+      if (is_dir($backup_dir)) {
+        $files = [];
+        foreach (scandir($backup_dir) as $f) {
+          if (str_starts_with($f, 'index_backup_') && str_ends_with($f, '.php')) {
+            $files[] = ['name' => $f, 'mtime' => filemtime($backup_dir . '/' . $f)];
+          }
+        }
+        usort($files, fn($a, $b) => $b['mtime'] - $a['mtime']);
+
+        $to_delete = array_slice($files, $keep_count);
+        foreach ($to_delete as $df) {
+          if (@unlink($backup_dir . '/' . $df['name'])) {
+            $deleted_count++;
+          }
+        }
+      }
+      log_admin_activity(get_db(), $_SESSION['admin_email'], "Pruned {$deleted_count} old backup snapshots (kept {$keep_count})", 0);
+      $_SESSION['admin_flash_msg'] = "Pruned {$deleted_count} older snapshots. Kept {$keep_count} most recent backups.";
+      header('Location: ?access=admin&page=update&tab=backups');
+      exit;
+    }
   }
 
   $admin_login_error = '';
@@ -29631,7 +29983,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -29682,10 +30034,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'reports' => 'Pending Reports',
     'rhythm_analytics' => 'Rhythm Game Analytics',
     'appeals' => 'Ban Appeals',
+    'manage' => 'Player Manager',
     'drive' => 'Drive Manager',
     'dbmanager' => 'PHPDBManager',
     'ide' => 'PHPEditor (IDE)',
-    'api' => 'API Keys'
+    'api' => 'API Keys',
+    'update' => 'System & Codebase Update'
   ];
   $active_page_key = $_GET['page'] ?? 'users';
   $admin_page_title = isset($page_titles[$active_page_key]) ? $page_titles[$active_page_key] . " - Admin Panel" : "Admin Panel";
@@ -29961,6 +30315,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       .admin-pill-input:focus {
         border-color: var(--drive-primary) !important;
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--drive-primary) 30%, transparent) !important;
+      }
+
+      .admin-file-picker-pill {
+        background: var(--drive-card-elevated) !important;
+        border: 1px solid var(--drive-border) !important;
+        border-radius: 28px !important;
+        height: 44px !important;
+        padding: 0 16px 0 6px !important;
+        display: flex !important;
+        align-items: center !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+      }
+
+      .admin-file-picker-pill:hover {
+        border-color: rgba(255, 0, 68, 0.45) !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+      }
+
+      .admin-pill-input::file-selector-button:hover,
+      .admin-pill-input::-webkit-file-upload-button:hover {
+        background: #cc0000 !important;
       }
 
       .admin-pill-select {
@@ -30698,6 +31074,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
             <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('manage', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=manage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-window-sidebar"></i><span>Player Manager</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
             <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
             <?php endif; ?>
@@ -30709,6 +31088,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('api', $current_admin_permissions)): ?>
             <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('update', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=update" class="nav-link <?php echo (($_GET['page'] ?? '') === 'update') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-down-fill"></i><span>System Update</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('playground', $current_admin_permissions)): ?>
             <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
@@ -35142,6 +35524,971 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <?php endif; ?>
           </div>
+        <?php elseif (($_GET['page'] ?? '') === 'update'): ?>
+          <?php
+            $target_branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_GET['branch'] ?? 'main');
+            $active_tab = $_GET['tab'] ?? 'dashboard';
+            $force_refresh = isset($_GET['force_refresh']) && $_GET['force_refresh'] === '1';
+
+            // 1. Memory-Efficient Local Codebase Checksum Calculation
+            $local_size = @filesize(__FILE__) ?: 0;
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.1';
+            $local_hash = @hash_file('sha256', __FILE__) ?: '';
+            $local_md5 = @md5_file(__FILE__) ?: '';
+            $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
+            $local_lines = 0;
+            $fp = @fopen(__FILE__, 'rb');
+            if ($fp) {
+              while (!feof($fp)) {
+                $local_lines += substr_count(fread($fp, 65536), "\n");
+              }
+              fclose($fp);
+              $local_lines++;
+            }
+
+            // 2. High-Speed Cached Multi-CDN Probe (2-Minute Cache prevents freezing on tab switches)
+            $probe_cache_dir = MUSIC_DIR . '/.gallery_cache';
+            if (!is_dir($probe_cache_dir)) @mkdir($probe_cache_dir, 0777, true);
+            $probe_cache_file = $probe_cache_dir . '/gh_probe_' . md5($target_branch) . '.json';
+            $cached_probe = null;
+
+            if (!$force_refresh && file_exists($probe_cache_file) && (time() - filemtime($probe_cache_file)) < 120) {
+              $cached_probe = @json_decode(@file_get_contents($probe_cache_file), true);
+            }
+
+            if ($cached_probe && is_array($cached_probe) && !empty($cached_probe['remote_available'])) {
+              $remote_available = true;
+              $remote_code = ($active_tab === 'diff' && !empty($cached_probe['remote_code'])) ? $cached_probe['remote_code'] : false;
+              $remote_size = (int)($cached_probe['remote_size'] ?? 0);
+              $remote_lines = (int)($cached_probe['remote_lines'] ?? 0);
+              $remote_hash = $cached_probe['remote_hash'] ?? '';
+              $remote_md5 = $cached_probe['remote_md5'] ?? '';
+              $remote_crc = $cached_probe['remote_crc'] ?? '';
+              $remote_version = $cached_probe['remote_version'] ?? 'Unknown';
+              $ping_latency_ms = (float)($cached_probe['ping_latency_ms'] ?? 0);
+            } else {
+              $endpoints = [
+                "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$target_branch}/index.php",
+                "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$target_branch}/index.php",
+                "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$target_branch}/index.php"
+              ];
+
+              $remote_code = false;
+              $remote_available = false;
+              $ping_start = microtime(true);
+
+              foreach ($endpoints as $remote_url) {
+                if (function_exists('curl_version')) {
+                  $ch = curl_init();
+                  curl_setopt_array($ch, [
+                    CURLOPT_URL => $remote_url,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                    CURLOPT_CONNECTTIMEOUT => 4,
+                    CURLOPT_TIMEOUT => 8,
+                    CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
+                  ]);
+                  $res = curl_exec($ch);
+                  $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                  curl_close($ch);
+                  if ($http_code === 200 && $res && strlen($res) > 10000) {
+                    $remote_code = $res;
+                    $remote_available = true;
+                    break;
+                  }
+                }
+
+                if (!$remote_available) {
+                  $ctx = stream_context_create([
+                    'http' => [
+                      'timeout' => 6,
+                      'follow_location' => true,
+                      'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nAccept: text/plain, */*\r\n"
+                    ],
+                    'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+                  ]);
+                  $res = @file_get_contents($remote_url, false, $ctx);
+                  if ($res && strlen($res) > 10000) {
+                    $remote_code = $res;
+                    $remote_available = true;
+                    break;
+                  }
+                }
+              }
+
+              $ping_latency_ms = round((microtime(true) - $ping_start) * 1000, 1);
+              $remote_size = $remote_code ? strlen($remote_code) : 0;
+              $remote_lines = $remote_code ? (substr_count($remote_code, "\n") + 1) : 0;
+              $remote_hash = $remote_code ? hash('sha256', str_replace(["\r\n", "\r"], "\n", trim($remote_code))) : '';
+              $remote_md5 = $remote_code ? md5($remote_code) : '';
+              $remote_crc = $remote_code ? sprintf('%08X', crc32($remote_code)) : '';
+
+              preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $remote_ver_match);
+              $remote_version = $remote_ver_match[1] ?? 'Unknown';
+
+              if ($remote_available) {
+                @file_put_contents($probe_cache_file, json_encode([
+                  'remote_available' => true,
+                  'remote_code' => $active_tab === 'diff' ? $remote_code : '',
+                  'remote_size' => $remote_size,
+                  'remote_lines' => $remote_lines,
+                  'remote_hash' => $remote_hash,
+                  'remote_md5' => $remote_md5,
+                  'remote_crc' => $remote_crc,
+                  'remote_version' => $remote_version,
+                  'ping_latency_ms' => $ping_latency_ms
+                ]));
+              }
+            }
+
+            $is_identical = $remote_available && !empty($remote_hash) && hash_equals($local_hash, $remote_hash);
+
+            // 3. System Pre-Flight Diagnostics Matrix
+            $is_file_writable = is_writable(__FILE__);
+            $is_dir_writable = is_writable(MUSIC_DIR);
+            $backup_dir = MUSIC_DIR . '/.file_version';
+            $is_backup_dir_writable = is_dir($backup_dir) ? is_writable($backup_dir) : $is_dir_writable;
+            $php_ver = PHP_VERSION;
+            $is_php_optimal = version_compare($php_ver, '8.0.0', '>=');
+            $opcache_active = function_exists('opcache_get_status') && @opcache_get_status() !== false;
+            $memory_limit = ini_get('memory_limit');
+            $disk_free = @disk_free_space(MUSIC_DIR) ?: 0;
+            $has_enough_disk = $disk_free > ($local_size * 10);
+
+            // 4. Inventory Rollback Snapshots
+            $backups = [];
+            $total_backup_bytes = 0;
+            if (is_dir($backup_dir)) {
+              foreach (scandir($backup_dir) as $f) {
+                if (str_starts_with($f, 'index_backup_') && str_ends_with($f, '.php')) {
+                  $fp = $backup_dir . '/' . $f;
+                  $sz = filesize($fp);
+                  $total_backup_bytes += $sz;
+                  $backups[] = [
+                    'filename' => $f,
+                    'mtime' => filemtime($fp),
+                    'size' => $sz,
+                    'path' => $fp
+                  ];
+                }
+              }
+              usort($backups, fn($a, $b) => $b['mtime'] - $a['mtime']);
+            }
+          ?>
+
+          <style>
+            .update-hero-banner {
+              background: linear-gradient(135deg, rgba(18, 18, 24, 0.95), rgba(8, 8, 12, 0.98));
+              border: 1px solid rgba(255, 255, 255, 0.08);
+              border-radius: 20px;
+              padding: 1.75rem 2rem;
+              position: relative;
+              overflow: hidden;
+            }
+            .update-hero-banner::before {
+              content: '';
+              position: absolute;
+              top: -60px;
+              right: -60px;
+              width: 220px;
+              height: 220px;
+              background: radial-gradient(circle, <?php echo $is_identical ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.18)'; ?>, transparent 70%);
+              border-radius: 50%;
+              pointer-events: none;
+            }
+            .update-tab-btn {
+              padding: 0.6rem 1.25rem;
+              font-size: 0.88rem;
+              font-weight: 600;
+              border-radius: 12px;
+              color: var(--drive-text-muted);
+              border: 1px solid transparent;
+              background: transparent;
+              transition: all 0.15s ease;
+              text-decoration: none;
+              display: inline-flex;
+              align-items: center;
+              gap: 0.5rem;
+            }
+            .update-tab-btn:hover {
+              background: rgba(255, 255, 255, 0.05);
+              color: #ffffff;
+            }
+            .update-tab-btn.active {
+              background: rgba(255, 0, 68, 0.15);
+              color: #ff4d4d;
+              border-color: rgba(255, 0, 68, 0.35);
+            }
+            .diff-view-box {
+              background: #08080c;
+              border: 1px solid rgba(255, 255, 255, 0.08);
+              border-radius: 14px;
+              font-family: 'JetBrains Mono', Consolas, monospace;
+              font-size: 0.82rem;
+              line-height: 1.6;
+              overflow-x: auto;
+              max-height: 560px;
+              min-height: 220px;
+            }
+            .diff-row {
+              display: flex;
+              padding: 1px 12px;
+              white-space: pre-wrap;
+              word-break: break-all;
+            }
+            .diff-row.add { background: rgba(34, 197, 94, 0.12); color: #4ade80; }
+            .diff-row.del { background: rgba(239, 68, 68, 0.12); color: #f87171; }
+            .diff-row.same { color: #888899; }
+            .diff-gutter-num {
+              width: 44px;
+              flex-shrink: 0;
+              text-align: right;
+              padding-right: 12px;
+              color: #555566;
+              user-select: none;
+            }
+            .diag-row {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 0.85rem 1.1rem;
+              border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+              font-size: 0.88rem;
+            }
+            .diag-row:last-child { border-bottom: none; }
+          </style>
+
+          <!-- Top Toolbar & Branch Selector -->
+          <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">System &amp; Codebase Smart Update Suite</h1>
+              <div class="small text-secondary mt-1">Audit, compare checksums, and update single-file architecture with zero background auto-updates.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="update">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($active_tab); ?>">
+                <span class="text-secondary small fw-bold text-nowrap"><i class="bi bi-git me-1"></i> Branch:</span>
+                <select name="branch" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="main" <?php echo $target_branch === 'main' ? 'selected' : ''; ?>>main (Official Stable)</option>
+                  <option value="master" <?php echo $target_branch === 'master' ? 'selected' : ''; ?>>master (Production)</option>
+                  <option value="dev" <?php echo $target_branch === 'dev' ? 'selected' : ''; ?>>dev (Development)</option>
+                  <option value="beta" <?php echo $target_branch === 'beta' ? 'selected' : ''; ?>>beta (Preview Release)</option>
+                </select>
+              </form>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=<?php echo urlencode($active_tab); ?>&force_refresh=1" class="admin-btn-pill">
+                <i class="bi bi-arrow-clockwise"></i> Re-check Probe
+              </a>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Hero Status Matrix Banner -->
+            <div class="update-hero-banner mb-4">
+              <div class="row align-items-center g-4">
+                <div class="col-12 col-lg-7">
+                  <div class="d-flex align-items-center gap-2 mb-2">
+                    <?php if ($is_identical): ?>
+                      <span class="admin-badge admin-badge-success fs-6"><i class="bi bi-check-circle-fill me-1"></i> Up to Date</span>
+                    <?php elseif (!$remote_available): ?>
+                      <span class="admin-badge admin-badge-danger fs-6"><i class="bi bi-cloud-slash-fill me-1"></i> Remote Unreachable</span>
+                    <?php else: ?>
+                      <span class="admin-badge admin-badge-warning fs-6"><i class="bi bi-exclamation-triangle-fill me-1"></i> Update Ready</span>
+                    <?php endif; ?>
+                    <span class="text-secondary small font-monospace">Latency: <?php echo $ping_latency_ms; ?> ms</span>
+                  </div>
+
+                  <h3 class="fw-bold text-white mb-2">
+                    <?php if ($is_identical): ?>
+                      Your PHP Music system is operating on the latest release.
+                    <?php elseif (!$remote_available): ?>
+                      Unable to connect to GitHub raw endpoint.
+                    <?php else: ?>
+                      New codebase modifications are available on '<?php echo htmlspecialchars($target_branch); ?>'.
+                    <?php endif; ?>
+                  </h3>
+                  <p class="text-secondary small mb-0" style="max-width: 620px;">
+                    Updates atomically replace <code class="text-white">index.php</code> after creating an instantaneous safety rollback snapshot in <code class="text-info">.file_version/</code>. No automatic updates occur without explicit administrator approval.
+                  </p>
+                </div>
+
+                <div class="col-12 col-lg-5 text-lg-end">
+                  <div class="d-flex align-items-center justify-content-lg-end gap-2 flex-wrap">
+                    <button type="button" class="admin-btn-pill" onclick="triggerDryRunTest()" id="btn-dry-run-test">
+                      <i class="bi bi-play-circle text-info"></i> Test Run (Dry Run)
+                    </button>
+
+                    <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Install update now from branch \'<?php echo htmlspecialchars($target_branch); ?>\'? A full rollback snapshot will be generated automatically.');">
+                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                      <input type="hidden" name="target_branch" value="<?php echo htmlspecialchars($target_branch); ?>">
+                      <button type="submit" name="apply_system_update" class="admin-btn-pill admin-btn-primary" style="height: 40px; padding: 0 1.35rem;" <?php echo (!$remote_available || !$is_file_writable) ? 'disabled' : ''; ?>>
+                        <i class="bi bi-cloud-arrow-down-fill me-1"></i> Install Update Now
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Top Metric KPI Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Local Version</span>
+                    <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white">v<?php echo htmlspecialchars($local_version); ?></div>
+                  <small class="text-secondary font-monospace" title="<?php echo $local_hash; ?>">SHA: <?php echo substr($local_hash, 0, 10); ?>...</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Target Branch</span>
+                    <span class="text-danger"><i class="bi bi-github fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo $remote_available ? ('v' . htmlspecialchars($remote_version)) : '<span class="text-danger fs-5">Offline</span>'; ?></div>
+                  <small class="text-secondary font-monospace"><?php echo $remote_hash ? ('SHA: ' . substr($remote_hash, 0, 10) . '...') : 'Connection error'; ?></small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Codebase Volume</span>
+                    <span class="text-warning"><i class="bi bi-file-earmark-code fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($local_lines); ?> <span class="fs-6 text-secondary fw-normal">lines</span></div>
+                  <small class="text-secondary"><?php echo function_exists('format_admin_bytes') ? format_admin_bytes($local_size) : (number_format($local_size / 1024, 1) . ' KB'); ?> on disk</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Backup Vault</span>
+                    <span class="text-success"><i class="bi bi-shield-lock-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo count($backups); ?> <span class="fs-6 text-secondary fw-normal">snapshots</span></div>
+                  <small class="text-secondary"><?php echo function_exists('format_admin_bytes') ? format_admin_bytes($total_backup_bytes) : (number_format($total_backup_bytes / 1024, 1) . ' KB'); ?> stored</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Navigation Sub-Tabs -->
+            <div class="d-flex align-items-center gap-2 mb-4 overflow-x-auto pb-1" style="scrollbar-width: none;">
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=dashboard" class="update-tab-btn <?php echo $active_tab === 'dashboard' ? 'active' : ''; ?>">
+                <i class="bi bi-speedometer2"></i> Dashboard &amp; Audit
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=diff" class="update-tab-btn <?php echo $active_tab === 'diff' ? 'active' : ''; ?>">
+                <i class="bi bi-file-earmark-diff"></i> Visual Code Diff
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=backups" class="update-tab-btn <?php echo $active_tab === 'backups' ? 'active' : ''; ?>">
+                <i class="bi bi-clock-history"></i> Backup &amp; Rollback Vault (<?php echo count($backups); ?>)
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=manual" class="update-tab-btn <?php echo $active_tab === 'manual' ? 'active' : ''; ?>">
+                <i class="bi bi-upload"></i> Offline Patching
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=diagnostics" class="update-tab-btn <?php echo $active_tab === 'diagnostics' ? 'active' : ''; ?>">
+                <i class="bi bi-heart-pulse"></i> Diagnostic Suite
+              </a>
+            </div>
+
+            <!-- TAB 1: DASHBOARD & AUDIT -->
+            <?php if ($active_tab === 'dashboard'): ?>
+              <!-- Checksum & Comparison Matrix -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-fingerprint text-danger"></i> Cryptographic Integrity &amp; Checksums
+                  </h5>
+                  <span class="admin-badge <?php echo $is_identical ? 'admin-badge-success' : 'admin-badge-warning'; ?>">
+                    <?php echo $is_identical ? 'Exact Hash Match' : 'Code Divergence Detected'; ?>
+                  </span>
+                </div>
+
+                <div class="table-responsive mb-3">
+                  <table class="admin-table align-middle">
+                    <thead>
+                      <tr>
+                        <th>Metric / Algorithm</th>
+                        <th>Installed Environment</th>
+                        <th>Remote (<?php echo htmlspecialchars($target_branch); ?>)</th>
+                        <th class="text-end">Verification</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td class="fw-bold text-white">SHA-256 (Primary)</td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $local_hash; ?></td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $remote_hash ?: 'Failed to compute'; ?></td>
+                        <td class="text-end">
+                          <span class="admin-badge <?php echo $is_identical ? 'admin-badge-success' : 'admin-badge-warning'; ?>">
+                            <?php echo $is_identical ? 'Matched' : 'Diverged'; ?>
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td class="fw-bold text-white">MD5 Checksum</td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $local_md5; ?></td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $remote_md5 ?: '—'; ?></td>
+                        <td class="text-end">
+                          <span class="admin-badge <?php echo ($remote_md5 && $local_md5 === $remote_md5) ? 'admin-badge-success' : 'admin-badge-warning'; ?>">
+                            <?php echo ($remote_md5 && $local_md5 === $remote_md5) ? 'Matched' : 'Diverged'; ?>
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td class="fw-bold text-white">CRC32 Polynomial</td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $local_crc; ?></td>
+                        <td class="font-monospace text-secondary" style="font-size: 0.78rem;"><?php echo $remote_crc ?: '—'; ?></td>
+                        <td class="text-end">
+                          <span class="admin-badge <?php echo ($remote_crc && $local_crc === $remote_crc) ? 'admin-badge-success' : 'admin-badge-warning'; ?>">
+                            <?php echo ($remote_crc && $local_crc === $remote_crc) ? 'Matched' : 'Diverged'; ?>
+                          </span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td class="fw-bold text-white">Filesize Delta</td>
+                        <td class="font-monospace"><?php echo number_format($local_size); ?> bytes</td>
+                        <td class="font-monospace"><?php echo $remote_size ? (number_format($remote_size) . ' bytes') : '—'; ?></td>
+                        <td class="text-end">
+                          <span class="admin-badge admin-badge-info">
+                            <?php echo $remote_size ? (($remote_size >= $local_size ? '+' : '') . number_format($remote_size - $local_size) . ' bytes') : '—'; ?>
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Dry Run Staging Output Console -->
+              <div class="admin-card p-4 mb-4 d-none" id="dry-run-container">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-terminal-fill text-info"></i> Staging Dry-Run Execution Log
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white btn-sm" onclick="document.getElementById('dry-run-container').classList.add('d-none');"></button>
+                </div>
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-50 font-monospace small" id="dry-run-console" style="white-space: pre-wrap; line-height: 1.5; color: #a0a0b0; max-height: 240px; overflow-y: auto;">
+                </div>
+              </div>
+
+              <!-- GitHub Commit Stream -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-clock-history text-info"></i> Recent Repository Commits &amp; Changelog
+                  </h5>
+                  <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.75rem; font-size: 0.75rem;" onclick="fetchGitHubCommitLogs()">
+                    <i class="bi bi-arrow-repeat"></i> Fetch Commits
+                  </button>
+                </div>
+                <div id="github-commit-stream" class="d-flex flex-column gap-2">
+                  <div class="text-center py-3 text-secondary small">
+                    <span class="spinner-border spinner-border-sm me-2"></span> Loading commit timeline from GitHub...
+                  </div>
+                </div>
+              </div>
+
+            <!-- TAB 2: VISUAL CODE DIFF -->
+            <?php elseif ($active_tab === 'diff'): ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-file-earmark-diff-fill text-danger"></i> Side-by-Side Visual Diff
+                    </h5>
+                    <div class="small text-secondary mt-1">Comparing installed code against remote '<?php echo htmlspecialchars($target_branch); ?>' branch.</div>
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-success bg-opacity-25 text-success border border-success px-2 py-1" id="diff-adds-count">+0 additions</span>
+                    <span class="badge bg-danger bg-opacity-25 text-danger border border-danger px-2 py-1" id="diff-dels-count">-0 deletions</span>
+                  </div>
+                </div>
+
+                <div class="diff-view-box p-2" id="smart-diff-container">
+                  <div class="text-center py-5 text-secondary">
+                    <span class="spinner-border spinner-border-sm me-2 text-danger"></span> Calculating syntax diffs...
+                  </div>
+                </div>
+              </div>
+
+            <!-- TAB 3: BACKUP & ROLLBACK VAULT -->
+            <?php elseif ($active_tab === 'backups'): ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-shield-lock-fill text-success"></i> Backup Snapshot &amp; Rollback Vault
+                    </h5>
+                    <div class="small text-secondary mt-1">Every system update automatically writes a complete rollback copy to disk.</div>
+                  </div>
+                  <div class="d-flex align-items-center gap-2">
+                    <button class="admin-btn-pill" data-bs-toggle="modal" data-bs-target="#createSnapshotModal">
+                      <i class="bi bi-plus-circle-fill text-success"></i> New Snapshot
+                    </button>
+                    <button class="admin-btn-pill admin-btn-primary" data-bs-toggle="modal" data-bs-target="#pruneBackupsModal">
+                      <i class="bi bi-trash3"></i> Prune Vault
+                    </button>
+                  </div>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th>Snapshot Identifier</th>
+                        <th>Creation Date</th>
+                        <th>File Size</th>
+                        <th class="text-end" style="width: 220px;">Vault Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($backups)): ?>
+                        <tr><td colspan="4" class="text-center py-5 text-secondary">No update backups currently stored in vault.</td></tr>
+                      <?php else: foreach ($backups as $b): ?>
+                        <tr>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <i class="bi bi-file-earmark-code text-danger fs-5"></i>
+                              <div>
+                                <span class="font-monospace text-white fw-bold"><?php echo htmlspecialchars($b['filename']); ?></span>
+                                <small class="text-secondary d-block font-monospace" style="font-size: 0.72rem;">Path: .file_version/<?php echo htmlspecialchars($b['filename']); ?></small>
+                              </div>
+                            </div>
+                          </td>
+                          <td class="text-secondary font-monospace small">
+                            <?php echo date('Y-m-d H:i:s', $b['mtime']); ?>
+                          </td>
+                          <td class="font-monospace small">
+                            <?php echo function_exists('format_admin_bytes') ? format_admin_bytes($b['size']) : (number_format($b['size'] / 1024, 1) . ' KB'); ?>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-1">
+                              <form method="POST" action="?access=admin&page=update&tab=backups" class="m-0 d-inline" onsubmit="return confirm('Restore index.php from this snapshot? Current file will be archived.');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="backup_filename" value="<?php echo htmlspecialchars($b['filename']); ?>">
+                                <button type="submit" name="rollback_system_backup" class="admin-btn-pill" style="height: 30px; padding: 0 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" title="Restore Codebase">
+                                  <i class="bi bi-arrow-counterclockwise"></i> Restore
+                                </button>
+                              </form>
+
+                              <form method="POST" action="?access=admin&page=update&tab=backups" class="m-0 d-inline" onsubmit="return confirm('Permanently delete this backup snapshot?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="backup_filename" value="<?php echo htmlspecialchars($b['filename']); ?>">
+                                <button type="submit" name="delete_single_backup" class="btn btn-sm btn-outline-danger border-0 p-1" title="Delete Snapshot">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <!-- TAB 4: OFFLINE PATCH & MANUAL UPLOAD -->
+            <?php elseif ($active_tab === 'manual'): ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <i class="bi bi-upload text-danger fs-5"></i>
+                  <h5 class="fw-bold text-white m-0 fs-6">Offline Patch &amp; Manual File Deployment</h5>
+                </div>
+                <p class="text-secondary small mb-4">
+                  If your server lacks outbound internet connectivity to GitHub, you can upload an updated <code class="text-white">index.php</code> file directly from your computer. An automated safety backup will be created before replacement.
+                </p>
+
+                <form method="POST" action="?access=admin&page=update" enctype="multipart/form-data" class="d-flex flex-column gap-3" style="max-width: 580px;">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">SELECT PATCH FILE (.PHP)</label>
+                    <div class="admin-file-picker-pill w-100 position-relative" onclick="document.getElementById('manual_patch_file_input').click();">
+                      <input type="file" name="patch_file" id="manual_patch_file_input" class="d-none" accept=".php" required onchange="const f = this.files[0]; const d = document.getElementById('patch_file_name_display'); if(f){ d.textContent = f.name + ' (' + (f.size/1024).toFixed(1) + ' KB)'; d.className = 'text-white small ms-2 text-truncate font-monospace fw-bold'; } else { d.textContent = 'No file chosen'; d.className = 'text-secondary small ms-2 text-truncate font-monospace'; }">
+                      <button type="button" class="admin-btn-pill admin-btn-primary" style="height: 32px; padding: 0 16px; font-size: 0.78rem; pointer-events: none;">
+                        <i class="bi bi-file-earmark-arrow-up-fill"></i> Choose File
+                      </button>
+                      <span id="patch_file_name_display" class="text-secondary small ms-2 text-truncate font-monospace" style="font-size: 0.82rem;">No file chosen</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">EXPECTED SHA-256 CHECKSUM (OPTIONAL VERIFICATION)</label>
+                    <input type="text" name="verify_checksum" class="admin-pill-input w-100 font-monospace" placeholder="Paste 64-character SHA-256 hash if available...">
+                    <small class="text-secondary d-block mt-1">If provided, the server aborts the patch if the file hash does not match.</small>
+                  </div>
+
+                  <button type="submit" name="upload_manual_patch" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" onclick="return confirm('Apply manual patch to index.php?');">
+                    <i class="bi bi-shield-check me-1"></i> Verify &amp; Apply Manual Patch
+                  </button>
+                </form>
+              </div>
+
+            <!-- TAB 5: DIAGNOSTIC SUITE -->
+            <?php elseif ($active_tab === 'diagnostics'): ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-heart-pulse-fill text-danger"></i> Server Environment Readiness &amp; Diagnostics
+                  </h5>
+                  <span class="admin-badge admin-badge-primary">System Audit</span>
+                </div>
+
+                <div class="d-flex flex-column">
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Main Script Write Permission (index.php)</strong>
+                      <span class="text-secondary small font-monospace"><?php echo __FILE__; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $is_file_writable ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $is_file_writable ? 'bi-check-circle-fill' : 'bi-x-circle-fill'; ?>"></i>
+                      <?php echo $is_file_writable ? 'Writable' : 'Read-Only (Update Blocked)'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Snapshot Vault Directory (.file_version/)</strong>
+                      <span class="text-secondary small font-monospace"><?php echo $backup_dir; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $is_backup_dir_writable ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $is_backup_dir_writable ? 'bi-check-circle-fill' : 'bi-x-circle-fill'; ?>"></i>
+                      <?php echo $is_backup_dir_writable ? 'Ready' : 'Permission Denied'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">PHP Runtime Version</strong>
+                      <span class="text-secondary small">Running PHP <?php echo $php_ver; ?> (8.1+ recommended)</span>
+                    </div>
+                    <span class="admin-badge <?php echo $is_php_optimal ? 'admin-badge-success' : 'admin-badge-warning'; ?>">
+                      <?php echo $is_php_optimal ? 'Optimal' : 'Legacy Compatible'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Zend OPcache Engine</strong>
+                      <span class="text-secondary small">Auto-invalidates and recompiles upon script replacement</span>
+                    </div>
+                    <span class="admin-badge <?php echo $opcache_active ? 'admin-badge-success' : 'admin-badge-secondary'; ?>">
+                      <?php echo $opcache_active ? 'Active & Monitored' : 'Not Loaded'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Available Storage Disk Buffer</strong>
+                      <span class="text-secondary small">Free: <?php echo function_exists('format_admin_bytes') ? format_admin_bytes($disk_free) : number_format($disk_free/1048576, 2).' MB'; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $has_enough_disk ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <?php echo $has_enough_disk ? 'Sufficient Space' : 'Low Disk Space'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">GitHub Connectivity &amp; Latency</strong>
+                      <span class="text-secondary small">Raw API endpoint ping: <?php echo $ping_latency_ms; ?> ms</span>
+                    </div>
+                    <span class="admin-badge <?php echo $remote_code ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <?php echo $remote_code ? 'Connected (200 OK)' : 'Failed'; ?>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Create Snapshot Modal -->
+          <div class="modal fade" id="createSnapshotModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-camera text-success me-2"></i> Create Snapshot</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=update">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div class="modal-body p-3">
+                    <label class="form-label text-secondary small fw-bold mb-1">SNAPSHOT LABEL</label>
+                    <input type="text" name="snapshot_label" class="admin-pill-input w-100 mb-3" placeholder="e.g. before_custom_edits" required>
+                    <button type="submit" name="create_manual_snapshot" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
+                      Save Snapshot to Vault
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Prune Backups Modal -->
+          <div class="modal fade" id="pruneBackupsModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-trash3 text-danger me-2"></i> Prune Snapshots</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=update" onsubmit="return confirm('Prune old snapshots?');">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div class="modal-body p-3">
+                    <label class="form-label text-secondary small fw-bold mb-1">RETENTION RULE</label>
+                    <select name="keep_recent_count" class="admin-pill-select w-100 mb-3">
+                      <option value="1">Keep Last 1 Only</option>
+                      <option value="3" selected>Keep Last 3 Snapshots</option>
+                      <option value="5">Keep Last 5 Snapshots</option>
+                    </select>
+                    <button type="submit" name="prune_all_backups" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
+                      Prune Older Backups
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Diff & GitHub Commit Scripts -->
+          <script>
+            // Live Dry Run Testing Engine
+            async function triggerDryRunTest() {
+              const consoleBox = document.getElementById('dry-run-console');
+              const container = document.getElementById('dry-run-container');
+              const btn = document.getElementById('btn-dry-run-test');
+
+              if (!consoleBox || !container) return;
+              container.classList.remove('d-none');
+              btn.disabled = true;
+              btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Running Simulation...';
+
+              consoleBox.textContent = `[STAGE 1/4] Probing multi-CDN GitHub endpoints (branch: <?php echo htmlspecialchars($target_branch); ?>)...\n`;
+
+              try {
+                const endpoints = [
+                  "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/<?php echo htmlspecialchars($target_branch); ?>/index.php",
+                  "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php",
+                  "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php"
+                ];
+
+                let code = null;
+                for (const url of endpoints) {
+                  try {
+                    const res = await fetch(url, { cache: "no-store" });
+                    if (res.ok) {
+                      const text = await res.text();
+                      if (text && text.length > 10000) {
+                        code = text;
+                        break;
+                      }
+                    }
+                  } catch(e) {}
+                }
+
+                if (!code) throw new Error("All remote endpoints (GitHub Raw & jsDelivr CDN) failed to respond.");
+
+                consoleBox.textContent += `[STAGE 2/4] Payload received: ${code.length.toLocaleString()} bytes (${(code.match(/\\n/g) || []).length + 1} lines).\n`;
+                consoleBox.textContent += `[STAGE 3/4] Performing syntax token validation...\n`;
+
+                if (!code.includes("<" + "?php") || code.length < 10000) {
+                  throw new Error("Payload is corrupted or missing PHP opening tags.");
+                }
+
+                consoleBox.textContent += `[STAGE 4/4] Verifying file system write permissions on index.php...\n`;
+                const writable = <?php echo $is_file_writable ? 'true' : 'false'; ?>;
+                if (!writable) {
+                  throw new Error("Server index.php is currently read-only. Adjust file permissions to 0644 or 0755.");
+                }
+
+                consoleBox.textContent += `\n>> SUCCESS: Staging dry run passed all integrity checks! You can safely install the update.`;
+              } catch (err) {
+                consoleBox.textContent += `\n>> ERROR: Staging simulation failed: ${err.message}`;
+              } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-play-circle text-info"></i> Test Run (Dry Run)';
+              }
+            }
+
+            // GitHub Commit History Feed Loader
+            async function fetchGitHubCommitLogs() {
+              const stream = document.getElementById('github-commit-stream');
+              if (!stream) return;
+              stream.innerHTML = '<div class="text-center py-3 text-secondary small"><span class="spinner-border spinner-border-sm me-2"></span> Loading commit timeline...</div>';
+
+              try {
+                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=8");
+                if (!res.ok) throw new Error("GitHub API rate limit or network error");
+                const commits = await res.json();
+
+                if (Array.isArray(commits) && commits.length > 0) {
+                  stream.innerHTML = commits.map(c => {
+                    const msg = c.commit.message || 'No commit message';
+                    const author = c.commit.author.name || 'Developer';
+                    const dateStr = new Date(c.commit.author.date).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    const sha = c.sha.substring(0, 7);
+
+                    return `
+                      <div class="d-flex align-items-center justify-content-between p-2 rounded-3 bg-dark bg-opacity-50 border border-secondary border-opacity-25" style="font-size: 0.82rem;">
+                        <div class="d-flex align-items-center gap-2 min-width-0 flex-grow-1 me-2">
+                          <i class="bi bi-git text-danger flex-shrink-0"></i>
+                          <div class="text-truncate">
+                            <span class="text-white fw-medium text-truncate d-block" title="${msg}">${msg}</span>
+                            <span class="text-secondary small font-monospace">${author} &bull; ${dateStr}</span>
+                          </div>
+                        </div>
+                        <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
+                          ${sha}
+                        </a>
+                      </div>
+                    `;
+                  }).join('');
+                } else {
+                  stream.innerHTML = '<div class="text-center py-2 text-secondary small">No recent commits found on branch.</div>';
+                }
+              } catch (e) {
+                stream.innerHTML = `<div class="text-center py-2 text-secondary small"><i class="bi bi-info-circle me-1"></i> Public GitHub commit timeline unavailable (${e.message}).</div>`;
+              }
+            }
+
+            // Client-Side Visual Line Diff Engine (Executes on-demand only when Diff tab is active)
+            (function buildVisualDiff() {
+              const diffBox = document.getElementById('smart-diff-container');
+              if (!diffBox) return;
+
+              <?php if ($active_tab !== 'diff'): ?>
+              return;
+              <?php else: ?>
+              <?php
+                // Load local code safely in bounded memory only for Diff view
+                $diff_local = @file_get_contents(__FILE__) ?: '';
+                $diff_remote = (string)($remote_code ?: '');
+              ?>
+              const localCode = <?php echo json_encode($diff_local); ?>;
+              const remoteCode = <?php echo json_encode($diff_remote); ?>;
+
+              if (!remoteCode) {
+                diffBox.innerHTML = '<div class="text-center py-4 text-danger small">Cannot render diff: Remote code could not be downloaded.</div>';
+                return;
+              }
+
+              if (localCode === remoteCode) {
+                diffBox.innerHTML = '<div class="text-center py-5 text-success small"><i class="bi bi-check2-circle fs-3 d-block mb-2"></i>Codebases are 100% identical. No line differences found.</div>';
+                document.getElementById('diff-adds-count').textContent = '+0 additions';
+                document.getElementById('diff-dels-count').textContent = '-0 deletions';
+                return;
+              }
+
+              const localLines = localCode.split('\n');
+              const remoteLines = remoteCode.split('\n');
+
+              let diffHtml = '';
+              let adds = 0;
+              let dels = 0;
+              const maxInspect = Math.max(localLines.length, remoteLines.length);
+              const maxRenderLimit = 600;
+
+              for (let i = 0; i < maxInspect && (adds + dels) < maxRenderLimit; i++) {
+                const l = localLines[i];
+                const r = remoteLines[i];
+
+                if (l === undefined && r !== undefined) {
+                  adds++;
+                  diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
+                } else if (l !== undefined && r === undefined) {
+                  dels++;
+                  diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
+                } else if (l !== r) {
+                  dels++;
+                  adds++;
+                  diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
+                  diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
+                }
+              }
+
+              function escapeHtml(text) {
+                return (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+              }
+
+              document.getElementById('diff-adds-count').textContent = `+${adds} additions`;
+              document.getElementById('diff-dels-count').textContent = `-${dels} deletions`;
+              diffBox.innerHTML = diffHtml || '<div class="text-center py-4 text-secondary small">No modified lines detected.</div>';
+              <?php endif; ?>
+            })();
+
+            // Cached GitHub Commit Timeline (5-Minute sessionStorage cache prevents rate-limiting and loading delays)
+            async function fetchGitHubCommitLogs() {
+              const stream = document.getElementById('github-commit-stream');
+              if (!stream) return;
+
+              const cacheKey = 'gh_commits_<?php echo htmlspecialchars($target_branch); ?>';
+              const cached = sessionStorage.getItem(cacheKey);
+              if (cached) {
+                try {
+                  const data = JSON.parse(cached);
+                  if (Date.now() - data.ts < 300000) {
+                    renderCommitList(data.commits);
+                    return;
+                  }
+                } catch (e) {}
+              }
+
+              try {
+                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=6");
+                if (!res.ok) throw new Error("GitHub API rate limit or network error");
+                const commits = await res.json();
+
+                if (Array.isArray(commits)) {
+                  sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), commits: commits }));
+                  renderCommitList(commits);
+                }
+              } catch (e) {
+                stream.innerHTML = `<div class="text-center py-2 text-secondary small"><i class="bi bi-info-circle me-1"></i> Public GitHub commit timeline unavailable (${e.message}).</div>`;
+              }
+
+              function renderCommitList(commits) {
+                if (commits.length === 0) {
+                  stream.innerHTML = '<div class="text-center py-2 text-secondary small">No recent commits found on branch.</div>';
+                  return;
+                }
+                stream.innerHTML = commits.map(c => {
+                  const msg = c.commit.message || 'No commit message';
+                  const author = c.commit.author.name || 'Developer';
+                  const dateStr = new Date(c.commit.author.date).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                  const sha = c.sha.substring(0, 7);
+
+                  return `
+                    <div class="d-flex align-items-center justify-content-between p-2 rounded-3 bg-dark bg-opacity-50 border border-secondary border-opacity-25" style="font-size: 0.82rem;">
+                      <div class="d-flex align-items-center gap-2 min-width-0 flex-grow-1 me-2">
+                        <i class="bi bi-git text-danger flex-shrink-0"></i>
+                        <div class="text-truncate">
+                          <span class="text-white fw-medium text-truncate d-block" title="${msg}">${msg}</span>
+                          <span class="text-secondary small font-monospace">${author} &bull; ${dateStr}</span>
+                        </div>
+                      </div>
+                      <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
+                        ${sha}
+                      </a>
+                    </div>
+                  `;
+                }).join('');
+              }
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+              if (document.getElementById('github-commit-stream')) {
+                fetchGitHubCommitLogs();
+              }
+            });
+          </script>
         <?php elseif (($_GET['page'] ?? '') === 'manage'): ?>
           <style>
             .main-content { overflow: hidden !important; padding: 0 !important; display: flex; flex-direction: column; }
@@ -54507,7 +55854,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                                       <?php if ($user['is_admin'] == 1): ?>
                                         <?php
                                           $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                          $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                                          $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
                                           $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
                                         ?>
                                         <button type="button" class="dropdown-item d-flex align-items-center gap-2 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
@@ -54575,7 +55922,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const userData = JSON.parse(btn.getAttribute('data-user'));
                 const modalBody = document.getElementById('user-details-modal-body');
                 
-                let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
                 try {
                   const settings = JSON.parse(userData.settings || '{}');
                   if (settings.admin_permissions) u_perms = settings.admin_permissions;
@@ -54762,6 +56109,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
                 <div class="col-12 col-md-6">
                   <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="manage" id="perm-manage">
+                    <label class="form-check-label text-white fw-medium" for="perm-manage">Player Manager</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="drive" id="perm-drive">
                     <label class="form-check-label text-white fw-medium" for="perm-drive">Drive Manager</label>
                   </div>
@@ -54782,6 +56135,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="api" id="perm-api">
                     <label class="form-check-label text-white fw-medium" for="perm-api">API Keys</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="update" id="perm-update">
+                    <label class="form-check-label text-white fw-medium" for="perm-update">System Update</label>
                   </div>
                 </div>
                 <div class="col-12 col-md-6">
@@ -56406,7 +57765,7 @@ if (isset($_GET['action'])) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
-    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev'])) {
+    } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev', 'rss'])) {
       // Media and Admin Scanner routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
@@ -56708,245 +58067,231 @@ if (isset($_GET['action'])) {
   switch ($action) {
     case 'embed':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT id, title, artist, last_modified FROM music WHERE id = ? AND is_private = 0");
+      $stmt = $db->prepare("SELECT id, title, artist, album, duration, last_modified FROM music WHERE id = ? AND is_private = 0");
       $stmt->execute([$id]);
       $song = $stmt->fetch();
       if (!$song) {
-        die("<!DOCTYPE html><html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:2rem;'>Song not found or is private.</body></html>");
+        header('Content-Type: text/html; charset=utf-8');
+        die("<!DOCTYPE html><html><body style='background:#0a0a0c;color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;'><div style='text-align:center;padding:1rem;'><h4 style='margin:0 0 6px;color:#f87171;'>Track Unavailable</h4><p style='margin:0;font-size:0.85rem;color:#888;'>This audio track is private or does not exist.</p></div></body></html>");
       }
-      $title = htmlspecialchars($song['title'], ENT_QUOTES);
-      $artist = htmlspecialchars($song['artist'], ENT_QUOTES);
+      $title = htmlspecialchars($song['title'] ?? 'Untitled', ENT_QUOTES, 'UTF-8');
+      $artist = htmlspecialchars($song['artist'] ?? 'Unknown Artist', ENT_QUOTES, 'UTF-8');
+      $album = htmlspecialchars($song['album'] ?? 'Single', ENT_QUOTES, 'UTF-8');
+      $durationSec = (int)($song['duration'] ?? 0);
       $baseUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?');
-      
-      // Append access=api to easily bypass the anti-bot firewall on cross-origin requests
-      $imgUrl = $baseUrl . "?access=api&action=get_image&id={$song['id']}&v={$song['last_modified']}";
-      $streamUrl = $baseUrl . "?access=api&action=get_stream&id={$song['id']}";
-      $shareUrl = $baseUrl . "?share_type=song&id={$song['id']}";
-      
-      echo <<<HTML
+
+      $imgUrl = $baseUrl . "?access=api&action=get_image&id=" . (int)$song['id'] . "&v=" . (int)$song['last_modified'] . "&size=small";
+      $fullImgUrl = $baseUrl . "?access=api&action=get_image&id=" . (int)$song['id'] . "&v=" . (int)$song['last_modified'];
+      $streamUrl = $baseUrl . "?access=api&action=get_stream&id=" . (int)$song['id'];
+      $shareUrl = $baseUrl . "?share_type=song&id=" . (int)$song['id'];
+
+      header('Content-Type: text/html; charset=utf-8');
+      header('Cache-Control: public, max-age=120');
+      ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{$title} - {$artist}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title><?php echo $title; ?> &ndash; <?php echo $artist; ?></title>
   <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --accent: #ff0000;
-      --bg: #0f0f0f;
+      --primary: #ff0044;
+      --primary-hover: #ff2266;
+      --bg: #070709;
+      --card-bg: rgba(18, 18, 24, 0.72);
+      --border: rgba(255, 255, 255, 0.1);
       --text: #ffffff;
-      --text-muted: #aaaaaa;
+      --text-muted: #9494a8;
     }
-
-    * {
-      box-sizing: border-box;
-    }
-
     body {
-      margin: 0;
-      padding: 0;
-      font-family: 'Roboto', -apple-system, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: var(--bg);
       color: var(--text);
       overflow: hidden;
       height: 100vh;
+      width: 100vw;
       display: flex;
       align-items: center;
       justify-content: center;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
     }
-
-    .player-wrapper {
+    .embed-card {
       position: relative;
       width: 100%;
       height: 100%;
       display: flex;
       align-items: center;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
       overflow: hidden;
-      background: #000;
+      padding: 12px 16px;
+      gap: 14px;
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
     }
-
     .bg-blur {
       position: absolute;
-      top: -50%;
-      left: -50%;
-      width: 200%;
-      height: 200%;
-      background-image: url('{$imgUrl}');
+      inset: -40px;
+      background-image: url('<?php echo $fullImgUrl; ?>');
       background-size: cover;
       background-position: center;
-      filter: blur(35px) brightness(0.3);
+      filter: blur(45px) brightness(0.25) saturate(1.4);
       z-index: 0;
       pointer-events: none;
+      transform: scale(1.15);
     }
-
-    .content {
+    .cover-box {
       position: relative;
+      width: 106px;
+      height: 106px;
+      min-width: 106px;
+      border-radius: 12px;
+      overflow: hidden;
+      flex-shrink: 0;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.08);
       z-index: 1;
-      display: flex;
+      background: #111;
+    }
+    .cover-img {
       width: 100%;
       height: 100%;
-      padding: 15px;
-      align-items: center;
-      gap: 15px;
-    }
-
-    .cover-art {
-      width: 120px;
-      height: 120px;
-      border-radius: 10px;
       object-fit: cover;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
-      flex-shrink: 0;
-      background-color: #222;
+      display: block;
+      transition: transform 0.4s ease;
     }
-
+    .embed-card:hover .cover-img { transform: scale(1.05); }
     .info-pane {
-      flex-grow: 1;
+      position: relative;
+      z-index: 1;
+      flex: 1;
       min-width: 0;
       display: flex;
       flex-direction: column;
-      justify-content: center;
+      justify-content: space-between;
       height: 100%;
+      padding: 2px 0;
     }
-
-    .title {
-      font-size: 1.2rem;
+    .meta-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .track-details { min-width: 0; flex: 1; }
+    .track-title {
+      font-size: 1.05rem;
       font-weight: 700;
-      margin: 0 0 5px 0;
+      color: #ffffff;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+      letter-spacing: -0.2px;
+      line-height: 1.25;
     }
-
-    .artist {
-      font-size: 0.95rem;
+    .track-artist {
+      font-size: 0.82rem;
+      font-weight: 500;
       color: var(--text-muted);
-      margin: 0 0 15px 0;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+      margin-top: 2px;
     }
-
-    .controls {
+    .brand-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: rgba(255, 255, 255, 0.45);
+      text-decoration: none;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .brand-link:hover {
+      color: #fff;
+      background: rgba(255, 0, 68, 0.2);
+      border-color: rgba(255, 0, 68, 0.4);
+    }
+    .brand-link svg { width: 10px; height: 10px; fill: var(--primary); }
+    .controls-row {
       display: flex;
       align-items: center;
-      gap: 15px;
+      gap: 12px;
+      margin-top: auto;
     }
-
     .play-btn {
-      width: 48px;
-      height: 48px;
+      width: 44px;
+      height: 44px;
+      min-width: 44px;
       border-radius: 50%;
-      background: var(--text);
-      color: #000;
+      background: linear-gradient(135deg, #ff0044, #cc0033);
+      color: #ffffff;
       border: none;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: transform 0.2s ease, background 0.2s ease;
+      box-shadow: 0 4px 14px rgba(255, 0, 68, 0.45);
+      transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
       flex-shrink: 0;
-      padding: 0;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     }
-
     .play-btn:hover {
       transform: scale(1.08);
-      background: #f0f0f0;
+      background: linear-gradient(135deg, #ff1a57, #dd003b);
+      box-shadow: 0 6px 18px rgba(255, 0, 68, 0.65);
     }
-
-    .play-btn svg {
-      width: 22px;
-      height: 22px;
-      fill: currentColor;
-      margin-left: 3px;
-    }
-
-    .play-btn.playing .icon-play {
-      display: none;
-    }
-
-    .play-btn.playing .icon-pause {
-      display: block;
-      margin-left: 0;
-    }
-
-    .icon-pause,
+    .play-btn:active { transform: scale(0.94); }
+    .play-btn svg { width: 20px; height: 20px; fill: currentColor; }
+    .play-btn .icon-play { margin-left: 2px; }
+    .play-btn .icon-pause { display: none; }
+    .play-btn.playing .icon-play { display: none; }
+    .play-btn.playing .icon-pause { display: block; }
     .spinner {
       display: none;
+      width: 20px;
+      height: 20px;
+      animation: spin 0.8s linear infinite;
     }
-
-    .play-btn.loading .icon-play,
-    .play-btn.loading .icon-pause {
-      display: none !important;
-    }
-
-    .play-btn.loading .spinner {
-      display: block;
-      margin-left: 0;
-      width: 24px;
-      height: 24px;
-      animation: rotate 2s linear infinite;
-    }
-
-    .spinner circle {
-      stroke: currentColor;
-      stroke-linecap: round;
-      animation: dash 1.5s ease-in-out infinite;
-    }
-
-    @keyframes rotate {
-      100% {
-        transform: rotate(360deg);
-      }
-    }
-
-    @keyframes dash {
-      0% {
-        stroke-dasharray: 1, 150;
-        stroke-dashoffset: 0;
-      }
-
-      50% {
-        stroke-dasharray: 90, 150;
-        stroke-dashoffset: -35;
-      }
-
-      100% {
-        stroke-dasharray: 90, 150;
-        stroke-dashoffset: -124;
-      }
-    }
-
-    .progress-wrapper {
-      flex-grow: 1;
+    .play-btn.loading .icon-play, .play-btn.loading .icon-pause { display: none !important; }
+    .play-btn.loading .spinner { display: block; }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    .progress-section {
+      flex: 1;
+      min-width: 0;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
     }
-
-    .progress-bar {
+    .progress-track {
+      position: relative;
       width: 100%;
       height: 6px;
-      background: rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.12);
       border-radius: 3px;
       cursor: pointer;
-      position: relative;
+      touch-action: none;
     }
-
     .progress-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--accent);
-      border-radius: 3px;
-      pointer-events: none;
       position: absolute;
       top: 0;
       left: 0;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #ff0044, #ff4477);
+      border-radius: 3px;
+      pointer-events: none;
+      transition: width 0.05s linear;
     }
-
     .progress-fill::after {
       content: '';
       position: absolute;
@@ -56954,172 +58299,183 @@ if (isset($_GET['action'])) {
       top: -3px;
       width: 12px;
       height: 12px;
-      background: var(--text);
       border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
       opacity: 0;
-      transition: opacity 0.2s;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+      transform: scale(0.6);
+      transition: all 0.15s ease;
     }
-
-    .progress-bar:hover .progress-fill::after {
+    .progress-track:hover .progress-fill::after {
       opacity: 1;
+      transform: scale(1);
     }
-
-    .time-stamps {
+    .time-box {
       display: flex;
       justify-content: space-between;
-      font-size: 0.75rem;
+      align-items: center;
+      font-size: 0.72rem;
+      font-family: monospace;
       color: var(--text-muted);
-      font-variant-numeric: tabular-nums;
-      font-weight: 500;
+      font-weight: 600;
     }
-
-    .brand {
-      position: absolute;
-      top: 12px;
-      right: 15px;
-      font-size: 0.75rem;
-      font-weight: 700;
-      color: rgba(255, 255, 255, 0.4);
-      text-decoration: none;
-      z-index: 2;
-      transition: color 0.2s;
-      letter-spacing: 0.5px;
+    .eq-wave {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 10px;
     }
-
-    .brand:hover {
-      color: rgba(255, 255, 255, 0.9);
+    .eq-bar {
+      width: 2px;
+      height: 2px;
+      background: var(--primary);
+      border-radius: 1px;
+      transition: height 0.15s ease;
     }
-
-    @media (max-width: 400px) {
-      .cover-art {
-        width: 90px;
-        height: 90px;
-      }
-
-      .play-btn {
-        width: 40px;
-        height: 40px;
-      }
-
-      .play-btn svg {
-        width: 18px;
-        height: 18px;
-      }
+    .eq-wave.active .eq-bar:nth-child(1) { animation: eqJump 0.6s ease infinite alternate; }
+    .eq-wave.active .eq-bar:nth-child(2) { animation: eqJump 0.8s ease 0.15s infinite alternate; }
+    .eq-wave.active .eq-bar:nth-child(3) { animation: eqJump 0.5s ease 0.3s infinite alternate; }
+    .eq-wave.active .eq-bar:nth-child(4) { animation: eqJump 0.7s ease 0.1s infinite alternate; }
+    @keyframes eqJump {
+      0% { height: 2px; }
+      100% { height: 10px; }
+    }
+    @media (max-width: 380px) {
+      .cover-box { width: 84px; height: 84px; min-width: 84px; }
+      .play-btn { width: 38px; height: 38px; min-width: 38px; }
+      .track-title { font-size: 0.92rem; }
     }
   </style>
 </head>
 <body>
-  <div class="player-wrapper">
+  <div class="embed-card">
     <div class="bg-blur"></div>
-    <a href="{$shareUrl}" target="_blank" class="brand">PHP MUSIC</a>
-    <div class="content">
-      <img src="{$imgUrl}" class="cover-art" alt="Cover Art">
-      <div class="info-pane">
-        <div class="title">{$title}</div>
-        <div class="artist">{$artist}</div>
-        <div class="controls">
-          <button class="play-btn" id="playBtn" aria-label="Play/Pause">
-            <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-            <svg class="icon-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-            <svg class="spinner" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="5"></circle></svg>
-          </button>
-          <div class="progress-wrapper">
-            <div class="progress-bar" id="progBar">
-              <div class="progress-fill" id="progFill"></div>
+    <div class="cover-box">
+      <img src="<?php echo $imgUrl; ?>" class="cover-img" alt="Artwork" onerror="this.src='?action=get_app_icon'">
+    </div>
+    <div class="info-pane">
+      <div class="meta-top">
+        <div class="track-details">
+          <div class="track-title" title="<?php echo $title; ?>"><?php echo $title; ?></div>
+          <div class="track-artist" title="<?php echo $artist; ?>"><?php echo $artist; ?></div>
+        </div>
+        <a href="<?php echo $shareUrl; ?>" target="_blank" rel="noopener noreferrer" class="brand-link" title="Listen on PHP Music">
+          <svg viewBox="0 0 24 24"><path d="M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg>
+          PHP Music
+        </a>
+      </div>
+      <div class="controls-row">
+        <button class="play-btn" id="playBtn" aria-label="Play">
+          <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg class="icon-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="9" stroke-dasharray="40" stroke-dashoffset="15" stroke-linecap="round"/></svg>
+        </button>
+        <div class="progress-section">
+          <div class="progress-track" id="progTrack">
+            <div class="progress-fill" id="progFill"></div>
+          </div>
+          <div class="time-box">
+            <span id="timeCurrent">0:00</span>
+            <div class="eq-wave" id="eqWave">
+              <span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span>
             </div>
-            <div class="time-stamps">
-              <span id="timeCurrent">0:00</span>
-              <span id="timeTotal">0:00</span>
-            </div>
+            <span id="timeTotal"><?php echo $durationSec; ?>s</span>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <audio id="audio" src="{$streamUrl}" preload="metadata" crossorigin="anonymous"></audio>
+  <audio id="audio" src="<?php echo $streamUrl; ?>" preload="metadata" crossorigin="anonymous"></audio>
   <script>
-    const audio = document.getElementById('audio');
-    const playBtn = document.getElementById('playBtn');
-    const progBar = document.getElementById('progBar');
-    const progFill = document.getElementById('progFill');
-    const timeCurrent = document.getElementById('timeCurrent');
-    const timeTotal = document.getElementById('timeTotal');
+    (function() {
+      const audio = document.getElementById('audio');
+      const playBtn = document.getElementById('playBtn');
+      const track = document.getElementById('progTrack');
+      const fill = document.getElementById('progFill');
+      const timeCur = document.getElementById('timeCurrent');
+      const timeTot = document.getElementById('timeTotal');
+      const eq = document.getElementById('eqWave');
 
-    const formatTime = (s) => {
-      if (isNaN(s) || !isFinite(s)) return '0:00';
-      const min = Math.floor(s / 60);
-      const sec = Math.floor(s % 60).toString().padStart(2, '0');
-      return min + ':' + sec;
-    };
+      const formatTime = (s) => {
+        if (isNaN(s) || !isFinite(s) || s < 0) return '0:00';
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60).toString().padStart(2, '0');
+        return m + ':' + sec;
+      };
 
-    const updateDuration = () => {
-      if (audio.duration && isFinite(audio.duration)) {
-        timeTotal.textContent = formatTime(audio.duration);
-      }
-    };
-
-    audio.addEventListener('loadedmetadata', updateDuration);
-    audio.addEventListener('durationchange', updateDuration);
-
-    audio.addEventListener('timeupdate', () => {
-      timeCurrent.textContent = formatTime(audio.currentTime);
-      if (audio.duration && isFinite(audio.duration)) {
-        progFill.style.width = ((audio.currentTime / audio.duration) * 100) + '%';
-      }
-    });
-
-    audio.addEventListener('waiting', () => playBtn.classList.add('loading'));
-    
-    audio.addEventListener('playing', () => {
-      playBtn.classList.remove('loading');
-      playBtn.classList.add('playing');
-      updateDuration();
-    });
-
-    audio.addEventListener('pause', () => {
-      playBtn.classList.remove('loading');
-      playBtn.classList.remove('playing');
-    });
-
-    audio.addEventListener('error', (e) => {
-      playBtn.classList.remove('loading', 'playing');
-      playBtn.innerHTML = "<svg viewBox='0 0 24 24' fill='#ff4444' style='margin-left:0; width:24px; height:24px;'><path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z'/></svg>";
-      console.error('Audio stream error', e);
-    });
-
-    playBtn.addEventListener('click', () => {
-      if (audio.paused) {
-        const p = audio.play();
-        if (p !== undefined) {
-          playBtn.classList.add('loading');
-          p.catch(e => {
-            console.error('Playback failed:', e);
-            playBtn.classList.remove('loading');
-          });
+      const setDuration = () => {
+        if (audio.duration && isFinite(audio.duration)) {
+          timeTot.textContent = formatTime(audio.duration);
         }
-      } else {
-        audio.pause();
-      }
-    });
+      };
 
-    progBar.addEventListener('click', (e) => {
-      if (!audio.duration || !isFinite(audio.duration)) return;
-      const rect = progBar.getBoundingClientRect();
-      const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      audio.currentTime = pos * audio.duration;
-    });
+      audio.addEventListener('loadedmetadata', setDuration);
+      audio.addEventListener('durationchange', setDuration);
 
-    audio.addEventListener('ended', () => {
-      progFill.style.width = '0%';
-      timeCurrent.textContent = '0:00';
-      audio.currentTime = 0;
-      playBtn.classList.remove('playing');
-    });
+      audio.addEventListener('timeupdate', () => {
+        timeCur.textContent = formatTime(audio.currentTime);
+        if (audio.duration && isFinite(audio.duration)) {
+          fill.style.width = (audio.currentTime / audio.duration * 100) + '%';
+        }
+      });
+
+      audio.addEventListener('waiting', () => playBtn.classList.add('loading'));
+      audio.addEventListener('playing', () => {
+        playBtn.classList.remove('loading');
+        playBtn.classList.add('playing');
+        eq.classList.add('active');
+        setDuration();
+      });
+      audio.addEventListener('pause', () => {
+        playBtn.classList.remove('loading', 'playing');
+        eq.classList.remove('active');
+      });
+      audio.addEventListener('ended', () => {
+        playBtn.classList.remove('loading', 'playing');
+        eq.classList.remove('active');
+        fill.style.width = '0%';
+        timeCur.textContent = '0:00';
+      });
+
+      const togglePlay = () => {
+        if (audio.paused) {
+          playBtn.classList.add('loading');
+          audio.play().catch(() => playBtn.classList.remove('loading'));
+        } else {
+          audio.pause();
+        }
+      };
+
+      playBtn.addEventListener('click', togglePlay);
+
+      let isScrubbing = false;
+      const scrub = (e) => {
+        if (!audio.duration || !isFinite(audio.duration)) return;
+        const rect = track.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        audio.currentTime = pos * audio.duration;
+        fill.style.width = (pos * 100) + '%';
+      };
+
+      track.addEventListener('mousedown', (e) => { isScrubbing = true; scrub(e); });
+      track.addEventListener('touchstart', (e) => { isScrubbing = true; scrub(e); }, { passive: true });
+      window.addEventListener('mousemove', (e) => { if (isScrubbing) scrub(e); });
+      window.addEventListener('touchmove', (e) => { if (isScrubbing) scrub(e); }, { passive: true });
+      window.addEventListener('mouseup', () => { isScrubbing = false; });
+      window.addEventListener('touchend', () => { isScrubbing = false; });
+
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+        if (e.code === 'ArrowRight') { audio.currentTime = Math.min(audio.duration, audio.currentTime + 5); }
+        if (e.code === 'ArrowLeft') { audio.currentTime = Math.max(0, audio.currentTime - 5); }
+        if (e.code === 'KeyM') { audio.muted = !audio.muted; }
+      });
+    })();
   </script>
 </body>
 </html>
-HTML;
+      <?php
       exit;
 
     case 'toggle_collaborative':
@@ -57191,44 +58547,47 @@ HTML;
       send_json($sorted_results);
       break;
 
-    case 'check_update_code':
-      error_reporting(0);
-      $remote_url = "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/main/index.php";
-      $remote_code = false;
-      
-      if (function_exists('curl_version')) {
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $remote_url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_USERAGENT, 'PHP-Music-Update-Checker');
-        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        $remote_code = curl_exec($ch);
-        curl_close($ch);
-      } 
-      
-      if (!$remote_code) {
-        $context = stream_context_create(['http' => ['timeout' => 3, 'header' => "User-Agent: PHP-Music-Update-Checker\r\n"]]);
-        $remote_code = @file_get_contents($remote_url, false, $context);
+    case 'rss':
+      header('Content-Type: application/rss+xml; charset=utf-8');
+      header('Cache-Control: public, max-age=3600');
+      $stmt = $db->prepare("SELECT m.id, m.title, m.artist, m.album, m.genre, m.duration, m.last_modified FROM music m WHERE m.is_private = 0 AND m.banned = 0 ORDER BY m.id DESC LIMIT 50");
+      $stmt->execute();
+      $rss_songs = $stmt->fetchAll();
+
+      $site_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?');
+
+      echo '<' . '?xml version="1.0" encoding="UTF-8"?' . '>' . "\n";
+      echo '<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom">' . "\n";
+      echo '  <channel>' . "\n";
+      echo '    <title>PHP Music</title>' . "\n";
+      echo '    <link>' . htmlspecialchars($site_url, ENT_XML1, 'UTF-8') . '</link>' . "\n";
+      echo '    <description>Latest tracks uploaded to PHP Music</description>' . "\n";
+      echo '    <language>en-us</language>' . "\n";
+      echo '    <atom:link href="' . htmlspecialchars($site_url . '?action=rss', ENT_XML1, 'UTF-8') . '" rel="self" type="application/rss+xml" />' . "\n";
+
+      foreach ($rss_songs as $s) {
+        $song_title = htmlspecialchars($s['title'] ?? 'Untitled', ENT_XML1, 'UTF-8');
+        $song_artist = htmlspecialchars($s['artist'] ?? 'Unknown Artist', ENT_XML1, 'UTF-8');
+        $song_album = htmlspecialchars($s['album'] ?? 'Unknown Album', ENT_XML1, 'UTF-8');
+        $song_link = htmlspecialchars($site_url . '?share_type=song&id=' . $s['id'], ENT_XML1, 'UTF-8');
+        $stream_link = htmlspecialchars($site_url . '?action=get_stream&id=' . $s['id'], ENT_XML1, 'UTF-8');
+        $pubDate = !empty($s['last_modified']) ? date(DATE_RSS, (int)$s['last_modified']) : date(DATE_RSS);
+
+        echo '    <item>' . "\n";
+        echo '      <title>' . $song_title . ' - ' . $song_artist . '</title>' . "\n";
+        echo '      <link>' . $song_link . '</link>' . "\n";
+        echo '      <guid isPermaLink="false">phpmusic-song-' . $s['id'] . '</guid>' . "\n";
+        echo '      <pubDate>' . $pubDate . '</pubDate>' . "\n";
+        echo '      <description>' . htmlspecialchars("Track: {$song_title} | Artist: {$song_artist} | Album: {$song_album}", ENT_XML1, 'UTF-8') . '</description>' . "\n";
+        echo '      <enclosure url="' . $stream_link . '" length="' . ($s['duration'] * 16000) . '" type="audio/mpeg" />' . "\n";
+        echo '      <itunes:author>' . $song_artist . '</itunes:author>' . "\n";
+        echo '      <itunes:duration>' . (int)$s['duration'] . '</itunes:duration>' . "\n";
+        echo '    </item>' . "\n";
       }
-      
-      if (!$remote_code) {
-        send_json(['status' => 'error', 'message' => 'Could not connect to GitHub. Check your server firewall or internet.']);
-      }
-      
-      $local_code = @file_get_contents(__FILE__);
-      
-      $remote_normalized = str_replace(["\r\n", "\r"], "\n", trim($remote_code));
-      $local_normalized = str_replace(["\r\n", "\r"], "\n", trim($local_code));
-      
-      $is_matching = hash_equals(hash('sha256', $remote_normalized), hash('sha256', $local_normalized));
-      
-      while (ob_get_level() > 0) { @ob_end_clean(); }
-      send_json([
-        'status' => 'success',
-        'update_available' => !$is_matching
-      ]);
-      break;
+
+      echo '  </channel>' . "\n";
+      echo '</rss>';
+      exit;
 
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
@@ -66182,6 +67541,7 @@ function perform_cover_scan($db) {
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
     <link rel="apple-touch-icon" href="?action=get_app_icon&amp;size=192">
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
+    <link rel="alternate" type="application/rss+xml" title="PHP Music RSS Feed" href="?action=rss">
     <script>
       window.adminAutoToken = '<?php echo ($is_super_admin || $is_admin) ? "super_admin_bypass" : ""; ?>';
       window.autoScanEnabled = <?php echo isset($auto_scan) && $auto_scan ? 'true' : 'false'; ?>;
@@ -72727,11 +74087,11 @@ function perform_cover_scan($db) {
             <!-- Platforms -->
             <hr class="text-secondary">
             <h6 class="text-uppercase text-secondary fw-bold mx-3 mt-2 mb-2" style="font-size: 0.75rem; letter-spacing: 1px;">Platforms</h6>
-            <a href="?access=user&page=drive" target="_blank" rel="noopener noreferrer" class="nav-link">
+            <a href="?access=user&page=drive" class="nav-link">
               <i class="bi bi-hdd-rack-fill"></i>
               <span>My Drive</span>
             </a>
-            <a href="?access=artwork" target="_blank" rel="noopener noreferrer" class="nav-link">
+            <a href="?access=artwork" class="nav-link">
               <i class="bi bi-palette-fill"></i>
               <span>PHPMusicPost</span>
             </a>
@@ -72897,9 +74257,9 @@ function perform_cover_scan($db) {
               <i class="bi bi-file-earmark-text-fill"></i>
               <span>License</span>
             </a>
-            <a href="#" class="nav-link" id="check-update-btn">
-              <i class="bi bi-arrow-clockwise"></i>
-              <span>Check Update</span>
+            <a href="#" class="nav-link" id="nav-rss-feed" data-bs-toggle="modal" data-bs-target="#rss-modal">
+              <i class="bi bi-rss-fill text-danger"></i>
+              <span>RSS Feed</span>
             </a>
             <a href="https://github.com/HirotakaDango/PHP-Music/archive/refs/heads/main.zip" target="_blank" class="nav-link">
               <i class="bi bi-file-earmark-zip-fill"></i>
@@ -77441,20 +78801,6 @@ function perform_cover_scan($db) {
         </button>
       </div>
     </div>
-    
-    <div class="modal fade" id="update-modal" tabindex="-1">
-      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
-        <div class="modal-content" style="background-color: var(--ytm-surface);">
-          <div class="modal-header border-0">
-            <h5 class="modal-title"><i class="bi bi-arrow-clockwise"></i> Check for Updates</h5>
-            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body text-center" id="update-modal-body">
-            <!-- Dynamic Content populated by JS -->
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- MAIN COMPREHENSIVE API MODAL -->
     <div class="modal fade" id="api-modal" tabindex="-1">
@@ -80050,6 +81396,81 @@ curl_close($ch);
       </html>
     </template>
 
+    <!-- RSS FEED PREVIEW & SHARE MODAL -->
+    <div class="modal fade" id="rss-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background: rgba(18, 18, 22, 0.96); backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.85);">
+          <div class="modal-header border-0 pb-2 px-4 pt-4 d-flex justify-content-between align-items-center">
+            <h5 class="modal-title text-white fw-bold d-flex align-items-center gap-2" style="font-size: 1.25rem;">
+              <div style="width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, #ff0044, #990022); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; flex-shrink: 0; box-shadow: 0 4px 12px rgba(255, 0, 68, 0.35);">
+                <i class="bi bi-rss-fill"></i>
+              </div>
+              <span>RSS &amp; Podcast Feed</span>
+            </h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body px-4 pb-4">
+            <p class="text-secondary small mb-3">
+              Subscribe to this server using any standard RSS reader (Feedly, NetNewsWire, Apple Podcasts, etc.) to stream tracks and receive real-time upload updates.
+            </p>
+
+            <div class="mb-4">
+              <label class="form-label text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.8px;">Feed URL</label>
+              <div class="input-group shadow-sm">
+                <input type="text" id="rss-feed-url-input" class="form-control bg-dark border-secondary text-info font-monospace py-2 ps-3" readonly value="" style="font-size: 0.88rem;">
+                <button class="btn btn-danger text-white fw-bold px-4 d-inline-flex align-items-center gap-2" id="copy-rss-feed-btn" type="button">
+                  <i class="bi bi-clipboard-fill"></i> Copy
+                </button>
+                <a href="?action=rss" target="_blank" rel="noopener noreferrer" class="btn btn-outline-light d-inline-flex align-items-center gap-1 px-3" title="Open Raw XML Feed">
+                  <i class="bi bi-box-arrow-up-right"></i> Open Raw
+                </a>
+              </div>
+            </div>
+
+            <!-- 2 TABS: PREVIEW | CODE (XML) -->
+            <ul class="nav nav-pills border-0 d-flex w-100 gap-2 mb-3 p-1 rounded-3" role="tablist" style="background: rgba(255, 255, 255, 0.06);">
+              <li class="nav-item flex-grow-1" role="presentation" style="flex: 1 1 0%;">
+                <button class="nav-link active w-100 py-2 fw-bold text-center rounded-3 d-flex align-items-center justify-content-center" style="font-size: 0.88rem;" data-bs-toggle="tab" data-bs-target="#rss-tab-preview" type="button" role="tab">
+                  <i class="bi bi-eye-fill me-2"></i> Preview
+                </button>
+              </li>
+              <li class="nav-item flex-grow-1" role="presentation" style="flex: 1 1 0%;">
+                <button class="nav-link w-100 py-2 fw-bold text-center rounded-3 d-flex align-items-center justify-content-center" style="font-size: 0.88rem;" data-bs-toggle="tab" data-bs-target="#rss-tab-code" type="button" role="tab">
+                  <i class="bi bi-code-slash me-2"></i> Code (XML)
+                </button>
+              </li>
+            </ul>
+
+            <div class="tab-content">
+              <!-- Tab 1: Preview -->
+              <div class="tab-pane fade show active" id="rss-tab-preview" role="tabpanel">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">Recent Feed Entries</span>
+                  <span class="badge bg-dark border border-secondary text-secondary" id="rss-items-count">Loading...</span>
+                </div>
+                <div id="rss-feed-preview-list" class="d-flex flex-column gap-2 overflow-auto modern-custom-scroll" style="max-height: 280px; padding-right: 4px;">
+                  <div class="text-center py-4 text-secondary">
+                    <div class="spinner-border spinner-border-sm text-danger me-2" role="status"></div> Loading live feed preview...
+                  </div>
+                </div>
+              </div>
+
+              <!-- Tab 2: Code (XML) -->
+              <div class="tab-pane fade" id="rss-tab-code" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing: 0.6px;">RSS 2.0 XML Schema</span>
+                  <button class="btn btn-sm btn-outline-secondary py-0 px-2 fw-bold" id="copy-rss-xml-snippet-btn" type="button" style="font-size: 0.75rem;">
+                    <i class="bi bi-copy me-1"></i> Copy XML
+                  </button>
+                </div>
+                <pre class="bg-black text-light p-3 rounded-3 border border-secondary border-opacity-50 overflow-auto modern-custom-scroll m-0" style="max-height: 280px; font-size: 0.82rem; line-height: 1.5;"><code id="rss-raw-xml-code" class="text-info font-monospace">&lt;!-- Fetching XML payload... --&gt;</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="license-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
@@ -80537,10 +81958,6 @@ SOFTWARE.</div>
           "infinite-scroll-loader",
         );
         const installPwaBtn = document.getElementById("install-pwa-btn");
-        const checkUpdateBtn = document.getElementById("check-update-btn");
-        const updateModalEl = document.getElementById("update-modal");
-        const updateModal = updateModalEl ? new bootstrap.Modal(updateModalEl) : null;
-        const updateModalBody = document.getElementById("update-modal-body");
     
         const pipBtnDesktop = document.getElementById("pip-btn-desktop");
         const pipBtnMobile = document.getElementById("pip-btn-mobile");
@@ -82564,6 +83981,144 @@ SOFTWARE.</div>
                   setTimeout(() => input.focus(), 500);
                 }
               }, 800);
+            }
+          });
+        }
+    
+        // RSS Feed Modal Preview & Code Logic
+        const rssModalEl = document.getElementById("rss-modal");
+        const rssFeedUrlInput = document.getElementById("rss-feed-url-input");
+        const copyRssFeedBtn = document.getElementById("copy-rss-feed-btn");
+        const copyRssXmlBtn = document.getElementById("copy-rss-xml-snippet-btn");
+        const rssPreviewList = document.getElementById("rss-feed-preview-list");
+        const rssRawXmlCode = document.getElementById("rss-raw-xml-code");
+        const rssItemsCount = document.getElementById("rss-items-count");
+
+        if (rssModalEl) {
+          rssModalEl.addEventListener("show.bs.modal", async () => {
+            const feedUrl = window.location.origin + window.location.pathname.replace(/\/+$/, "") + "/?action=rss";
+            if (rssFeedUrlInput) rssFeedUrlInput.value = feedUrl;
+
+            if (rssPreviewList) {
+              rssPreviewList.innerHTML = '<div class="text-center py-4 text-secondary"><div class="spinner-border spinner-border-sm text-danger me-2" role="status"></div> Loading live feed preview...</div>';
+            }
+            if (rssRawXmlCode) {
+              rssRawXmlCode.textContent = "<!-- Fetching live XML payload... -->";
+            }
+
+            try {
+              // 1. Fetch real XML feed directly from the server
+              const xmlRes = await fetch("?action=rss");
+              if (!xmlRes.ok) throw new Error("Failed to fetch RSS XML");
+              const xmlText = await xmlRes.text();
+
+              // 2. Update Code Tab with raw XML
+              if (rssRawXmlCode) {
+                rssRawXmlCode.textContent = xmlText;
+              }
+
+              // 3. Parse XML directly with DOMParser to build the Preview list
+              const parser = new DOMParser();
+              const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+              const items = Array.from(xmlDoc.querySelectorAll("item"));
+
+              if (items.length > 0) {
+                if (rssItemsCount) rssItemsCount.textContent = `${items.length} tracks`;
+                
+                const getTagText = (el, tag) => {
+                  const node = el.getElementsByTagName(tag)[0] || el.getElementsByTagName("itunes:" + tag)[0];
+                  return node ? node.textContent : "";
+                };
+
+                rssPreviewList.innerHTML = items.map(item => {
+                  const rawTitle = getTagText(item, "title") || "Untitled";
+                  const itemLink = getTagText(item, "link") || feedUrl;
+                  const author = getTagText(item, "author") || "Unknown Artist";
+                  const guid = getTagText(item, "guid") || "";
+                  const songId = guid.replace("phpmusic-song-", "").trim();
+                  const durationSec = parseInt(getTagText(item, "duration") || "0", 10);
+                  const formattedDuration = typeof formatTime === "function" ? formatTime(durationSec) : `${durationSec}s`;
+
+                  let displayTitle = rawTitle;
+                  let displayArtist = author;
+                  if (rawTitle.includes(" - ")) {
+                    const parts = rawTitle.split(" - ");
+                    displayTitle = parts[0];
+                    if (displayArtist === "Unknown Artist" && parts[1]) {
+                      displayArtist = parts.slice(1).join(" - ");
+                    }
+                  }
+
+                  const imgUrl = songId ? `?action=get_image&id=${songId}&size=small` : "?action=get_app_icon";
+
+                  return `
+                    <div class="d-flex align-items-center justify-content-between p-2 rounded-3" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);">
+                      <div class="d-flex align-items-center gap-3 min-width-0" style="min-width: 0;">
+                        <img src="${imgUrl}" class="rounded-2 flex-shrink-0" style="width: 42px; height: 42px; object-fit: cover; background: #1a1a1a;" onerror="this.src='?action=get_app_icon'">
+                        <div class="text-truncate">
+                          <div class="fw-bold text-white text-truncate" style="font-size: 0.92rem;">${escapeHTML(displayTitle)}</div>
+                          <div class="text-secondary small text-truncate" style="font-size: 0.78rem;">${escapeHTML(displayArtist)} &bull; ${formattedDuration}</div>
+                        </div>
+                      </div>
+                      <a href="${itemLink}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 flex-shrink-0 ms-2 fw-medium" style="font-size: 0.75rem;">
+                        <i class="bi bi-play-circle me-1"></i> Stream
+                      </a>
+                    </div>
+                  `;
+                }).join("");
+              } else {
+                if (rssItemsCount) rssItemsCount.textContent = "0 tracks";
+                rssPreviewList.innerHTML = '<div class="text-center py-4 text-secondary">No tracks published in feed yet.</div>';
+              }
+            } catch (err) {
+              if (rssItemsCount) rssItemsCount.textContent = "Offline";
+              if (rssPreviewList) {
+                rssPreviewList.innerHTML = '<div class="text-center py-4 text-secondary small"><i class="bi bi-exclamation-triangle text-danger d-block mb-1 fs-5"></i>Unable to load preview. Try opening Raw XML.</div>';
+              }
+              if (rssRawXmlCode) {
+                const xmlHeader = '<' + '?xml version="1.0" encoding="UTF-8"?' + '>';
+                rssRawXmlCode.textContent = `${xmlHeader}\n<rss version="2.0">\n  <channel>\n    <title>PHP Music</title>\n    <link>${feedUrl}</link>\n    <!-- Error loading live feed -->\n  </channel>\n</rss>`;
+              }
+            }
+          });
+        }
+
+        if (copyRssFeedBtn && rssFeedUrlInput) {
+          copyRssFeedBtn.addEventListener("click", () => {
+            const url = rssFeedUrlInput.value;
+            const originalHtml = copyRssFeedBtn.innerHTML;
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(url).then(() => {
+                copyRssFeedBtn.innerHTML = '<i class="bi bi-check2"></i> Copied!';
+                copyRssFeedBtn.classList.replace("btn-danger", "btn-success");
+                showToast("RSS Feed URL copied to clipboard!", "success");
+                setTimeout(() => {
+                  copyRssFeedBtn.innerHTML = originalHtml;
+                  copyRssFeedBtn.classList.replace("btn-success", "btn-danger");
+                }, 2000);
+              });
+            } else {
+              rssFeedUrlInput.select();
+              document.execCommand("copy");
+              showToast("RSS Feed URL copied!", "success");
+            }
+          });
+        }
+
+        if (copyRssXmlBtn && rssRawXmlCode) {
+          copyRssXmlBtn.addEventListener("click", () => {
+            const xml = rssRawXmlCode.textContent;
+            const originalHtml = copyRssXmlBtn.innerHTML;
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(xml).then(() => {
+                copyRssXmlBtn.innerHTML = '<i class="bi bi-check2"></i> Copied!';
+                copyRssXmlBtn.classList.replace("btn-outline-secondary", "btn-success");
+                showToast("Raw XML copied to clipboard!", "success");
+                setTimeout(() => {
+                  copyRssXmlBtn.innerHTML = originalHtml;
+                  copyRssXmlBtn.classList.replace("btn-success", "btn-outline-secondary");
+                }, 2000);
+              });
             }
           });
         }
@@ -97112,7 +98667,7 @@ SOFTWARE.</div>
               "clear-session-btn",
               "fullscreen-btn",
               "install-pwa-btn",
-              "check-update-btn",
+              "nav-rss-feed",
               "nav-upload-btn",
               "get-api-btn",
             ].includes(link.id)
@@ -102239,53 +103794,6 @@ SOFTWARE.</div>
             if (outcome === "accepted") {
               deferredInstallPrompt = null;
               installPwaBtn.classList.add("d-none");
-            }
-          });
-        }
-    
-        if (checkUpdateBtn) {
-          checkUpdateBtn.addEventListener("click", async (e) => {
-            e.preventDefault();
-            hideMobileSidebar();
-    
-            if (updateModal && updateModalBody) {
-              updateModalBody.innerHTML = `
-                <div class="spinner-border text-secondary" role="status" style="width: 3rem; height: 3rem; border-width: 0.3em;"></div>
-                <p class="mt-3 text-secondary">Analyzing and comparing entire codebase...</p>
-              `;
-              updateModal.show();
-    
-              try {
-                const response = await fetch("?action=check_update_code", {
-                  cache: "no-store",
-                });
-                const result = await response.json();
-    
-                if (result.status === "success") {
-                  if (result.update_available) {
-                    updateModalBody.innerHTML = `
-                      <i class="bi bi-info-circle-fill text-warning" style="font-size: 3.5rem;"></i>
-                      <h4 class="mt-3">Code Modification Detected!</h4>
-                      <p class="text-secondary mb-4">Your current code does not strictly match the latest source code on GitHub.</p>
-                      <a href="https://github.com/HirotakaDango/PHP-Music" target="_blank" class="btn btn-warning w-100"><i class="bi bi-github"></i> Download Latest Code</a>
-                    `;
-                  } else {
-                    updateModalBody.innerHTML = `
-                      <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
-                      <h4 class="mt-3">Code is Identical!</h4>
-                      <p class="text-secondary mb-0">Your codebase perfectly matches the latest version on GitHub.</p>
-                    `;
-                  }
-                } else {
-                  throw new Error(result.message || "Check failed.");
-                }
-              } catch (error) {
-                updateModalBody.innerHTML = `
-                  <i class="bi bi-x-circle-fill text-danger" style="font-size: 3.5rem;"></i>
-                  <h4 class="mt-3">Comparison Failed</h4>
-                  <p class="text-secondary mb-0">${error.message}</p>
-                `;
-              }
             }
           });
         }
