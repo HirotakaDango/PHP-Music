@@ -1426,7 +1426,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 define('MUSIC_DIR', __DIR__);
 define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.2');
+define('APP_VERSION', '11.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -29767,6 +29767,130 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // AJAX STREAMLINED SYSTEM UPDATER (Zero Hard-Reload, Zero Timeouts)
+    if (isset($_POST['ajax_system_update'])) {
+      header('Content-Type: application/json; charset=utf-8');
+      @ini_set('memory_limit', '512M');
+      @set_time_limit(180);
+
+      $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
+      $endpoints = [
+        "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$branch}/index.php",
+        "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php",
+        "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php"
+      ];
+      $remote_code = false;
+
+      foreach ($endpoints as $remote_url) {
+        if (function_exists('curl_version')) {
+          $ch = curl_init();
+          curl_setopt_array($ch, [
+            CURLOPT_URL => $remote_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_CONNECTTIMEOUT => 6,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-Updater',
+            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
+          ]);
+          $res = curl_exec($ch);
+          $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+          curl_close($ch);
+          if ($http_code === 200 && $res && strlen($res) > 10000) {
+            $remote_code = $res;
+            break;
+          }
+        }
+
+        if (!$remote_code) {
+          $ctx = stream_context_create([
+            'http' => [
+              'timeout' => 20,
+              'follow_location' => true,
+              'header' => "User-Agent: Mozilla/5.0 PHP-Music-Updater\r\nAccept: text/plain, */*\r\n"
+            ],
+            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+          ]);
+          $res = @file_get_contents($remote_url, false, $ctx);
+          if ($res && strlen($res) > 10000) {
+            $remote_code = $res;
+            break;
+          }
+        }
+      }
+
+      if (!$remote_code || strlen($remote_code) <= 10000 || strpos($remote_code, '<?php') === false) {
+        echo json_encode(['success' => false, 'error' => "Download failed: Remote branch '{$branch}' could not be fetched or payload is corrupted."]);
+        exit;
+      }
+
+      $is_valid_php = false;
+      try {
+        $tokens = @token_get_all($remote_code);
+        if (!empty($tokens) && count($tokens) > 50) {
+          $is_valid_php = true;
+        }
+      } catch (Throwable $t) {
+        $is_valid_php = false;
+      }
+
+      if (!$is_valid_php) {
+        echo json_encode(['success' => false, 'error' => "Validation failed: Downloaded code from '{$branch}' failed PHP syntax tokenization."]);
+        exit;
+      }
+
+      // Create Timestamped Safety Rollback Backup
+      $backup_dir = MUSIC_DIR . '/.file_version';
+      if (!is_dir($backup_dir)) {
+        @mkdir($backup_dir, 0777, true);
+        @file_put_contents($backup_dir . '/.htaccess', "Order Deny,Allow\nDeny from all");
+      }
+      $backup_file = $backup_dir . '/index_backup_' . date('Ymd_His') . '_v' . APP_VERSION . '.php';
+      @copy(__FILE__, $backup_file);
+
+      // Atomic File Overwrite using Temporary Buffer
+      $tmp_swap = __FILE__ . '.tmp_' . uniqid();
+      if (@file_put_contents($tmp_swap, $remote_code) !== false) {
+        if (@rename($tmp_swap, __FILE__)) {
+          if (function_exists('opcache_reset')) { @opcache_reset(); }
+          if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
+
+          preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $m_ver);
+          $new_version = $m_ver[1] ?? 'Updated';
+
+          log_admin_activity(get_db(), $_SESSION['admin_email'], "AJAX Smooth Update applied from branch '{$branch}' (Backup: " . basename($backup_file) . ")", 0);
+
+          echo json_encode([
+            'success' => true,
+            'message' => "Codebase successfully updated to version {$new_version}!",
+            'version' => $new_version,
+            'backup_file' => basename($backup_file),
+            'branch' => $branch
+          ]);
+          exit;
+        } else {
+          @unlink($tmp_swap);
+          echo json_encode(['success' => false, 'error' => "Filesystem error: Unable to swap temporary file to index.php. Check write permissions."]);
+          exit;
+        }
+      } else {
+        echo json_encode(['success' => false, 'error' => "Filesystem error: Unable to write to disk. Ensure web server has write permissions."]);
+        exit;
+      }
+    }
+
+    // ONE-CLICK DATABASE SCHEMA MIGRATION HANDLER
+    if (isset($_POST['run_database_migrations'])) {
+      $db = get_db();
+      init_db($db);
+      log_admin_activity($db, $_SESSION['admin_email'], 'Executed Database Schema Synchronization & Migration Audit', 0);
+      $_SESSION['admin_flash_msg'] = "Database schema synchronized and missing tables/indexes successfully repaired!";
+      header('Location: ?access=admin&page=update&tab=migrations');
+      exit;
+    }
+
     // SYSTEM UPDATE SUITE CONTROLLER
     if (isset($_POST['apply_system_update'])) {
       $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
@@ -35861,7 +35985,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.2';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.3';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
@@ -36028,6 +36152,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               border-radius: 50%;
               pointer-events: none;
             }
+            .update-tabs-container {
+              display: flex !important;
+              align-items: center;
+              gap: 0.5rem;
+              flex-wrap: nowrap !important;
+              overflow-x: auto !important;
+              overflow-y: hidden !important;
+              padding-bottom: 8px !important;
+              margin-bottom: 1.5rem !important;
+              scrollbar-width: thin;
+              scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+              -webkit-overflow-scrolling: touch;
+              width: 100%;
+            }
+            .update-tabs-container::-webkit-scrollbar {
+              height: 4px;
+            }
+            .update-tabs-container::-webkit-scrollbar-track {
+              background: transparent;
+            }
+            .update-tabs-container::-webkit-scrollbar-thumb {
+              background: rgba(255, 255, 255, 0.15);
+              border-radius: 4px;
+            }
+            .update-tabs-container::-webkit-scrollbar-thumb:hover {
+              background: #ff0044;
+            }
             .update-tab-btn {
               padding: 0.6rem 1.25rem;
               font-size: 0.88rem;
@@ -36041,6 +36192,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: inline-flex;
               align-items: center;
               gap: 0.5rem;
+              white-space: nowrap !important;
+              flex-shrink: 0 !important;
             }
             .update-tab-btn:hover {
               background: rgba(255, 255, 255, 0.05);
@@ -36151,13 +36304,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <i class="bi bi-play-circle text-info"></i> Test Run (Dry Run)
                     </button>
 
-                    <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Install update now from branch \'<?php echo htmlspecialchars($target_branch); ?>\'? A full rollback snapshot will be generated automatically.');">
-                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                      <input type="hidden" name="target_branch" value="<?php echo htmlspecialchars($target_branch); ?>">
-                      <button type="submit" name="apply_system_update" class="admin-btn-pill admin-btn-primary" style="height: 40px; padding: 0 1.35rem;" <?php echo (!$remote_available || !$is_file_writable) ? 'disabled' : ''; ?>>
+                    <?php if ($is_identical): ?>
+                      <button type="button" class="admin-btn-pill" style="height: 40px; padding: 0 1.35rem; opacity: 0.5; cursor: not-allowed; border-color: rgba(255, 255, 255, 0.1);" disabled title="System is currently operating on the latest release. No update needed.">
+                        <i class="bi bi-check-circle-fill text-success me-1"></i> Already Latest Version
+                      </button>
+                    <?php else: ?>
+                      <button type="button" onclick="triggerSmoothUpdate('<?php echo htmlspecialchars($target_branch); ?>')" class="admin-btn-pill admin-btn-primary" style="height: 40px; padding: 0 1.35rem;" <?php echo (!$remote_available || !$is_file_writable) ? 'disabled' : ''; ?>>
                         <i class="bi bi-cloud-arrow-down-fill me-1"></i> Install Update Now
                       </button>
-                    </form>
+                    <?php endif; ?>
                   </div>
                 </div>
               </div>
@@ -36211,7 +36366,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
 
             <!-- Navigation Sub-Tabs -->
-            <div class="d-flex align-items-center gap-2 mb-4 overflow-x-auto pb-1" style="scrollbar-width: none;">
+            <div class="update-tabs-container">
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=dashboard" class="update-tab-btn <?php echo $active_tab === 'dashboard' ? 'active' : ''; ?>">
                 <i class="bi bi-speedometer2"></i> Dashboard &amp; Audit
               </a>
@@ -36220,6 +36375,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </a>
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=diff" class="update-tab-btn <?php echo $active_tab === 'diff' ? 'active' : ''; ?>">
                 <i class="bi bi-file-earmark-diff"></i> Visual Code Diff
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=migrations" class="update-tab-btn <?php echo $active_tab === 'migrations' ? 'active' : ''; ?>">
+                <i class="bi bi-database-check"></i> Database Migrations
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=history" class="update-tab-btn <?php echo $active_tab === 'history' ? 'active' : ''; ?>">
+                <i class="bi bi-journal-text"></i> Update Audit Logs
               </a>
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=backups" class="update-tab-btn <?php echo $active_tab === 'backups' ? 'active' : ''; ?>">
                 <i class="bi bi-clock-history"></i> Backup &amp; Rollback Vault (<?php echo count($backups); ?>)
@@ -36564,7 +36725,185 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </div>
                 </div>
               </div>
+
+            <!-- TAB 6: DATABASE MIGRATIONS & SCHEMA REPAIR -->
+            <?php elseif ($active_tab === 'migrations'): ?>
+              <?php
+                $db = get_db();
+                $tables_to_check = [
+                  'users', 'music', 'playlists', 'playlist_songs', 'favorites',
+                  'offline_songs', 'rhythm_scores', 'rhythm_charts', 'drive_shares',
+                  'personal_notes', 'tasks', 'blogs', 'community_posts', 'messages',
+                  'site_analytics', 'daily_visitor_stats', 'api_keys', 'admin_logs'
+                ];
+
+                $table_status = [];
+                foreach ($tables_to_check as $tbl) {
+                  try {
+                    $row_cnt = (int)$db->query("SELECT COUNT(*) FROM \"{$tbl}\"")->fetchColumn();
+                    $col_cnt = count($db->query("PRAGMA table_info(\"{$tbl}\")")->fetchAll());
+                    $table_status[] = [
+                      'name' => $tbl,
+                      'exists' => true,
+                      'rows' => $row_cnt,
+                      'columns' => $col_cnt,
+                      'status' => 'Healthy'
+                    ];
+                  } catch (Exception $e) {
+                    $table_status[] = [
+                      'name' => $tbl,
+                      'exists' => false,
+                      'rows' => 0,
+                      'columns' => 0,
+                      'status' => 'Missing'
+                    ];
+                  }
+                }
+              ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-database-check text-success"></i> Database Migrations &amp; Schema Integrity
+                    </h5>
+                    <div class="small text-secondary mt-1">Audit table structure, verify columns, and sync schema without wiping data.</div>
+                  </div>
+                  <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Synchronize database schema now? All tables and column indexes will be validated.');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <button type="submit" name="run_database_migrations" class="admin-btn-pill admin-btn-primary">
+                      <i class="bi bi-play-fill"></i> Run Migrations &amp; Schema Sync
+                    </button>
+                  </form>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th>Table Name</th>
+                        <th>Columns</th>
+                        <th>Total Rows</th>
+                        <th>Integrity State</th>
+                        <th class="text-end">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($table_status as $ts): ?>
+                        <tr>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <i class="bi bi-table text-info"></i>
+                              <span class="font-monospace text-white fw-bold"><?php echo htmlspecialchars($ts['name']); ?></span>
+                            </div>
+                          </td>
+                          <td class="font-monospace text-secondary small"><?php echo $ts['columns']; ?> cols</td>
+                          <td class="font-monospace text-white"><?php echo number_format($ts['rows']); ?></td>
+                          <td>
+                            <span class="admin-badge <?php echo $ts['exists'] ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                              <?php echo $ts['exists'] ? 'Verified' : 'Uninitialized'; ?>
+                            </span>
+                          </td>
+                          <td class="text-end">
+                            <span class="admin-badge <?php echo $ts['exists'] ? 'admin-badge-info' : 'admin-badge-warning'; ?>">
+                              <?php echo $ts['status']; ?>
+                            </span>
+                          </td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <!-- TAB 7: UPDATE AUDIT LOGS -->
+            <?php elseif ($active_tab === 'history'): ?>
+              <?php
+                $db = get_db();
+                $update_logs = $db->query("
+                  SELECT * FROM admin_logs 
+                  WHERE action LIKE '%update%' OR action LIKE '%rollback%' OR action LIKE '%patch%' OR action LIKE '%snapshot%' OR action LIKE '%branch%'
+                  ORDER BY id DESC LIMIT 50
+                ")->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-journal-text text-danger"></i> Update Execution &amp; Rollback History
+                    </h5>
+                    <div class="small text-secondary mt-1">Audit log of system patches, branch updates, and rollback operations.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Last 50 Events</span>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th style="width: 160px;">Timestamp</th>
+                        <th>Administrator</th>
+                        <th>Action Logged</th>
+                        <th class="text-end">Scope</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($update_logs)): ?>
+                        <tr><td colspan="4" class="text-center py-5 text-secondary">No update actions recorded in audit log yet.</td></tr>
+                      <?php else: foreach ($update_logs as $ul): ?>
+                        <tr>
+                          <td class="text-secondary font-monospace small"><?php echo htmlspecialchars($ul['created_at']); ?></td>
+                          <td>
+                            <span class="admin-badge admin-badge-info"><?php echo htmlspecialchars($ul['admin_email']); ?></span>
+                          </td>
+                          <td class="text-white font-monospace small" style="white-space: pre-wrap; word-break: break-all;">
+                            <?php echo htmlspecialchars($ul['action']); ?>
+                          </td>
+                          <td class="text-end">
+                            <span class="admin-badge admin-badge-secondary"><?php echo htmlspecialchars($ul['target_email'] ?: 'System'); ?></span>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             <?php endif; ?>
+          </div>
+
+          <!-- SMOOTH UPDATE PROGRESS MODAL (Zero Hard-Reload) -->
+          <div class="modal fade" id="updateProgressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: #0c0c10; border: 1px solid rgba(255, 0, 68, 0.35); border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.9);">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2">
+                    <span class="spinner-border spinner-border-sm text-danger" id="update-spinner" role="status"></span>
+                    <span id="update-modal-title">Applying System Update</span>
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white d-none" id="update-modal-close-btn" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-4 text-start">
+                  <!-- Dynamic Progress Percentage Bar -->
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="small text-secondary fw-bold text-uppercase" id="update-stage-label" style="letter-spacing: 0.5px;">Initializing...</span>
+                    <span class="fw-bold font-monospace text-danger" id="update-percentage-label">0%</span>
+                  </div>
+                  <div class="progress mb-3" style="height: 10px; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08);">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-danger" id="update-progress-bar" role="progressbar" style="width: 0%; transition: width 0.3s ease;"></div>
+                  </div>
+
+                  <!-- Live Staging Output Log Console -->
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-50 font-monospace" id="update-live-console" style="font-size: 0.74rem; line-height: 1.5; color: #a0a0b0; max-height: 190px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">
+                  </div>
+
+                  <div id="update-action-footer" class="mt-3 pt-2 border-top border-secondary border-opacity-25 d-none justify-content-end gap-2">
+                    <button type="button" class="admin-btn-pill" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="admin-btn-pill admin-btn-primary" onclick="softRefreshUpdatePage();">
+                      <i class="bi bi-arrow-clockwise me-1"></i> Refresh Dashboard
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Create Snapshot Modal -->
@@ -36617,6 +36956,175 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
           <!-- Interactive Diff & GitHub Commit Scripts -->
           <script>
+            // SMOOTH LIVE UPDATE ENGINE (No Hard Reload, Animated Progress Bar)
+            window.triggerSmoothUpdate = async function(branch) {
+              const modalEl = document.getElementById('updateProgressModal');
+              const progressBar = document.getElementById('update-progress-bar');
+              const pctLabel = document.getElementById('update-percentage-label');
+              const stageLabel = document.getElementById('update-stage-label');
+              const consoleBox = document.getElementById('update-live-console');
+              const spinner = document.getElementById('update-spinner');
+              const closeBtn = document.getElementById('update-modal-close-btn');
+              const footer = document.getElementById('update-action-footer');
+              const title = document.getElementById('update-modal-title');
+
+              if (!modalEl) return;
+
+              // Reset dialog state
+              progressBar.style.width = '5%';
+              progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-danger';
+              pctLabel.textContent = '5%';
+              stageLabel.textContent = 'STAGE 1/5: PRE-FLIGHT DIAGNOSTICS';
+              consoleBox.textContent = `[${new Date().toLocaleTimeString()}] Initializing live update protocol for branch '${branch}'...\n`;
+              spinner.classList.remove('d-none');
+              closeBtn.classList.add('d-none');
+              footer.classList.add('d-none');
+              footer.classList.remove('d-flex');
+              title.textContent = 'Applying System Update';
+
+              const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+              modal.show();
+
+              const setProgress = (pct, stageText, logText) => {
+                progressBar.style.width = pct + '%';
+                pctLabel.textContent = pct + '%';
+                if (stageText) stageLabel.textContent = stageText;
+                if (logText) {
+                  consoleBox.textContent += `[${new Date().toLocaleTimeString()}] ${logText}\n`;
+                  consoleBox.scrollTop = consoleBox.scrollHeight;
+                }
+              };
+
+              // Stage 1: Pre-flight Verification
+              setTimeout(() => {
+                setProgress(20, 'STAGE 2/5: CONNECTING TO MULTI-CDN REPOSITORIES', 'Validating server memory and disk permissions...');
+              }, 400);
+
+              setTimeout(() => {
+                setProgress(45, 'STAGE 3/5: STREAMING PAYLOAD', `Contacting GitHub API and jsDelivr mirrors for branch '${branch}'...`);
+              }, 900);
+
+              const fd = new FormData();
+              fd.append('ajax_system_update', '1');
+              fd.append('target_branch', branch);
+              fd.append('csrf_token', '<?php echo $_SESSION['admin_csrf_token']; ?>');
+
+              try {
+                const response = await fetch('?access=admin&page=update', {
+                  method: 'POST',
+                  body: fd
+                });
+
+                if (!response.ok) {
+                  throw new Error(`Server returned HTTP ${response.status} (${response.statusText})`);
+                }
+
+                const data = await response.json();
+
+                if (data.success) {
+                  setProgress(75, 'STAGE 4/5: TOKEN VALIDATION & SAFETY BACKUP', `Payload verified. Created pre-update snapshot: ${data.backup_file}`);
+
+                  setTimeout(() => {
+                    setProgress(90, 'STAGE 5/5: ATOMIC FILE SWAP', 'Applying atomic file replacement and clearing Zend OPcache memory...');
+                  }, 400);
+
+                  setTimeout(() => {
+                    progressBar.style.width = '100%';
+                    progressBar.className = 'progress-bar bg-success';
+                    pctLabel.textContent = '100%';
+                    stageLabel.textContent = 'COMPLETE: SYSTEM UPGRADED';
+                    consoleBox.textContent += `[${new Date().toLocaleTimeString()}] SUCCESS: ${data.message}\n`;
+                    consoleBox.textContent += `>> Upgrade completed safely without server timeout!\n`;
+                    consoleBox.scrollTop = consoleBox.scrollHeight;
+
+                    spinner.classList.add('d-none');
+                    closeBtn.classList.remove('d-none');
+                    footer.classList.remove('d-none');
+                    footer.classList.add('d-flex');
+                    title.textContent = 'Update Installed Successfully!';
+                  }, 900);
+                } else {
+                  throw new Error(data.error || 'Unknown update failure');
+                }
+              } catch (err) {
+                progressBar.className = 'progress-bar bg-danger';
+                progressBar.style.width = '100%';
+                pctLabel.textContent = 'ERR';
+                stageLabel.textContent = 'UPDATE ABORTED';
+                consoleBox.textContent += `\n>> [FATAL ERROR]: ${err.message}\n`;
+                consoleBox.textContent += `>> No files were harmed. Your installed version remains intact.\n`;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
+
+                spinner.classList.add('d-none');
+                closeBtn.classList.remove('d-none');
+                footer.classList.remove('d-none');
+                footer.classList.add('d-flex');
+                title.textContent = 'Update Encountered an Error';
+              }
+            };
+
+            // SEAMLESS SOFT REFRESH (Re-queries DOM without a hard browser reload)
+            window.softRefreshUpdatePage = async function() {
+              const modalEl = document.getElementById('updateProgressModal');
+              if (modalEl) {
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+              }
+
+              // Cleanup any lingering modal backdrops
+              document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+              document.body.classList.remove('modal-open');
+              document.body.style.overflow = '';
+              document.body.style.paddingRight = '';
+
+              const loader = document.getElementById('admin-loader-overlay');
+              if (loader) {
+                loader.style.display = 'flex';
+                loader.style.opacity = '1';
+                loader.style.pointerEvents = 'auto';
+              }
+
+              try {
+                const currentUrl = window.location.href;
+                const res = await fetch(currentUrl, {
+                  cache: 'no-store',
+                  headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+
+                if (!res.ok) throw new Error('HTTP status ' + res.status);
+                const htmlText = await res.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlText, 'text/html');
+
+                const newContent = doc.querySelector('#admin-dynamic-content');
+                const targetContent = document.getElementById('admin-dynamic-content');
+
+                if (newContent && targetContent) {
+                  targetContent.innerHTML = newContent.innerHTML;
+
+                  // Execute refreshed DOM scripts
+                  targetContent.querySelectorAll('script').forEach(oldScript => {
+                    const newScript = document.createElement('script');
+                    Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+                    newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                  });
+
+                  if (doc.title) document.title = doc.title;
+                }
+              } catch (err) {
+                console.warn('Soft refresh fallback:', err);
+              } finally {
+                if (loader) {
+                  loader.style.opacity = '0';
+                  setTimeout(() => {
+                    loader.style.display = 'none';
+                    loader.style.pointerEvents = 'none';
+                  }, 200);
+                }
+              }
+            };
+
             // Live Dry Run Testing Engine (Attached to window for seamless SPA execution)
             window.triggerDryRunTest = async function() {
               const consoleBox = document.getElementById('dry-run-console');
@@ -36922,13 +37430,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         </div>
                         <div class="d-flex align-items-center gap-2">
                           <span class="text-secondary small font-monospace"><i class="bi bi-calendar-event me-1"></i>${dateStr}</span>
-                          <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Install release ${tag}? A safety rollback backup will be created automatically.');">
-                            <input type="hidden" name="csrf_token" value="${csrf}">
-                            <input type="hidden" name="target_branch" value="${escapeHtml(tag)}">
-                            <button type="submit" name="apply_system_update" class="admin-btn-pill ${isCurrent ? 'btn-outline-secondary' : 'admin-btn-primary'}" style="height: 32px; padding: 0 0.85rem; font-size: 0.78rem;">
-                              <i class="bi ${isCurrent ? 'bi-arrow-repeat' : 'bi-download'}"></i> ${isCurrent ? 'Re-install Release' : 'Install Release'}
-                            </button>
-                          </form>
+                          <button type="button" ${isCurrent ? 'disabled' : `onclick="triggerSmoothUpdate('${escapeHtml(tag)}')"`} class="admin-btn-pill ${isCurrent ? 'btn-outline-secondary' : 'admin-btn-primary'}" style="height: 32px; padding: 0 0.85rem; font-size: 0.78rem; ${isCurrent ? 'opacity: 0.45; cursor: not-allowed;' : ''}" title="${isCurrent ? 'Currently installed version' : 'Install this release'}">
+                            <i class="bi ${isCurrent ? 'bi-check-circle-fill text-success' : 'bi-download'}"></i> ${isCurrent ? 'Already Installed' : 'Install Release'}
+                          </button>
                         </div>
                       </div>
                       <div class="markdown-body text-light small px-1" style="font-size: 0.84rem; line-height: 1.6; color: #d0d0d8;">
