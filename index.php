@@ -1231,6 +1231,123 @@ if (isset($_GET['access']) && $_GET['access'] === 'requirements') {
 $is_super_admin = 0;
 $is_admin = 0;
 
+if (!function_exists('get_ip_country_code')) {
+  function get_ip_country_code($ip, $db = null) {
+    // 1. Direct CDN / Server GeoIP headers
+    $headers = [
+      'HTTP_CF_IPCOUNTRY',
+      'HTTP_X_COUNTRY_CODE',
+      'GEOIP_COUNTRY_CODE',
+      'HTTP_GEOIP_COUNTRY_CODE',
+      'HTTP_X_GEOIP_COUNTRY'
+    ];
+    foreach ($headers as $h) {
+      if (!empty($_SERVER[$h])) {
+        $c = strtoupper(trim($_SERVER[$h]));
+        if (preg_match('/^[A-Z]{2}$/', $c) && $c !== 'XX') {
+          return $c;
+        }
+      }
+    }
+
+    // 2. Localhost / Private Subnets
+    if (empty($ip) || $ip === '127.0.0.1' || $ip === '::1' || strpos($ip, '192.168.') === 0 || strpos($ip, '10.') === 0 || preg_match('/^172\.(1[6-9]|2[0-9]|3[0-1])\./', $ip)) {
+      return 'LOCAL';
+    }
+
+    // 3. Local SQLite cache lookup (0ms overhead if this IP was resolved previously)
+    if ($db instanceof PDO) {
+      try {
+        $stmt_cached = $db->prepare("SELECT country FROM site_analytics WHERE ip_address = ? AND country != 'XX' AND country IS NOT NULL AND country != '' LIMIT 1");
+        $stmt_cached->execute([$ip]);
+        $cached_country = $stmt_cached->fetchColumn();
+        if ($cached_country && preg_match('/^[A-Z]{2}$/', $cached_country)) {
+          return $cached_country;
+        }
+      } catch (\Throwable $e) {}
+    }
+
+    // 4. Fast external IP geolocation lookup (ip2c.org: ~20ms, returns "1;US;USA;United States")
+    if (function_exists('curl_init')) {
+      try {
+        $ch = curl_init("https://ip2c.org/" . urlencode($ip));
+        curl_setopt_array($ch, [
+          CURLOPT_RETURNTRANSFER => true,
+          CURLOPT_TIMEOUT => 2,
+          CURLOPT_CONNECTTIMEOUT => 1,
+          CURLOPT_SSL_VERIFYPEER => false,
+          CURLOPT_SSL_VERIFYHOST => false,
+          CURLOPT_USERAGENT => 'PHP-Music-GeoIP'
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        if ($res && strpos($res, ';') !== false) {
+          $parts = explode(';', trim($res));
+          if ($parts[0] === '1' && isset($parts[1]) && preg_match('/^[A-Z]{2}$/', $parts[1])) {
+            return strtoupper($parts[1]);
+          }
+        }
+      } catch (\Throwable $e) {}
+    }
+
+    // 5. Fallback via ip-api.com
+    if (function_exists('curl_init')) {
+      try {
+        $ch = curl_init("http://ip-api.com/json/" . urlencode($ip) . "?fields=status,countryCode");
+        curl_setopt_array($ch, [
+          CURLOPT_RETURNTRANSFER => true,
+          CURLOPT_TIMEOUT => 2,
+          CURLOPT_CONNECTTIMEOUT => 1,
+          CURLOPT_USERAGENT => 'PHP-Music-GeoIP'
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        if ($res) {
+          $data = json_decode($res, true);
+          if (!empty($data['countryCode']) && preg_match('/^[A-Z]{2}$/', $data['countryCode'])) {
+            return strtoupper($data['countryCode']);
+          }
+        }
+      } catch (\Throwable $e) {}
+    }
+
+    return 'XX';
+  }
+}
+
+if (!function_exists('format_country_badge')) {
+  function format_country_badge($code) {
+    $code = strtoupper(trim((string)($code ?: 'XX')));
+    if ($code === 'LOCAL') return '🏠 Localhost';
+    if ($code === 'XX' || $code === 'UNKNOWN' || !preg_match('/^[A-Z]{2}$/', $code)) return '🌐 Unknown';
+    
+    $flag = '';
+    if (function_exists('mb_chr')) {
+      try {
+        $first = ord($code[0]) - ord('A') + 0x1F1E6;
+        $second = ord($code[1]) - ord('A') + 0x1F1E6;
+        $flag = mb_chr($first, 'UTF-8') . mb_chr($second, 'UTF-8') . ' ';
+      } catch (\Throwable $e) {
+        $flag = '';
+      }
+    }
+
+    $names = [
+      'NL' => 'Netherlands', 'US' => 'United States', 'GB' => 'United Kingdom', 'DE' => 'Germany',
+      'FR' => 'France', 'JP' => 'Japan', 'CA' => 'Canada', 'AU' => 'Australia', 'BR' => 'Brazil',
+      'IN' => 'India', 'ID' => 'Indonesia', 'RU' => 'Russia', 'CN' => 'China', 'ES' => 'Spain',
+      'IT' => 'Italy', 'PL' => 'Poland', 'SE' => 'Sweden', 'KR' => 'South Korea', 'SG' => 'Singapore',
+      'MY' => 'Malaysia', 'PH' => 'Philippines', 'TH' => 'Thailand', 'VN' => 'Vietnam', 'TR' => 'Turkey',
+      'MX' => 'Mexico', 'AR' => 'Argentina', 'CL' => 'Chile', 'CO' => 'Colombia', 'ZA' => 'South Africa',
+      'EG' => 'Egypt', 'SA' => 'Saudi Arabia', 'AE' => 'United Arab Emirates', 'BE' => 'Belgium',
+      'CH' => 'Switzerland', 'AT' => 'Austria', 'NO' => 'Norway', 'FI' => 'Finland', 'DK' => 'Denmark',
+      'NZ' => 'New Zealand', 'IE' => 'Ireland', 'PT' => 'Portugal', 'GR' => 'Greece', 'RO' => 'Romania',
+      'CZ' => 'Czech Republic', 'HU' => 'Hungary', 'UA' => 'Ukraine', 'HK' => 'Hong Kong', 'TW' => 'Taiwan'
+    ];
+    return $flag . ($names[$code] ?? $code);
+  }
+}
+
 // VISITOR PARSING & DAILY TRACKING ENGINE
 function parse_user_agent_details($ua_string) {
   $details = [
@@ -1339,6 +1456,51 @@ function track_site_visitor($db) {
   $ip_hash = hash('sha256', $ip_raw . '_' . $visit_date); // Daily unique salt per IP
 
   try {
+    // Self-healing schema validation: ensure tables exist before running analytics queries
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS daily_visitor_stats (
+        visit_date TEXT PRIMARY KEY,
+        total_hits INTEGER DEFAULT 0,
+        unique_visitors INTEGER DEFAULT 0,
+        registered_visitors INTEGER DEFAULT 0,
+        guest_visitors INTEGER DEFAULT 0,
+        desktop_hits INTEGER DEFAULT 0,
+        mobile_hits INTEGER DEFAULT 0,
+        tablet_hits INTEGER DEFAULT 0,
+        bot_hits INTEGER DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS site_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        visit_date TEXT NOT NULL,
+        visit_time TEXT NOT NULL,
+        ip_hash TEXT NOT NULL,
+        ip_address TEXT DEFAULT NULL,
+        user_id INTEGER DEFAULT 0,
+        user_agent TEXT,
+        browser TEXT DEFAULT 'Unknown',
+        browser_version TEXT DEFAULT '',
+        os TEXT DEFAULT 'Unknown',
+        device_type TEXT DEFAULT 'Desktop',
+        referer TEXT DEFAULT NULL,
+        request_uri TEXT DEFAULT NULL,
+        is_unique_daily INTEGER DEFAULT 0,
+        is_bot INTEGER DEFAULT 0,
+        country TEXT DEFAULT 'XX',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_analytics_date ON site_analytics(visit_date);
+      CREATE INDEX IF NOT EXISTS idx_analytics_ip_date ON site_analytics(visit_date, ip_hash);
+    ");
+
+    // Auto-migrate country column if missing from existing legacy tables
+    try {
+      $sa_cols = $db->query("PRAGMA table_info(site_analytics)")->fetchAll(PDO::FETCH_COLUMN, 1);
+      if (!in_array('country', $sa_cols)) {
+        $db->exec("ALTER TABLE site_analytics ADD COLUMN country TEXT DEFAULT 'XX';");
+      }
+    } catch (\Throwable $e) {}
+
     // 3. STRICT DEDUPLICATION: Check if this IP has already been logged today
     $stmt_check = $db->prepare("SELECT id FROM site_analytics WHERE visit_date = ? AND ip_hash = ? LIMIT 1");
     $stmt_check->execute([$visit_date, $ip_hash]);
@@ -1354,14 +1516,15 @@ function track_site_visitor($db) {
     $referer = $_SERVER['HTTP_REFERER'] ?? null;
     $current_user_id = $_SESSION['user_id'] ?? 0;
     $ua_info = parse_user_agent_details($user_agent);
+    $client_country = get_ip_country_code($ip_raw, $db);
 
-    // 4. Log the unique visitor footprint
+    // 4. Log the unique visitor footprint with geolocation country code
     $stmt_ins = $db->prepare("
       INSERT INTO site_analytics (
         visit_date, visit_time, ip_hash, ip_address, user_id, user_agent,
         browser, browser_version, os, device_type, referer, request_uri,
-        is_unique_daily, is_bot
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        is_unique_daily, is_bot, country
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     ");
     $stmt_ins->execute([
       $visit_date,
@@ -1376,40 +1539,53 @@ function track_site_visitor($db) {
       $ua_info['device_type'],
       $referer ? mb_substr($referer, 0, 500) : null,
       mb_substr($raw_uri, 0, 500),
-      $ua_info['is_bot']
+      $ua_info['is_bot'],
+      $client_country
     ]);
 
-    // 5. Increment daily aggregated metrics
+    // 5. Increment daily aggregated metrics using portable SQLite syntax (compatible with all SQLite versions)
     $col_dev = 'desktop_hits';
     if ($ua_info['device_type'] === 'Mobile') $col_dev = 'mobile_hits';
     elseif ($ua_info['device_type'] === 'Tablet') $col_dev = 'tablet_hits';
     elseif ($ua_info['is_bot']) $col_dev = 'bot_hits';
 
-    $db->prepare("
-      INSERT INTO daily_visitor_stats (
-        visit_date, total_hits, unique_visitors, registered_visitors,
-        guest_visitors, desktop_hits, mobile_hits, tablet_hits, bot_hits, updated_at
-      ) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(visit_date) DO UPDATE SET
-        total_hits = total_hits + 1,
-        unique_visitors = unique_visitors + 1,
-        registered_visitors = registered_visitors + excluded.registered_visitors,
-        guest_visitors = guest_visitors + excluded.guest_visitors,
-        desktop_hits = desktop_hits + excluded.desktop_hits,
-        mobile_hits = mobile_hits + excluded.mobile_hits,
-        tablet_hits = tablet_hits + excluded.tablet_hits,
-        bot_hits = bot_hits + excluded.bot_hits,
-        updated_at = CURRENT_TIMESTAMP
-    ")->execute([
-      $visit_date,
-      ($current_user_id > 0) ? 1 : 0,
-      ($current_user_id === 0) ? 1 : 0,
-      ($col_dev === 'desktop_hits') ? 1 : 0,
-      ($col_dev === 'mobile_hits') ? 1 : 0,
-      ($col_dev === 'tablet_hits') ? 1 : 0,
-      ($col_dev === 'bot_hits') ? 1 : 0
-    ]);
-  } catch (Exception $e) {
+    $stmt_d_check = $db->prepare("SELECT 1 FROM daily_visitor_stats WHERE visit_date = ? LIMIT 1");
+    $stmt_d_check->execute([$visit_date]);
+    if ($stmt_d_check->fetchColumn()) {
+      $col_dev_sql = in_array($col_dev, ['desktop_hits', 'mobile_hits', 'tablet_hits', 'bot_hits']) ? $col_dev : 'desktop_hits';
+      $stmt_d_up = $db->prepare("
+        UPDATE daily_visitor_stats SET
+          total_hits = total_hits + 1,
+          unique_visitors = unique_visitors + 1,
+          registered_visitors = registered_visitors + ?,
+          guest_visitors = guest_visitors + ?,
+          {$col_dev_sql} = {$col_dev_sql} + 1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE visit_date = ?
+      ");
+      $stmt_d_up->execute([
+        ($current_user_id > 0) ? 1 : 0,
+        ($current_user_id === 0) ? 1 : 0,
+        $visit_date
+      ]);
+    } else {
+      $stmt_d_ins = $db->prepare("
+        INSERT INTO daily_visitor_stats (
+          visit_date, total_hits, unique_visitors, registered_visitors,
+          guest_visitors, desktop_hits, mobile_hits, tablet_hits, bot_hits, updated_at
+        ) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ");
+      $stmt_d_ins->execute([
+        $visit_date,
+        ($current_user_id > 0) ? 1 : 0,
+        ($current_user_id === 0) ? 1 : 0,
+        ($col_dev === 'desktop_hits') ? 1 : 0,
+        ($col_dev === 'mobile_hits') ? 1 : 0,
+        ($col_dev === 'tablet_hits') ? 1 : 0,
+        ($col_dev === 'bot_hits') ? 1 : 0
+      ]);
+    }
+  } catch (\Throwable $e) {
     // Non-blocking logging failure fallback
   }
 }
@@ -1424,9 +1600,9 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
   session_write_close();
 }
 
-define('MUSIC_DIR', __DIR__);
-define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.3');
+if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
+if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
+define('APP_VERSION', '11.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -1435,7 +1611,7 @@ $auto_scan = true; // Auto scan songs during empty or new files
 // Track visitor footprint on non-media requests (Runs safely AFTER DB_FILE is defined)
 try {
   track_site_visitor(get_db());
-} catch (Exception $e) {}
+} catch (\Throwable $e) {}
 
 // Disable auto scan if super admin does not exist to enforce setup page
 try {
@@ -28581,6 +28757,65 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
+    // SAVE SONG & AUDIO LIBRARY SETTINGS
+    if (isset($_POST['save_songs_settings'])) {
+      $db = get_db();
+      $max_size = max(10, min(500, (int)($_POST['songs_max_size_mb'] ?? 50)));
+      $auto_replaygain = !empty($_POST['songs_auto_replaygain']) ? '1' : '0';
+      $default_privacy = !empty($_POST['songs_default_private']) ? '1' : '0';
+      $allow_collab = !empty($_POST['songs_default_collab']) ? '1' : '0';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['songs_max_size_mb', (string)$max_size]);
+      $stmt->execute(['songs_auto_replaygain', $auto_replaygain]);
+      $stmt->execute(['songs_default_private', $default_privacy]);
+      $stmt->execute(['songs_default_collab', $allow_collab]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved Song & Audio Management Settings', 0);
+      $_SESSION['admin_flash_msg'] = "Audio library settings saved.";
+      header('Location: ?access=admin&page=songs&tab=settings');
+      exit;
+    }
+
+    // SAVE USER DIRECTORY POLICIES & QUOTAS
+    if (isset($_POST['save_users_policies'])) {
+      $db = get_db();
+      $reg_mode = in_array($_POST['reg_mode'] ?? '', ['open', 'approval', 'closed']) ? $_POST['reg_mode'] : 'open';
+      $daily_limit = max(1, min(100, (int)($_POST['daily_upload_limit'] ?? 10)));
+      $default_quota_gb = max(0.5, (float)($_POST['default_drive_quota_gb'] ?? 2));
+      $default_quota_bytes = (int)round($default_quota_gb * 1073741824);
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['users_reg_mode', $reg_mode]);
+      $stmt->execute(['users_daily_upload_limit', (string)$daily_limit]);
+      $stmt->execute(['users_default_drive_quota', (string)$default_quota_bytes]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved User Policy & Default Quota Settings', 0);
+      $_SESSION['admin_flash_msg'] = "User policies and defaults updated.";
+      header('Location: ?access=admin&page=users&tab=settings');
+      exit;
+    }
+
+    // SAVE PHPMUSICPOST ARTWORK & MEDIA SETTINGS
+    if (isset($_POST['save_artworks_settings'])) {
+      $db = get_db();
+      $max_dim = max(1000, min(8192, (int)($_POST['art_max_dim'] ?? 4096)));
+      $quality = max(50, min(100, (int)($_POST['art_webp_quality'] ?? 80)));
+      $r18_policy = in_array($_POST['r18_policy'] ?? '', ['allow', 'login_only', 'block']) ? $_POST['r18_policy'] : 'allow';
+      $allow_video = !empty($_POST['art_allow_video']) ? '1' : '0';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['art_max_dim', (string)$max_dim]);
+      $stmt->execute(['art_webp_quality', (string)$quality]);
+      $stmt->execute(['art_r18_policy', $r18_policy]);
+      $stmt->execute(['art_allow_video', $allow_video]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved Artwork & Media Engine Settings', 0);
+      $_SESSION['admin_flash_msg'] = "Artwork engine settings saved.";
+      header('Location: ?access=admin&page=artworks&tab=settings');
+      exit;
+    }
+
     if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['admin_csrf_token'], $_POST['csrf_token'])) {
       die("Security violation: CSRF token mismatch.");
     }
@@ -29702,14 +29937,62 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
-    // Ensure quota_limit column exists in api_keys table
+    // Ensure API schema & request logging tables exist
     try {
       $db_chk = get_db();
       $api_cols = $db_chk->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
       if (!in_array('quota_limit', $api_cols)) {
         $db_chk->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
       }
+      $db_chk->exec("
+        CREATE TABLE IF NOT EXISTS api_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          api_key_id INTEGER DEFAULT 0,
+          token_prefix TEXT DEFAULT '',
+          endpoint TEXT DEFAULT '',
+          method TEXT DEFAULT 'GET',
+          ip_address TEXT DEFAULT '',
+          status_code INTEGER DEFAULT 200,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_logs_created ON api_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_api_logs_status ON api_logs(status_code);
+      ");
     } catch (Exception $e) {}
+
+    // SAVE ADVANCED API GATEWAY & SECURITY SETTINGS
+    if (isset($_POST['save_api_gateway_settings'])) {
+      $db = get_db();
+      $rate_limit = max(10, min(10000, (int)($_POST['api_rate_limit'] ?? 150)));
+      $cors_origins = trim($_POST['api_cors_origins'] ?? '*');
+      $require_https = !empty($_POST['api_require_https']) ? '1' : '0';
+      $default_expiry = in_array($_POST['api_default_expiry'] ?? '', ['1_month', '3_months', '6_months', '1_year', 'never']) ? $_POST['api_default_expiry'] : '1_month';
+      $ip_blacklist = trim($_POST['api_ip_blacklist'] ?? '');
+      $logging_enabled = !empty($_POST['api_logging_enabled']) ? '1' : '0';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['api_global_rate_limit', (string)$rate_limit]);
+      $stmt->execute(['api_cors_origins', $cors_origins]);
+      $stmt->execute(['api_require_https', $require_https]);
+      $stmt->execute(['api_default_expiry', $default_expiry]);
+      $stmt->execute(['api_ip_blacklist', $ip_blacklist]);
+      $stmt->execute(['api_logging_enabled', $logging_enabled]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Updated API Gateway & Security Settings', 0);
+      $_SESSION['admin_flash_msg'] = "API Gateway settings saved successfully.";
+      header("Location: ?access=admin&page=api&tab=settings");
+      exit;
+    }
+
+    // PURGE API REQUEST AUDIT LOGS
+    if (isset($_POST['clear_api_logs'])) {
+      $db = get_db();
+      $db->exec("DELETE FROM api_logs;");
+      log_admin_activity($db, $_SESSION['admin_email'], 'Cleared API Request Traffic Logs', 0);
+      $_SESSION['admin_flash_msg'] = "API traffic logs have been cleared.";
+      header("Location: ?access=admin&page=api&tab=logs");
+      exit;
+    }
 
     if (isset($_POST['generate_api_key'])) {
       $name = htmlspecialchars(trim($_POST['key_name'] ?? 'Unnamed App'));
@@ -29881,13 +30164,61 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
     }
 
-    // ONE-CLICK DATABASE SCHEMA MIGRATION HANDLER
-    if (isset($_POST['run_database_migrations'])) {
+    // SAVE SYSTEM UPDATE PREFERENCES & CUSTOM REPO
+    if (isset($_POST['save_update_preferences'])) {
       $db = get_db();
-      init_db($db);
-      log_admin_activity($db, $_SESSION['admin_email'], 'Executed Database Schema Synchronization & Migration Audit', 0);
-      $_SESSION['admin_flash_msg'] = "Database schema synchronized and missing tables/indexes successfully repaired!";
-      header('Location: ?access=admin&page=update&tab=migrations');
+      $custom_repo = trim($_POST['custom_repo'] ?? 'HirotakaDango/PHP-Music');
+      $custom_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', $custom_repo) ?: 'HirotakaDango/PHP-Music';
+      $cdn_pref = in_array($_POST['cdn_priority'] ?? '', ['github', 'jsdelivr', 'fastly']) ? $_POST['cdn_priority'] : 'github';
+      $timeout = max(5, min(120, (int)($_POST['network_timeout'] ?? 30)));
+      $backup_retention = max(1, min(50, (int)($_POST['backup_retention'] ?? 5)));
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['update_custom_repo', $custom_repo]);
+      $stmt->execute(['update_cdn_priority', $cdn_pref]);
+      $stmt->execute(['update_network_timeout', (string)$timeout]);
+      $stmt->execute(['update_backup_retention', (string)$backup_retention]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Updated system update settings (Repo: {$custom_repo}, CDN: {$cdn_pref})", 0);
+      $_SESSION['admin_flash_msg'] = "Update preferences saved successfully.";
+      header('Location: ?access=admin&page=update&tab=settings');
+      exit;
+    }
+
+    // TOGGLE UPDATE MAINTENANCE MODE
+    if (isset($_POST['toggle_maintenance_mode'])) {
+      $db = get_db();
+      $enabled = !empty($_POST['maintenance_enabled']) ? '1' : '0';
+      $reason = trim(htmlspecialchars($_POST['maintenance_reason'] ?? 'System upgrade in progress. Please check back shortly.', ENT_QUOTES, 'UTF-8'));
+      $allowed_ips = trim($_POST['allowed_ips'] ?? '');
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['site_maintenance_mode', $enabled]);
+      $stmt->execute(['site_maintenance_reason', $reason]);
+      $stmt->execute(['site_maintenance_allowed_ips', $allowed_ips]);
+
+      $action_label = $enabled === '1' ? 'Enabled' : 'Disabled';
+      log_admin_activity($db, $_SESSION['admin_email'], "{$action_label} update maintenance mode", 0);
+      $_SESSION['admin_flash_msg'] = "Maintenance mode has been {$action_label}.";
+      header('Location: ?access=admin&page=update&tab=maintenance');
+      exit;
+    }
+
+    // RE-ENFORCE SECURITY FIREWALL RULES (.htaccess / NGINX / robots.txt)
+    if (isset($_POST['rearm_security_firewalls'])) {
+      $db = get_db();
+      $htaccess_path = MUSIC_DIR . '/.htaccess';
+      $nginx_path = MUSIC_DIR . '/nginx-phpmusic.conf';
+      $robots_path = MUSIC_DIR . '/robots.txt';
+
+      // Touch files to trigger self-healing logic at top of script
+      @unlink($htaccess_path);
+      @unlink($nginx_path);
+      @unlink($robots_path);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Re-enforced and regenerated security firewalls (.htaccess, NGINX, robots.txt)', 0);
+      $_SESSION['admin_flash_msg'] = "Security firewall files regenerated and verified on disk.";
+      header('Location: ?access=admin&page=update&tab=integrity');
       exit;
     }
 
@@ -30651,6 +30982,191 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         border: 1px solid #333333;
       }
 
+      /* Modern User Action Dropdown */
+      .user-action-menu {
+        background: rgba(18, 18, 24, 0.96) !important;
+        backdrop-filter: blur(20px) !important;
+        -webkit-backdrop-filter: blur(20px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 16px !important;
+        padding: 6px !important;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8) !important;
+        min-width: 230px !important;
+      }
+
+      .user-action-menu .dropdown-item {
+        padding: 8px 12px !important;
+        border-radius: 10px !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        color: #e0e0e0 !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 10px !important;
+        transition: all 0.15s ease !important;
+      }
+
+      .user-action-menu .dropdown-item:hover {
+        background: rgba(255, 255, 255, 0.08) !important;
+        color: #ffffff !important;
+        transform: translateX(3px);
+      }
+
+      .user-action-menu .dropdown-item.item-danger:hover {
+        background: rgba(239, 68, 68, 0.16) !important;
+        color: #f87171 !important;
+      }
+
+      .user-action-menu .dropdown-item.item-warning:hover {
+        background: rgba(245, 158, 11, 0.16) !important;
+        color: #fbbf24 !important;
+      }
+
+      .user-action-menu .dropdown-item.item-info:hover {
+        background: rgba(56, 189, 248, 0.16) !important;
+        color: #38bdf8 !important;
+      }
+
+      .user-action-menu .dropdown-divider {
+        border-color: rgba(255, 255, 255, 0.08) !important;
+        margin: 4px 6px !important;
+      }
+
+      /* Modern User Details Modal */
+      .user-modal-box {
+        background: #0d0d12 !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 24px !important;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.9) !important;
+        overflow: hidden !important;
+      }
+
+      .user-modal-header {
+        padding: 16px 22px !important;
+        background: rgba(255, 255, 255, 0.02) !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07) !important;
+      }
+
+      .user-modal-body {
+        padding: 22px !important;
+      }
+
+      .user-card-hero {
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 20px;
+        padding: 20px;
+      }
+
+      .user-avatar-glow {
+        width: 84px;
+        height: 84px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 3px solid rgba(255, 0, 68, 0.5);
+        box-shadow: 0 0 20px rgba(255, 0, 68, 0.35);
+      }
+
+      .user-action-card-btn {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 12px;
+        padding: 10px 14px;
+        color: #f1f1f1;
+        font-size: 0.83rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        transition: all 0.15s ease;
+        text-align: left;
+      }
+
+      .user-action-card-btn:hover {
+        background: rgba(255, 255, 255, 0.07);
+        border-color: rgba(255, 255, 255, 0.18);
+        color: #ffffff;
+        transform: translateY(-1px);
+      }
+
+      .user-action-card-btn.danger-btn:hover {
+        background: rgba(239, 68, 68, 0.12);
+        border-color: rgba(239, 68, 68, 0.4);
+        color: #f87171;
+      }
+
+      .user-action-card-btn.warning-btn:hover {
+        background: rgba(245, 158, 11, 0.12);
+        border-color: rgba(245, 158, 11, 0.4);
+        color: #fbbf24;
+      }
+
+      /* Unified Sub-Tabs Navigation (Users, Songs, Artworks, Update) */
+      .update-tabs-container {
+        display: flex !important;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        padding-bottom: 8px !important;
+        margin-bottom: 1.5rem !important;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+        -webkit-overflow-scrolling: touch;
+        width: 100%;
+      }
+
+      .update-tabs-container::-webkit-scrollbar {
+        height: 4px;
+      }
+
+      .update-tabs-container::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .update-tabs-container::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 4px;
+      }
+
+      .update-tabs-container::-webkit-scrollbar-thumb:hover {
+        background: #ff0000;
+      }
+
+      .update-tab-btn {
+        padding: 0.5rem 1.15rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        border-radius: 20px;
+        color: #aaaaaa !important;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: #141414;
+        transition: all 0.15s ease;
+        text-decoration: none !important;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        white-space: nowrap !important;
+        flex-shrink: 0 !important;
+      }
+
+      .update-tab-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.22);
+        color: #ffffff !important;
+        text-decoration: none !important;
+      }
+
+      .update-tab-btn.active {
+        background: #ff0000 !important;
+        color: #ffffff !important;
+        border-color: #ff0000 !important;
+        box-shadow: 0 4px 14px rgba(255, 0, 0, 0.35);
+        text-decoration: none !important;
+      }
+
       #admin-loader-overlay {
         position: fixed;
         top: 0;
@@ -30844,7 +31360,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       @media (min-width: 992px) {
         .app-container {
           flex-direction: row;
-          height: 100vh;
+          height: 100dvh;
+          max-height: 100dvh;
           overflow: hidden;
         }
 
@@ -31212,6 +31729,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
           
           <div class="mb-4 mt-3 d-flex flex-column">
+            <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=users" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && ($_GET['page'] ?? '') !== 'analytics' && ($_GET['page'] ?? '') !== 'storage') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=artworks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
+            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
             <a href="?access=admin&page=analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
             <?php endif; ?>
@@ -31221,17 +31747,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($is_super_admin_check || in_array('user_drive_management', $current_admin_permissions)): ?>
             <a href="?access=admin&page=user_drive_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
             <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=users" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && ($_GET['page'] ?? '') !== 'analytics' && ($_GET['page'] ?? '') !== 'storage') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
-            <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('bitrate_management', $current_admin_permissions)): ?>
             <a href="?access=admin&page=bitrate_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=artworks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
             <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
@@ -31452,6 +31969,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php if (($_GET['page'] ?? '') === 'analytics'): ?>
           <?php
             $db = get_db();
+
+            // Self-healing schema validation: ensure tables exist before running analytics queries
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS daily_visitor_stats (
+                  visit_date TEXT PRIMARY KEY,
+                  total_hits INTEGER DEFAULT 0,
+                  unique_visitors INTEGER DEFAULT 0,
+                  registered_visitors INTEGER DEFAULT 0,
+                  guest_visitors INTEGER DEFAULT 0,
+                  desktop_hits INTEGER DEFAULT 0,
+                  mobile_hits INTEGER DEFAULT 0,
+                  tablet_hits INTEGER DEFAULT 0,
+                  bot_hits INTEGER DEFAULT 0,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS site_analytics (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  visit_date TEXT NOT NULL,
+                  visit_time TEXT NOT NULL,
+                  ip_hash TEXT NOT NULL,
+                  ip_address TEXT DEFAULT NULL,
+                  user_id INTEGER DEFAULT 0,
+                  user_agent TEXT,
+                  browser TEXT DEFAULT 'Unknown',
+                  browser_version TEXT DEFAULT '',
+                  os TEXT DEFAULT 'Unknown',
+                  device_type TEXT DEFAULT 'Desktop',
+                  referer TEXT DEFAULT NULL,
+                  request_uri TEXT DEFAULT NULL,
+                  is_unique_daily INTEGER DEFAULT 0,
+                  is_bot INTEGER DEFAULT 0,
+                  country TEXT DEFAULT 'XX',
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_analytics_date ON site_analytics(visit_date);
+                CREATE INDEX IF NOT EXISTS idx_analytics_ip_date ON site_analytics(visit_date, ip_hash);
+              ");
+              $sa_cols = $db->query("PRAGMA table_info(site_analytics)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('country', $sa_cols)) {
+                $db->exec("ALTER TABLE site_analytics ADD COLUMN country TEXT DEFAULT 'XX';");
+              }
+            } catch (\Throwable $e) {}
+
             $analytics_period = $_GET['period'] ?? '30';
             $analytics_filter_bot = isset($_GET['show_bots']) && $_GET['show_bots'] === '1';
             $analytics_search = trim($_GET['search'] ?? '');
@@ -31468,36 +32029,71 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             $bot_where = $analytics_filter_bot ? "1=1" : "is_bot = 0";
 
+            // Auto-backfill previously unresolved visitor countries
+            try {
+              $stmt_unresolved = $db->query("SELECT id, ip_address FROM site_analytics WHERE (country = 'XX' OR country IS NULL OR country = '') AND ip_address IS NOT NULL AND ip_address NOT IN ('127.0.0.1', '::1') LIMIT 8");
+              if ($stmt_unresolved) {
+                $unresolved_rows = $stmt_unresolved->fetchAll();
+                if (!empty($unresolved_rows)) {
+                  $stmt_up_country = $db->prepare("UPDATE site_analytics SET country = ? WHERE id = ?");
+                  foreach ($unresolved_rows as $ur) {
+                    $resolved_c = get_ip_country_code($ur['ip_address'], $db);
+                    if ($resolved_c && $resolved_c !== 'XX') {
+                      $stmt_up_country->execute([$resolved_c, $ur['id']]);
+                    }
+                  }
+                }
+              }
+            } catch (\Throwable $e) {}
+
             $today_str = date('Y-m-d');
             $yesterday_str = date('Y-m-d', strtotime('-1 day'));
 
-            // 1. High-speed Indexed Queries for Top KPI Cards
-            $stmt_today = $db->prepare("SELECT total_hits, unique_visitors, registered_visitors, guest_visitors FROM daily_visitor_stats WHERE visit_date = ?");
-            $stmt_today->execute([$today_str]);
-            $today_kpi = $stmt_today->fetch() ?: ['total_hits' => 0, 'unique_visitors' => 0, 'registered_visitors' => 0, 'guest_visitors' => 0];
+            // Safe defaults for KPI Cards
+            $today_kpi = ['total_hits' => 0, 'unique_visitors' => 0, 'registered_visitors' => 0, 'guest_visitors' => 0];
+            $yest_kpi = ['total_hits' => 0, 'unique_visitors' => 0];
+            $period_total_hits = 0;
+            $period_total_uniques = 0;
+            $period_total_reg = 0;
+            $period_total_bots = 0;
+            $active_days_count = 1;
+            $avg_daily_hits = 0;
+            $avg_daily_uniques = 0;
 
-            $stmt_yest = $db->prepare("SELECT total_hits, unique_visitors FROM daily_visitor_stats WHERE visit_date = ?");
-            $stmt_yest->execute([$yesterday_str]);
-            $yest_kpi = $stmt_yest->fetch() ?: ['total_hits' => 0, 'unique_visitors' => 0];
+            // 1. High-speed Indexed Queries for Top KPI Cards (with error protection)
+            try {
+              $stmt_today = $db->prepare("SELECT total_hits, unique_visitors, registered_visitors, guest_visitors FROM daily_visitor_stats WHERE visit_date = ?");
+              $stmt_today->execute([$today_str]);
+              $today_kpi = $stmt_today->fetch() ?: $today_kpi;
 
-            $stmt_period = $db->query("SELECT SUM(total_hits) as total_hits, SUM(unique_visitors) as total_uniques, SUM(registered_visitors) as total_reg, SUM(bot_hits) as total_bots FROM daily_visitor_stats WHERE {$date_where}")->fetch();
-            $period_total_hits = (int)($stmt_period['total_hits'] ?? 0);
-            $period_total_uniques = (int)($stmt_period['total_uniques'] ?? 0);
-            $period_total_reg = (int)($stmt_period['total_reg'] ?? 0);
-            $period_total_bots = (int)($stmt_period['total_bots'] ?? 0);
+              $stmt_yest = $db->prepare("SELECT total_hits, unique_visitors FROM daily_visitor_stats WHERE visit_date = ?");
+              $stmt_yest->execute([$yesterday_str]);
+              $yest_kpi = $stmt_yest->fetch() ?: $yest_kpi;
 
-            $active_days_count = (int)$db->query("SELECT COUNT(DISTINCT visit_date) FROM daily_visitor_stats WHERE {$date_where}")->fetchColumn() ?: 1;
-            $avg_daily_hits = round($period_total_hits / max(1, $active_days_count));
-            $avg_daily_uniques = round($period_total_uniques / max(1, $active_days_count));
+              $stmt_period_res = $db->query("SELECT SUM(total_hits) as total_hits, SUM(unique_visitors) as total_uniques, SUM(registered_visitors) as total_reg, SUM(bot_hits) as total_bots FROM daily_visitor_stats WHERE {$date_where}");
+              $stmt_period = $stmt_period_res ? $stmt_period_res->fetch() : null;
+              $period_total_hits = (int)($stmt_period['total_hits'] ?? 0);
+              $period_total_uniques = (int)($stmt_period['total_uniques'] ?? 0);
+              $period_total_reg = (int)($stmt_period['total_reg'] ?? 0);
+              $period_total_bots = (int)($stmt_period['total_bots'] ?? 0);
+
+              $active_days_count = (int)($db->query("SELECT COUNT(DISTINCT visit_date) FROM daily_visitor_stats WHERE {$date_where}")->fetchColumn() ?: 1);
+              $avg_daily_hits = round($period_total_hits / max(1, $active_days_count));
+              $avg_daily_uniques = round($period_total_uniques / max(1, $active_days_count));
+            } catch (\Throwable $e) {}
 
             // 2. Chart Dataset 1: Traffic Growth (Area Line)
-            $stmt_chart_days = $db->query("
-              SELECT visit_date, total_hits, unique_visitors, registered_visitors 
-              FROM daily_visitor_stats 
-              WHERE {$date_where} 
-              ORDER BY visit_date ASC 
-              LIMIT 90
-            ")->fetchAll();
+            $stmt_chart_days = [];
+            try {
+              $chart_query_res = $db->query("
+                SELECT visit_date, total_hits, unique_visitors, registered_visitors 
+                FROM daily_visitor_stats 
+                WHERE {$date_where} 
+                ORDER BY visit_date ASC 
+                LIMIT 90
+              ");
+              $stmt_chart_days = $chart_query_res ? $chart_query_res->fetchAll() : [];
+            } catch (\Throwable $e) {}
 
             $chart_labels = [];
             $chart_hits = [];
@@ -31516,7 +32112,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $start_date_str = date('Y-m-d', $start_ts_filter);
 
             $music_date_filter = ($analytics_period !== 'all') ? "WHERE last_modified >= {$start_ts_filter}" : "WHERE last_modified IS NOT NULL";
-            $arts_date_filter = ($analytics_period !== 'all') ? "WHERE date(created_at) >= '{$start_date_str}'" : "WHERE created_at IS NOT NULL";
             $users_date_filter = ($analytics_period !== 'all') ? "WHERE date(created_at) >= '{$start_date_str}'" : "WHERE created_at IS NOT NULL";
 
             $daily_songs = [];
@@ -31524,31 +32119,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $daily_users = [];
 
             try {
-              $daily_songs = $db->query("
+              $q_songs = $db->query("
                 SELECT date(last_modified, 'unixepoch') as d, COUNT(id) as c 
                 FROM music 
                 {$music_date_filter} AND last_modified > 0
                 GROUP BY d
-              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
-            } catch (Exception $e) {}
+              ");
+              $daily_songs = $q_songs ? $q_songs->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            } catch (\Throwable $e) {}
 
             try {
-              $daily_arts = $db->query("
-                SELECT date(created_at) as d, COUNT(id) as c 
-                FROM arts 
-                {$arts_date_filter} 
+              $q_arts = $db->query("
+                SELECT date(created_at, 'unixepoch') as d, COUNT(id) as c 
+                FROM artworks 
+                WHERE created_at >= {$start_ts_filter}
                 GROUP BY d
-              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
-            } catch (Exception $e) {}
+              ");
+              $daily_arts = $q_arts ? $q_arts->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            } catch (\Throwable $e) {}
 
             try {
-              $daily_users = $db->query("
+              $q_users = $db->query("
                 SELECT date(created_at) as d, COUNT(id) as c 
                 FROM users 
                 {$users_date_filter} 
                 GROUP BY d
-              ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
-            } catch (Exception $e) {}
+              ");
+              $daily_users = $q_users ? $q_users->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            } catch (\Throwable $e) {}
 
             $period_total_songs = array_sum($daily_songs);
             $period_total_arts = array_sum($daily_arts);
@@ -31577,13 +32175,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             // 3. Chart Dataset 2: 24-Hour Peak Hourly Heatmap
-            $stmt_hourly = $db->query("
-              SELECT SUBSTR(visit_time, 1, 2) as hour_slot, COUNT(id) as hits
-              FROM site_analytics
-              WHERE {$date_where} AND {$bot_where}
-              GROUP BY hour_slot
-              ORDER BY hour_slot ASC
-            ")->fetchAll(PDO::FETCH_KEY_PAIR);
+            $stmt_hourly = [];
+            try {
+              $q_hourly = $db->query("
+                SELECT SUBSTR(visit_time, 1, 2) as hour_slot, COUNT(id) as hits
+                FROM site_analytics
+                WHERE {$date_where} AND {$bot_where}
+                GROUP BY hour_slot
+                ORDER BY hour_slot ASC
+              ");
+              $stmt_hourly = $q_hourly ? $q_hourly->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            } catch (\Throwable $e) {}
 
             $hourly_labels = [];
             $hourly_values = [];
@@ -31594,80 +32196,111 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             // 4. Chart Dataset 3: Browsers Breakdown
-            $stmt_browser = $db->query("
-              SELECT browser, COUNT(id) as count 
-              FROM site_analytics 
-              WHERE {$date_where} AND {$bot_where} AND browser != ''
-              GROUP BY browser 
-              ORDER BY count DESC 
-              LIMIT 6
-            ")->fetchAll();
+            $stmt_browser = [];
+            try {
+              $q_browser = $db->query("
+                SELECT browser, COUNT(id) as count 
+                FROM site_analytics 
+                WHERE {$date_where} AND {$bot_where} AND browser != ''
+                GROUP BY browser 
+                ORDER BY count DESC 
+                LIMIT 6
+              ");
+              $stmt_browser = $q_browser ? $q_browser->fetchAll() : [];
+            } catch (\Throwable $e) {}
             $browser_labels = array_column($stmt_browser, 'browser');
             $browser_counts = array_map('intval', array_column($stmt_browser, 'count'));
 
             // 5. Chart Dataset 4: Operating Systems
-            $stmt_os = $db->query("
-              SELECT os, COUNT(id) as count 
-              FROM site_analytics 
-              WHERE {$date_where} AND {$bot_where} AND os != ''
-              GROUP BY os 
-              ORDER BY count DESC 
-              LIMIT 6
-            ")->fetchAll();
+            $stmt_os = [];
+            try {
+              $q_os = $db->query("
+                SELECT os, COUNT(id) as count 
+                FROM site_analytics 
+                WHERE {$date_where} AND {$bot_where} AND os != ''
+                GROUP BY os 
+                ORDER BY count DESC 
+                LIMIT 6
+              ");
+              $stmt_os = $q_os ? $q_os->fetchAll() : [];
+            } catch (\Throwable $e) {}
             $os_labels = array_column($stmt_os, 'os');
             $os_counts = array_map('intval', array_column($stmt_os, 'count'));
 
             // 6. Chart Dataset 5: Device Classification
-            $stmt_dev = $db->query("
-              SELECT device_type, COUNT(id) as count 
-              FROM site_analytics 
-              WHERE {$date_where} AND {$bot_where}
-              GROUP BY device_type 
-              ORDER BY count DESC
-            ")->fetchAll();
+            $stmt_dev = [];
+            try {
+              $q_dev = $db->query("
+                SELECT device_type, COUNT(id) as count 
+                FROM site_analytics 
+                WHERE {$date_where} AND {$bot_where}
+                GROUP BY device_type 
+                ORDER BY count DESC
+              ");
+              $stmt_dev = $q_dev ? $q_dev->fetchAll() : [];
+            } catch (\Throwable $e) {}
             $dev_labels = array_column($stmt_dev, 'device_type');
             $dev_counts = array_map('intval', array_column($stmt_dev, 'count'));
 
+            // 6b. Geographic Country Distribution
+            $stmt_countries = [];
+            try {
+              $q_countries = $db->query("
+                SELECT COALESCE(NULLIF(country, ''), 'XX') as country_code, COUNT(id) as count
+                FROM site_analytics
+                WHERE {$date_where} AND {$bot_where}
+                GROUP BY country_code
+                ORDER BY count DESC 
+                LIMIT 8
+              ");
+              $stmt_countries = $q_countries ? $q_countries->fetchAll() : [];
+            } catch (\Throwable $e) {}
+
             // 7. Top Referrers & Entry Gateways
-            $stmt_ref = $db->query("
-              SELECT COALESCE(NULLIF(referer, ''), 'Direct / Bookmark') as source, COUNT(id) as count
-              FROM site_analytics
-              WHERE {$date_where} AND {$bot_where}
-              GROUP BY source
-              ORDER BY count DESC 
-              LIMIT 8
-            ")->fetchAll();
+            $stmt_ref = [];
+            try {
+              $q_ref = $db->query("
+                SELECT COALESCE(NULLIF(referer, ''), 'Direct / Bookmark') as source, COUNT(id) as count
+                FROM site_analytics
+                WHERE {$date_where} AND {$bot_where}
+                GROUP BY source
+                ORDER BY count DESC 
+                LIMIT 8
+              ");
+              $stmt_ref = $q_ref ? $q_ref->fetchAll() : [];
+            } catch (\Throwable $e) {}
 
             // 8. Filtered & Paginated Live Stream Event Logs
             $log_where = "WHERE {$date_where} AND {$bot_where}";
             $log_params = [];
 
             if ($analytics_search !== '') {
-              $log_where .= " AND (ip_address LIKE ? OR ip_hash LIKE ? OR browser LIKE ? OR os LIKE ? OR request_uri LIKE ?)";
+              $log_where .= " AND (s.ip_address LIKE ? OR s.ip_hash LIKE ? OR s.browser LIKE ? OR s.os LIKE ? OR s.request_uri LIKE ?)";
               $log_params = ["%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%"];
             }
 
-            $stmt_log_count = $db->prepare("SELECT COUNT(id) FROM site_analytics $log_where");
-            $stmt_log_count->execute($log_params);
-            $total_log_records = (int)$stmt_log_count->fetchColumn();
-            $total_log_pages = ceil($total_log_records / $analytics_limit);
+            $total_log_records = 0;
+            $total_log_pages = 1;
+            $live_logs = [];
 
-            $stmt_live = $db->prepare("
-              SELECT s.*, u.artist, u.email as user_email
-              FROM site_analytics s
-              LEFT JOIN users u ON s.user_id = u.id
-              $log_where
-              ORDER BY s.id DESC
-              LIMIT ? OFFSET ?
-            ");
-            $p_idx = 1;
-            foreach ($log_params as $pv) {
-              $stmt_live->bindValue($p_idx++, $pv, PDO::PARAM_STR);
-            }
-            $stmt_live->bindValue($p_idx++, (int)$analytics_limit, PDO::PARAM_INT);
-            $stmt_live->bindValue($p_idx++, (int)$analytics_offset, PDO::PARAM_INT);
-            $stmt_live->execute();
-            $live_logs = $stmt_live->fetchAll();
+            try {
+              $stmt_log_count = $db->prepare("SELECT COUNT(s.id) FROM site_analytics s $log_where");
+              $stmt_log_count->execute($log_params);
+              $total_log_records = (int)$stmt_log_count->fetchColumn();
+              $total_log_pages = max(1, ceil($total_log_records / $analytics_limit));
+
+              // Direct integer concatenation for LIMIT and OFFSET to eliminate SQLite parameter binding bugs
+              $stmt_live = $db->prepare("
+                SELECT s.*, u.artist, u.email as user_email
+                FROM site_analytics s
+                LEFT JOIN users u ON s.user_id = u.id
+                $log_where
+                ORDER BY s.id DESC
+                LIMIT " . (int)$analytics_limit . " OFFSET " . (int)$analytics_offset . "
+              ");
+              $stmt_live->execute($log_params);
+              $live_logs = $stmt_live->fetchAll();
+            } catch (\Throwable $e) {}
           ?>
 
           <div class="page-header admin-toolbar-wrap">
@@ -31884,6 +32517,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </div>
             </div>
 
+            <!-- Top Countries & Geographic Distribution -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                  <i class="bi bi-globe-americas text-danger"></i> Top Visitor Locations &amp; Countries
+                </h5>
+                <span class="admin-badge admin-badge-primary">Geographic Metrics</span>
+              </div>
+              <div class="row g-2">
+                <?php if (empty($stmt_countries)): ?>
+                  <div class="col-12 text-center text-secondary py-3 small">No geographic data logged for this period.</div>
+                <?php else: foreach ($stmt_countries as $c): ?>
+                  <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="p-2 px-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-white small fw-bold text-truncate"><?php echo format_country_badge($c['country_code']); ?></span>
+                      <span class="admin-badge admin-badge-info font-monospace"><?php echo number_format($c['count']); ?> hits</span>
+                    </div>
+                  </div>
+                <?php endforeach; endif; ?>
+              </div>
+            </div>
+
             <!-- Top Referrers & Entry Points Box -->
             <div class="admin-card p-4 mb-4">
               <div class="d-flex justify-content-between align-items-center mb-3">
@@ -31897,7 +32552,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="col-12 text-center text-secondary py-3 small">No referrer data logged for this timeframe.</div>
                 <?php else: foreach ($stmt_ref as $ref): ?>
                   <div class="col-12 col-md-6 col-xl-3">
-                    <div class="p-2 rounded bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                    <div class="p-2 px-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
                       <span class="text-truncate text-white small font-monospace" style="max-width: 75%;" title="<?php echo htmlspecialchars($ref['source']); ?>"><?php echo htmlspecialchars($ref['source']); ?></span>
                       <span class="admin-badge admin-badge-info"><?php echo number_format($ref['count']); ?> uniques</span>
                     </div>
@@ -31933,6 +32588,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <tr>
                       <th style="width: 140px;">Timestamp</th>
                       <th>Visitor / Identity</th>
+                      <th>Country</th>
                       <th>Platform / Device</th>
                       <th>Browser</th>
                       <th>Entry URI</th>
@@ -31958,6 +32614,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <span class="text-white fw-bold"><i class="bi bi-geo-alt-fill text-danger me-1"></i><?php echo htmlspecialchars($log['ip_address'] ?: '127.0.0.1'); ?></span>
                             <span class="badge bg-success bg-opacity-25 text-success border border-success ms-1 p-0 px-1" style="font-size: 0.65rem;">Unique</span>
                           </div>
+                        </td>
+                        <td>
+                          <span class="admin-badge admin-badge-secondary font-monospace"><?php echo format_country_badge($log['country'] ?? 'XX'); ?></span>
                         </td>
                         <td>
                           <div class="d-flex align-items-center gap-1">
@@ -33611,10 +34270,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <?php endif; ?>
           </div>
-        <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
+                <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
           <?php 
             $db = get_db();
-            $search_songs = $_GET['search'] ?? ''; 
+            $active_song_tab = $_GET['tab'] ?? 'catalog';
+            $search_songs = trim($_GET['search'] ?? ''); 
             $sort_songs = $_GET['sort'] ?? 'newest';
             $genre_filter = $_GET['genre'] ?? '';
             $s_page = max(1, (int)($_GET['p'] ?? 1));
@@ -33622,13 +34282,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $s_offset = ($s_page - 1) * $s_limit;
 
             // Global Metrics for Songs
-            $total_library_songs = (int)$db->query("SELECT COUNT(id) FROM music")->fetchColumn();
-            $total_library_duration = (int)$db->query("SELECT SUM(duration) FROM music")->fetchColumn();
-            $total_library_plays = (int)$db->query("SELECT SUM(play_count) FROM play_counts")->fetchColumn();
-            $total_banned_songs = (int)$db->query("SELECT COUNT(id) FROM music WHERE banned = 1")->fetchColumn();
+            $total_library_songs = (int)($db->query("SELECT COUNT(id) FROM music")->fetchColumn() ?: 0);
+            $total_library_duration = (int)($db->query("SELECT SUM(duration) FROM music")->fetchColumn() ?: 0);
+            $total_library_plays = (int)($db->query("SELECT SUM(play_count) FROM play_counts")->fetchColumn() ?: 0);
+            $total_banned_songs = (int)($db->query("SELECT COUNT(id) FROM music WHERE banned = 1")->fetchColumn() ?: 0);
 
             $where_clauses = [];
             $params = [];
+
+            if ($active_song_tab === 'moderation') {
+              $where_clauses[] = "(m.banned = 1 OR m.is_private = 1 OR m.is_collaborative = 0)";
+            }
+
             if ($search_songs !== '') {
               if (preg_match('/^(?:uid|user|user_id):(\d+)$/i', $search_songs, $m_uid)) {
                 $where_clauses[] = "m.user_id = ?";
@@ -33637,7 +34302,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $where_clauses[] = "m.id = ?";
                 $params = [(int)$m_id[1]];
               } elseif (is_numeric($search_songs)) {
-                // Exact numeric match for track ID or User ID (avoids substring matching on '(id:1)' or '(id:21)')
                 $where_clauses[] = "(m.id = ? OR m.user_id = ? OR m.title = ? OR m.album = ?)";
                 $params = [(int)$search_songs, (int)$search_songs, $search_songs, $search_songs];
               } else {
@@ -33645,6 +34309,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $params = ["%$search_songs%", "%$search_songs%", "%$search_songs%", $search_songs];
               }
             }
+
             if ($genre_filter !== '') {
               $where_clauses[] = "m.genre = ?";
               $params[] = $genre_filter;
@@ -33665,10 +34330,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $t_stmt = $db->prepare("SELECT COUNT(m.id) FROM music m LEFT JOIN users u ON m.user_id = u.id $where");
             $t_stmt->execute($params);
             $t_songs = (int)$t_stmt->fetchColumn();
-            $t_pages = ceil($t_songs / $s_limit);
+            $t_pages = max(1, ceil($t_songs / $s_limit));
             
             $stmt = $db->prepare("
-              SELECT m.id, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.user_id, m.banned, m.is_private, m.last_modified, u.email,
+              SELECT m.id, m.title, m.artist, m.album, m.genre, m.year, m.duration, m.bitrate, m.user_id, m.banned, m.is_private, m.is_collaborative, m.last_modified, u.email,
               COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as plays
               FROM music m 
               LEFT JOIN users u ON m.user_id = u.id 
@@ -33694,6 +34359,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="songs">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($active_song_tab); ?>">
                 <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                   <option value="newest" <?php echo $sort_songs === 'newest' ? 'selected' : ''; ?>>Newest First</option>
                   <option value="oldest" <?php echo $sort_songs === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
@@ -33711,178 +34377,260 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
 
           <div class="content-area-wrapper">
-            <!-- Metric KPI Summary Row -->
-            <div class="row g-3 mb-4">
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Total Tracks</span>
-                    <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_songs); ?></div>
-                  <small class="text-secondary"><?php echo number_format($t_songs); ?> matching search filter</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Library Playtime</span>
-                    <span class="text-info"><i class="bi bi-clock-history fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo round($total_library_duration / 3600, 1); ?> <span class="fs-6 text-secondary fw-normal">hours</span></div>
-                  <small class="text-secondary">~<?php echo round(($total_library_duration / 86400), 2); ?> total days of continuous playback</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Total Streams</span>
-                    <span class="text-success"><i class="bi bi-play-circle-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_plays); ?></div>
-                  <small class="text-secondary">Combined all-time logged plays</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Moderated / Banned</span>
-                    <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_songs); ?></div>
-                  <small class="text-secondary">Tracks hidden from public queries</small>
-                </div>
-              </div>
+            <!-- Sub-Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=songs&tab=catalog" class="update-tab-btn <?php echo $active_song_tab === 'catalog' ? 'active' : ''; ?>">
+                <i class="bi bi-music-note-list"></i> Song Catalog (<?php echo number_format($total_library_songs); ?>)
+              </a>
+              <a href="?access=admin&page=songs&tab=moderation" class="update-tab-btn <?php echo $active_song_tab === 'moderation' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-exclamation"></i> Moderation Queue (<?php echo number_format($total_banned_songs); ?>)
+              </a>
+              <a href="?access=admin&page=songs&tab=settings" class="update-tab-btn <?php echo $active_song_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> Audio Library Settings
+              </a>
             </div>
 
-            <!-- Multi-Operation Action Console -->
-            <form method="POST" action="" id="admin-songs-form">
-              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-              <div class="mb-3 d-flex flex-wrap gap-2">
-                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
-                <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Batch Edit / Transfer</button>
-                
-                <div class="dropdown">
-                  <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                    <i class="bi bi-shield-slash text-warning"></i> Moderation
-                  </button>
-                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
-                    <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban me-2"></i> Ban Selected</button></li>
-                    <li><button type="submit" name="admin_song_action" value="unban" class="dropdown-item text-success fw-bold"><i class="bi bi-check-circle me-2"></i> Unban Selected</button></li>
-                  </ul>
+            <?php if ($active_song_tab === 'settings'): ?>
+              <?php
+                $s_max_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
+                $s_rg = $db->query("SELECT value FROM site_settings WHERE key = 'songs_auto_replaygain'")->fetchColumn() !== '0';
+                $s_priv = $db->query("SELECT value FROM site_settings WHERE key = 'songs_default_private'")->fetchColumn() === '1';
+                $s_collab = $db->query("SELECT value FROM site_settings WHERE key = 'songs_default_collab'")->fetchColumn() !== '0';
+              ?>
+              <div class="admin-card p-4 mb-4 w-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-sliders text-danger"></i> Audio Library &amp; Upload Settings
+                    </h5>
+                    <div class="small text-secondary mt-1">Configure audio upload limits, normalization policies, and privacy defaults.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Library Policy</span>
                 </div>
 
-                <div class="dropdown">
-                  <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                    <i class="bi bi-trash2"></i> Delete
+                <form method="POST" action="?access=admin&page=songs" class="d-flex flex-column gap-3 w-100">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_songs_settings" value="1">
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAXIMUM FILE UPLOAD LIMIT (MB)</label>
+                      <input type="number" name="songs_max_size_mb" class="admin-pill-input w-100 font-monospace" min="10" max="500" value="<?php echo $s_max_mb; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">SUPPORTED FORMATS</label>
+                      <input type="text" class="admin-pill-input w-100 font-monospace" value="MP3, FLAC, M4A, OGG, WAV" readonly disabled style="opacity: 0.6;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Automatic ReplayGain Normalization</strong>
+                      <span class="text-secondary small">Scans ID3 tags to balance audio loudness across different albums.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="songs_auto_replaygain" value="1" <?php echo $s_rg ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Default New Uploads as Private</strong>
+                      <span class="text-secondary small">Tracks remain hidden to other users until explicitly made public by the uploader.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="songs_default_private" value="1" <?php echo $s_priv ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enable Track Collaboration by Default</strong>
+                      <span class="text-secondary small">Allow artists to invite collaborators to co-manage uploaded tracks.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="songs_default_collab" value="1" <?php echo $s_collab ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Audio Settings
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
-                    <li><button type="submit" name="admin_song_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser me-2"></i> Soft Delete (DB Only)</button></li>
-                    <li><button type="submit" name="admin_song_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill me-2"></i> Permanent Delete</button></li>
-                  </ul>
+                </form>
+              </div>
+            <?php else: ?>
+              <!-- Metric KPI Summary Row -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Total Tracks</span>
+                      <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_songs); ?></div>
+                    <small class="text-secondary"><?php echo number_format($t_songs); ?> matching filter</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Library Playtime</span>
+                      <span class="text-info"><i class="bi bi-clock-history fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo round($total_library_duration / 3600, 1); ?> <span class="fs-6 text-secondary fw-normal">hours</span></div>
+                    <small class="text-secondary">~<?php echo round(($total_library_duration / 86400), 2); ?> days of playback</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Total Streams</span>
+                      <span class="text-success"><i class="bi bi-play-circle-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_library_plays); ?></div>
+                    <small class="text-secondary">Combined all-time logged plays</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Moderated / Banned</span>
+                      <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_songs); ?></div>
+                    <small class="text-secondary">Tracks hidden from queries</small>
+                  </div>
                 </div>
               </div>
 
-              <!-- Song Table Studio -->
-              <div class="admin-card mb-4">
-                <div class="table-responsive">
-                  <table class="admin-table align-middle text-nowrap">
-                    <thead>
-                      <tr>
-                        <th style="width: 40px;" class="text-center"></th>
-                        <th style="width: 50px;">Play</th>
-                        <th style="width: 70px;">ID</th>
-                        <th>Track Title</th>
-                        <th>Artist</th>
-                        <th>Album</th>
-                        <th>Genre</th>
-                        <th>Streams</th>
-                        <th>Uploader</th>
-                        <th class="text-end" style="width: 120px;">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <?php if (empty($songs)): ?>
-                        <tr><td colspan="10" class="text-center py-5 text-secondary">No audio tracks found matching your query.</td></tr>
-                      <?php else: foreach ($songs as $s): ?>
-                        <tr data-song="<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>">
-                          <td class="text-center">
-                            <input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.1);">
-                          </td>
-                          <td>
-                            <!-- In-line Mini Audio Stream Trigger -->
-                            <button type="button" class="btn btn-sm btn-outline-danger rounded-circle d-flex align-items-center justify-content-center p-0" style="width: 32px; height: 32px;" onclick="playAdminAudioStream(<?php echo $s['id']; ?>, '<?php echo addslashes(htmlspecialchars($s['title'])); ?>', '<?php echo addslashes(htmlspecialchars($s['artist'])); ?>')">
-                              <i class="bi bi-play-fill fs-5 ms-1"></i>
-                            </button>
-                          </td>
-                          <td class="text-secondary font-monospace small">#<?php echo $s['id']; ?></td>
-                          <td>
-                            <div class="d-flex align-items-center gap-2">
-                              <img src="?action=get_image&id=<?php echo $s['id']; ?>&size=small&v=<?php echo $s['last_modified'] ?? 0; ?>" alt="" class="rounded" style="width: 34px; height: 34px; object-fit: cover; background: #000;">
-                              <div>
-                                <div class="fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></div>
-                                <small class="text-secondary font-monospace"><?php echo gmdate("i:s", (int)$s['duration']); ?> &bull; <?php echo round($s['bitrate'] / 1000); ?> kbps</small>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div class="text-info fw-medium"><?php echo htmlspecialchars($s['artist']); ?></div>
-                          </td>
-                          <td class="text-secondary">
-                            <span class="text-truncate d-inline-block" style="max-width: 160px;" title="<?php echo htmlspecialchars($s['album']); ?>"><?php echo htmlspecialchars($s['album']); ?></span>
-                          </td>
-                          <td>
-                            <span class="admin-badge admin-badge-secondary"><?php echo htmlspecialchars($s['genre'] ?: 'General'); ?></span>
-                          </td>
-                          <td>
-                            <span class="text-white fw-bold font-monospace"><?php echo number_format($s['plays']); ?></span>
-                          </td>
-                          <td>
-                            <div class="d-flex align-items-center gap-1 flex-wrap">
-                              <a href="?access=admin&page=storage&search=<?php echo urlencode($s['user_id']); ?>" class="text-white small fw-bold text-decoration-none" title="Inspect User Storage">UID #<?php echo $s['user_id']; ?></a>
-                              <?php
-                                $u_shard = substr(md5((string)$s['user_id']), 0, 2);
-                                $u_folder_rel = 'uploads/' . $u_shard . '/user_' . $s['user_id'];
-                              ?>
-                              <a href="?access=admin&page=drive&path=<?php echo urlencode($u_folder_rel); ?>" class="admin-badge admin-badge-warning text-decoration-none" style="font-size: 0.68rem; padding: 2px 7px;" title="Browse user_<?php echo $s['user_id']; ?> folder in Drive">
-                                <i class="bi bi-folder-fill text-warning me-1"></i>user_<?php echo $s['user_id']; ?>
-                              </a>
-                            </div>
-                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($s['email'] ?? 'System / Local'); ?></small>
-                          </td>
-                          <td class="text-end">
-                            <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.7rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="Edit Metadata" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
-                              <i class="bi bi-pencil-fill"></i> Edit
-                            </button>
-                          </td>
+              <!-- Multi-Operation Action Console -->
+              <form method="POST" action="" id="admin-songs-form">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <div class="mb-3 d-flex flex-wrap gap-2">
+                  <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.song-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                  <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Batch Edit / Transfer</button>
+                  
+                  <div class="dropdown">
+                    <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                      <i class="bi bi-shield-slash text-warning"></i> Moderation
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                      <li><button type="submit" name="admin_song_action" value="ban" class="dropdown-item text-warning fw-bold"><i class="bi bi-ban me-2"></i> Ban Selected</button></li>
+                      <li><button type="submit" name="admin_song_action" value="unban" class="dropdown-item text-success fw-bold"><i class="bi bi-check-circle me-2"></i> Unban Selected</button></li>
+                    </ul>
+                  </div>
+
+                  <div class="dropdown">
+                    <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                      <i class="bi bi-trash2"></i> Delete
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                      <li><button type="submit" name="admin_song_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Delete from database but keep physical files intact?');"><i class="bi bi-eraser me-2"></i> Soft Delete (DB Only)</button></li>
+                      <li><button type="submit" name="admin_song_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete database records AND physically delete files from disk? This cannot be undone.');"><i class="bi bi-trash2-fill me-2"></i> Permanent Delete</button></li>
+                    </ul>
+                  </div>
+                </div>
+
+                <!-- Song Table Studio -->
+                <div class="admin-card mb-4">
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle text-nowrap">
+                      <thead>
+                        <tr>
+                          <th style="width: 40px;" class="text-center"></th>
+                          <th style="width: 50px;">Play</th>
+                          <th style="width: 70px;">ID</th>
+                          <th>Track Title</th>
+                          <th>Artist</th>
+                          <th>Album</th>
+                          <th>Genre</th>
+                          <th>Streams</th>
+                          <th>Uploader</th>
+                          <th class="text-end" style="width: 120px;">Actions</th>
                         </tr>
-                      <?php endforeach; endif; ?>
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($songs)): ?>
+                          <tr><td colspan="10" class="text-center py-5 text-secondary">No audio tracks found matching your query.</td></tr>
+                        <?php else: foreach ($songs as $s): ?>
+                          <tr data-song="<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>">
+                            <td class="text-center">
+                              <input type="checkbox" name="song_ids[]" value="<?php echo $s['id']; ?>" class="form-check-input song-cb" style="cursor:pointer; transform: scale(1.1);">
+                            </td>
+                            <td>
+                              <button type="button" class="btn btn-sm btn-outline-danger rounded-circle d-flex align-items-center justify-content-center p-0" style="width: 32px; height: 32px;" onclick="playAdminAudioStream(<?php echo $s['id']; ?>, '<?php echo addslashes(htmlspecialchars($s['title'])); ?>', '<?php echo addslashes(htmlspecialchars($s['artist'])); ?>')">
+                                <i class="bi bi-play-fill fs-5 ms-1"></i>
+                              </button>
+                            </td>
+                            <td class="text-secondary font-monospace small">#<?php echo $s['id']; ?></td>
+                            <td>
+                              <div class="d-flex align-items-center gap-2">
+                                <img src="?action=get_image&id=<?php echo $s['id']; ?>&size=small&v=<?php echo $s['last_modified'] ?? 0; ?>" alt="" class="rounded" style="width: 34px; height: 34px; object-fit: cover; background: #000;">
+                                <div>
+                                  <div class="fw-bold text-white"><?php echo htmlspecialchars($s['title']); ?></div>
+                                  <small class="text-secondary font-monospace"><?php echo gmdate("i:s", (int)$s['duration']); ?> &bull; <?php echo round($s['bitrate'] / 1000); ?> kbps</small>
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              <div class="text-info fw-medium"><?php echo htmlspecialchars($s['artist']); ?></div>
+                            </td>
+                            <td class="text-secondary">
+                              <span class="text-truncate d-inline-block" style="max-width: 160px;" title="<?php echo htmlspecialchars($s['album']); ?>"><?php echo htmlspecialchars($s['album']); ?></span>
+                            </td>
+                            <td>
+                              <span class="admin-badge admin-badge-secondary"><?php echo htmlspecialchars($s['genre'] ?: 'General'); ?></span>
+                            </td>
+                            <td>
+                              <span class="text-white fw-bold font-monospace"><?php echo number_format($s['plays']); ?></span>
+                            </td>
+                            <td>
+                              <div class="d-flex align-items-center gap-1 flex-wrap">
+                                <a href="?access=admin&page=storage&search=<?php echo urlencode($s['user_id']); ?>" class="text-white small fw-bold text-decoration-none" title="Inspect User Storage">UID #<?php echo $s['user_id']; ?></a>
+                                <?php
+                                  $u_shard = substr(md5((string)$s['user_id']), 0, 2);
+                                  $u_folder_rel = 'uploads/' . $u_shard . '/user_' . $s['user_id'];
+                                ?>
+                                <a href="?access=admin&page=drive&path=<?php echo urlencode($u_folder_rel); ?>" class="admin-badge admin-badge-warning text-decoration-none" style="font-size: 0.68rem; padding: 2px 7px;" title="Browse in Drive">
+                                  <i class="bi bi-folder-fill text-warning me-1"></i>user_<?php echo $s['user_id']; ?>
+                                </a>
+                              </div>
+                              <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($s['email'] ?? 'System / Local'); ?></small>
+                            </td>
+                            <td class="text-end">
+                              <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.7rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="Edit Metadata" onclick="openAdminSingleSongEdit(<?php echo htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8'); ?>)">
+                                <i class="bi bi-pencil-fill"></i> Edit
+                              </button>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
 
-              <!-- Pagination -->
-              <?php if ($t_pages > 1): ?>
-                <div class="admin-pagination">
-                  <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=1">«</a>
-                  <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page - 1; ?>">‹</a>
-                  <?php
-                    $start_p = max(1, $s_page - 2);
-                    $end_p = min($t_pages, $start_p + 4);
-                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-                    for ($i = $start_p; $i <= $end_p; $i++):
-                  ?>
-                    <a class="admin-page-btn <?php echo ($s_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                  <?php endfor; ?>
-                  <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page + 1; ?>">›</a>
-                  <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $t_pages; ?>">»</a>
-                </div>
-              <?php endif; ?>
-            </form>
+                <!-- Pagination -->
+                <?php if ($t_pages > 1): ?>
+                  <div class="admin-pagination">
+                    <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&tab=<?php echo urlencode($active_song_tab); ?>&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=1">«</a>
+                    <a class="admin-page-btn <?php echo ($s_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&tab=<?php echo urlencode($active_song_tab); ?>&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page - 1; ?>">‹</a>
+                    <?php
+                      $start_p = max(1, $s_page - 2);
+                      $end_p = min($t_pages, $start_p + 4);
+                      if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                      for ($i = $start_p; $i <= $end_p; $i++):
+                    ?>
+                      <a class="admin-page-btn <?php echo ($s_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=songs&tab=<?php echo urlencode($active_song_tab); ?>&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                    <?php endfor; ?>
+                    <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&tab=<?php echo urlencode($active_song_tab); ?>&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $s_page + 1; ?>">›</a>
+                    <a class="admin-page-btn <?php echo ($s_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=songs&tab=<?php echo urlencode($active_song_tab); ?>&search=<?php echo urlencode($search_songs); ?>&sort=<?php echo urlencode($sort_songs); ?>&p=<?php echo $t_pages; ?>">»</a>
+                  </div>
+                <?php endif; ?>
+              </form>
+            <?php endif; ?>
           </div>
 
           <!-- Live Floating Audio Previewer Bar -->
@@ -33894,6 +34642,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
             <audio id="admin-global-audio" controls style="height: 32px; filter: invert(1); max-width: 200px;"></audio>
             <button type="button" class="btn-close btn-close-white p-1" onclick="closeAdminAudioPlayer()"></button>
+          </div>
+
+          <!-- Multi-Edit Modal -->
+          <div class="modal fade" id="admin-multi-edit-modal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-pencil-square text-danger me-2"></i> Batch Edit (<span id="multi-edit-count">0</span> Selected)</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=songs">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="multi_edit_admin_songs" value="1">
+                  <div class="modal-body p-4 text-start" style="max-height: 70vh; overflow-y: auto;" id="admin-multi-edit-container">
+                  </div>
+                  <div class="modal-footer border-0 pt-0">
+                    <button type="button" class="admin-btn-pill" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary">Save Changes</button>
+                  </div>
+                </form>
+              </div>
+            </div>
           </div>
 
           <script>
@@ -34460,10 +35230,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'artworks'): ?>
           <?php
             $db = get_db();
+            $active_art_tab = $_GET['tab'] ?? 'gallery';
             $search_artworks = trim($_GET['search'] ?? '');
             $sort_artworks = $_GET['sort'] ?? 'newest';
             $type_filter = $_GET['type'] ?? '';
-            $rating_filter = $_GET['rating'] ?? '';
+            $rating_filter = $_GET['rating'] ?? ($active_art_tab === 'moderation' ? 'r18' : '');
             $a_page = max(1, (int)($_GET['p'] ?? 1));
             $a_limit = 24;
             $a_offset = ($a_page - 1) * $a_limit;
@@ -34476,6 +35247,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             $where_clauses = ["1=1"];
             $params = [];
+
+            if ($active_art_tab === 'moderation') {
+              $where_clauses[] = "(a.rating = 'r18' OR a.is_ai = 1)";
+            }
+
             if ($search_artworks !== '') {
               $where_clauses[] = "(a.title LIKE ? OR a.tags LIKE ? OR a.characters LIKE ? OR a.parodies LIKE ? OR u.artist LIKE ? OR u.email LIKE ?)";
               $term = "%{$search_artworks}%";
@@ -34537,6 +35313,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end" style="max-width: 620px;">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="artworks">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($active_art_tab); ?>">
                 <select name="type" class="admin-pill-select" onchange="this.form.submit()">
                   <option value="" <?php echo $type_filter === '' ? 'selected' : ''; ?>>All Formats</option>
                   <option value="illust" <?php echo $type_filter === 'illust' ? 'selected' : ''; ?>>Illustrations</option>
@@ -34562,160 +35339,231 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
 
           <div class="content-area-wrapper">
-            <!-- Metrics Row -->
-            <div class="row g-3 mb-4">
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Total Works</span>
-                    <span class="text-danger"><i class="bi bi-images fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_artworks); ?></div>
-                  <small class="text-secondary"><?php echo number_format($t_artworks); ?> matching filter</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Illustrations</span>
-                    <span class="text-info"><i class="bi bi-brush fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_illustrations); ?></div>
-                  <small class="text-secondary">Image &amp; multi-page sets</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Animations</span>
-                    <span class="text-warning"><i class="bi bi-camera-reels fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_videos); ?></div>
-                  <small class="text-secondary">Video &amp; clips</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">R-18 Mature</span>
-                    <span class="text-danger"><i class="bi bi-shield-exclamation fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_r18); ?></div>
-                  <small class="text-secondary">Marked as 18+ content</small>
-                </div>
-              </div>
+            <!-- Sub-Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=artworks&tab=gallery" class="update-tab-btn <?php echo $active_art_tab === 'gallery' ? 'active' : ''; ?>">
+                <i class="bi bi-images"></i> Artwork Catalog (<?php echo number_format($total_artworks); ?>)
+              </a>
+              <a href="?access=admin&page=artworks&tab=moderation" class="update-tab-btn <?php echo $active_art_tab === 'moderation' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-exclamation"></i> Moderation (R-18 / AI) (<?php echo number_format($total_r18); ?>)
+              </a>
+              <a href="?access=admin&page=artworks&tab=settings" class="update-tab-btn <?php echo $active_art_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> Media &amp; Upload Settings
+              </a>
             </div>
 
-            <!-- Management Form & Table -->
-            <form method="POST" action="?access=admin&page=artworks" id="admin-artworks-form">
-              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-              <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
-                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
-                <div class="dropdown">
-                  <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                    <i class="bi bi-trash2"></i> Delete
+            <?php if ($active_art_tab === 'settings'): ?>
+              <?php
+                $a_dim = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_max_dim'")->fetchColumn() ?: 4096);
+                $a_qual = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_webp_quality'")->fetchColumn() ?: 80);
+                $a_r18 = $db->query("SELECT value FROM site_settings WHERE key = 'art_r18_policy'")->fetchColumn() ?: 'allow';
+                $a_vid = $db->query("SELECT value FROM site_settings WHERE key = 'art_allow_video'")->fetchColumn() !== '0';
+              ?>
+              <div class="admin-card p-4 mb-4 w-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-sliders text-danger"></i> PHPMusicPost Media Engine Settings
+                    </h5>
+                    <div class="small text-secondary mt-1">Configure artwork resolution boundaries, WebP compression, and age rating policies.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Media Policy</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=artworks" class="d-flex flex-column gap-3 w-100">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_artworks_settings" value="1">
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX IMAGE RESOLUTION (PX)</label>
+                      <input type="number" name="art_max_dim" class="admin-pill-input w-100 font-monospace" min="1000" max="8192" value="<?php echo $a_dim; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">WEBP THUMB QUALITY (%)</label>
+                      <input type="number" name="art_webp_quality" class="admin-pill-input w-100 font-monospace" min="50" max="100" value="<?php echo $a_qual; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">R-18 MATURE CONTENT POLICY</label>
+                      <select name="r18_policy" class="admin-pill-select w-100">
+                        <option value="allow" <?php echo $a_r18 === 'allow' ? 'selected' : ''; ?>>Allow with Safe Blur</option>
+                        <option value="login_only" <?php echo $a_r18 === 'login_only' ? 'selected' : ''; ?>>Require Login Only</option>
+                        <option value="block" <?php echo $a_r18 === 'block' ? 'selected' : ''; ?>>Strictly Prohibited</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Allow Video &amp; Animation Uploads</strong>
+                      <span class="text-secondary small">Permit users to upload MP4/WebM animations in addition to still images.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="art_allow_video" value="1" <?php echo $a_vid ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Media Settings
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-dark border-secondary">
-                    <li><button type="submit" name="admin_artwork_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Remove artwork record from database?');"><i class="bi bi-eraser me-2"></i> Database Only</button></li>
-                    <li><button type="submit" name="admin_artwork_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete record AND all files from disk?');"><i class="bi bi-trash2-fill me-2"></i> Permanent Wipe</button></li>
-                  </ul>
+                </form>
+              </div>
+            <?php else: ?>
+              <!-- Metrics Row -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Total Works</span>
+                      <span class="text-danger"><i class="bi bi-images fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_artworks); ?></div>
+                    <small class="text-secondary"><?php echo number_format($t_artworks); ?> matching filter</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Illustrations</span>
+                      <span class="text-info"><i class="bi bi-brush fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_illustrations); ?></div>
+                    <small class="text-secondary">Image &amp; multi-page sets</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Animations</span>
+                      <span class="text-warning"><i class="bi bi-camera-reels fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_videos); ?></div>
+                    <small class="text-secondary">Video &amp; clips</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">R-18 Mature</span>
+                      <span class="text-danger"><i class="bi bi-shield-exclamation fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_r18); ?></div>
+                    <small class="text-secondary">Marked as 18+ content</small>
+                  </div>
                 </div>
               </div>
 
-              <div class="admin-card mb-4">
-                <div class="table-responsive">
-                  <table class="admin-table align-middle text-nowrap">
-                    <thead>
-                      <tr>
-                        <th style="width: 40px;" class="text-center"></th>
-                        <th style="width: 60px;">ID</th>
-                        <th>Preview</th>
-                        <th>Title &amp; Info</th>
-                        <th>Type</th>
-                        <th>Rating</th>
-                        <th>Views / Likes</th>
-                        <th>Uploader</th>
-                        <th class="text-end" style="width: 140px;">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <?php if (empty($artworks)): ?>
-                        <tr><td colspan="9" class="text-center py-5 text-secondary">No artworks found matching criteria.</td></tr>
-                      <?php else: foreach ($artworks as $art): ?>
+              <!-- Management Form & Table -->
+              <form method="POST" action="?access=admin&page=artworks" id="admin-artworks-form">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                  <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.artwork-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                  <div class="dropdown">
+                    <button class="admin-btn-pill admin-btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                      <i class="bi bi-trash2"></i> Delete
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                      <li><button type="submit" name="admin_artwork_action" value="soft_delete" class="dropdown-item text-warning fw-bold" onclick="return confirm('Remove artwork record from database?');"><i class="bi bi-eraser me-2"></i> Database Only</button></li>
+                      <li><button type="submit" name="admin_artwork_action" value="perm_delete" class="dropdown-item text-danger fw-bold" onclick="return confirm('Permanently delete record AND all files from disk?');"><i class="bi bi-trash2-fill me-2"></i> Permanent Wipe</button></li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div class="admin-card mb-4">
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle text-nowrap">
+                      <thead>
                         <tr>
-                          <td class="text-center">
-                            <input type="checkbox" name="artwork_ids[]" value="<?php echo $art['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform:scale(1.1);">
-                          </td>
-                          <td class="text-secondary font-monospace small">#<?php echo $art['id']; ?></td>
-                          <td>
-                            <div style="width: 42px; height: 42px; border-radius: 8px; overflow: hidden; background: #000; border: 1px solid var(--drive-border);">
-                              <?php if (!empty($art['cover_image'])): ?>
-                                <img src="?access=artwork&action=thumb&f=<?php echo urlencode($art['cover_image']); ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='?action=get_app_icon'">
-                              <?php else: ?>
-                                <div class="d-flex align-items-center justify-content-center h-100 text-secondary"><i class="bi bi-image"></i></div>
-                              <?php endif; ?>
-                            </div>
-                          </td>
-                          <td>
-                            <div class="fw-bold text-white"><?php echo htmlspecialchars($art['title']); ?></div>
-                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo (int)$art['page_count']; ?> page(s) &bull; <?php echo htmlspecialchars($art['tags'] ?: 'No tags'); ?></small>
-                          </td>
-                          <td>
-                            <span class="admin-badge <?php echo $art['type'] === 'video' ? 'admin-badge-warning' : 'admin-badge-info'; ?>">
-                              <?php echo strtoupper(htmlspecialchars($art['type'])); ?>
-                            </span>
-                          </td>
-                          <td>
-                            <span class="admin-badge <?php echo $art['rating'] === 'r18' ? 'admin-badge-danger' : 'admin-badge-success'; ?>">
-                              <?php echo $art['rating'] === 'r18' ? 'R-18' : 'SAFE'; ?>
-                            </span>
-                          </td>
-                          <td>
-                            <span class="text-white font-monospace small"><i class="bi bi-eye text-secondary me-1"></i><?php echo number_format($art['view_count'] ?: 0); ?></span>
-                            <span class="text-secondary font-monospace small ms-2"><i class="bi bi-heart-fill text-danger me-1"></i><?php echo number_format($art['like_count'] ?: 0); ?></span>
-                          </td>
-                          <td>
-                            <div class="fw-bold text-white small"><?php echo htmlspecialchars($art['artist_name'] ?: 'User #' . $art['user_id']); ?></div>
-                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($art['email'] ?: 'UID #' . $art['user_id']); ?></small>
-                          </td>
-                          <td class="text-end">
-                            <div class="d-flex align-items-center justify-content-end gap-1">
-                              <a href="?access=artwork#/artwork/<?php echo $art['id']; ?>" target="_blank" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;">
-                                <i class="bi bi-eye"></i> View
-                              </a>
-                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick="openEditArtworkModal(<?php echo htmlspecialchars(json_encode($art), ENT_QUOTES, 'UTF-8'); ?>)">
-                                <i class="bi bi-pencil-fill"></i> Edit
-                              </button>
-                            </div>
-                          </td>
+                          <th style="width: 40px;" class="text-center"></th>
+                          <th style="width: 60px;">ID</th>
+                          <th>Preview</th>
+                          <th>Title &amp; Info</th>
+                          <th>Type</th>
+                          <th>Rating</th>
+                          <th>Views / Likes</th>
+                          <th>Uploader</th>
+                          <th class="text-end" style="width: 140px;">Actions</th>
                         </tr>
-                      <?php endforeach; endif; ?>
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($artworks)): ?>
+                          <tr><td colspan="9" class="text-center py-5 text-secondary">No artworks found matching criteria.</td></tr>
+                        <?php else: foreach ($artworks as $art): ?>
+                          <tr>
+                            <td class="text-center">
+                              <input type="checkbox" name="artwork_ids[]" value="<?php echo $art['id']; ?>" class="form-check-input artwork-cb" style="cursor:pointer; transform:scale(1.1);">
+                            </td>
+                            <td class="text-secondary font-monospace small">#<?php echo $art['id']; ?></td>
+                            <td>
+                              <div style="width: 42px; height: 42px; border-radius: 8px; overflow: hidden; background: #000; border: 1px solid var(--drive-border);">
+                                <?php if (!empty($art['cover_image'])): ?>
+                                  <img src="?access=artwork&action=thumb&f=<?php echo urlencode($art['cover_image']); ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                                <?php else: ?>
+                                  <div class="d-flex align-items-center justify-content-center h-100 text-secondary"><i class="bi bi-image"></i></div>
+                                <?php endif; ?>
+                              </div>
+                            </td>
+                            <td>
+                              <div class="fw-bold text-white"><?php echo htmlspecialchars($art['title']); ?></div>
+                              <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo (int)$art['page_count']; ?> page(s) &bull; <?php echo htmlspecialchars($art['tags'] ?: 'No tags'); ?></small>
+                            </td>
+                            <td>
+                              <span class="admin-badge <?php echo $art['type'] === 'video' ? 'admin-badge-warning' : 'admin-badge-info'; ?>">
+                                <?php echo strtoupper(htmlspecialchars($art['type'])); ?>
+                              </span>
+                            </td>
+                            <td>
+                              <span class="admin-badge <?php echo $art['rating'] === 'r18' ? 'admin-badge-danger' : 'admin-badge-success'; ?>">
+                                <?php echo $art['rating'] === 'r18' ? 'R-18' : 'SAFE'; ?>
+                              </span>
+                            </td>
+                            <td>
+                              <span class="text-white font-monospace small"><i class="bi bi-eye text-secondary me-1"></i><?php echo number_format($art['view_count'] ?: 0); ?></span>
+                              <span class="text-secondary font-monospace small ms-2"><i class="bi bi-heart-fill text-danger me-1"></i><?php echo number_format($art['like_count'] ?: 0); ?></span>
+                            </td>
+                            <td>
+                              <div class="fw-bold text-white small"><?php echo htmlspecialchars($art['artist_name'] ?: 'User #' . $art['user_id']); ?></div>
+                              <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($art['email'] ?: 'UID #' . $art['user_id']); ?></small>
+                            </td>
+                            <td class="text-end">
+                              <div class="d-flex align-items-center justify-content-end gap-1">
+                                <a href="?access=artwork#/artwork/<?php echo $art['id']; ?>" target="_blank" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;">
+                                  <i class="bi bi-eye"></i> View
+                                </a>
+                                <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick="openEditArtworkModal(<?php echo htmlspecialchars(json_encode($art), ENT_QUOTES, 'UTF-8'); ?>)">
+                                  <i class="bi bi-pencil-fill"></i> Edit
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
 
-              <!-- Pagination -->
-              <?php if ($t_pages > 1): ?>
-                <div class="admin-pagination">
-                  <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=1">«</a>
-                  <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page - 1; ?>">‹</a>
-                  <?php
-                    $start_p = max(1, $a_page - 2);
-                    $end_p = min($t_pages, $start_p + 4);
-                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
-                    for ($i = $start_p; $i <= $end_p; $i++):
-                  ?>
-                    <a class="admin-page-btn <?php echo ($a_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=artworks&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-                  <?php endfor; ?>
-                  <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page + 1; ?>">›</a>
-                  <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $t_pages; ?>">»</a>
-                </div>
-              <?php endif; ?>
-            </form>
+                <!-- Pagination -->
+                <?php if ($t_pages > 1): ?>
+                  <div class="admin-pagination">
+                    <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=<?php echo urlencode($active_art_tab); ?>&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=1">«</a>
+                    <a class="admin-page-btn <?php echo ($a_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=<?php echo urlencode($active_art_tab); ?>&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page - 1; ?>">‹</a>
+                    <?php
+                      $start_p = max(1, $a_page - 2);
+                      $end_p = min($t_pages, $start_p + 4);
+                      if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                      for ($i = $start_p; $i <= $end_p; $i++):
+                    ?>
+                      <a class="admin-page-btn <?php echo ($a_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=artworks&tab=<?php echo urlencode($active_art_tab); ?>&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                    <?php endfor; ?>
+                    <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=<?php echo urlencode($active_art_tab); ?>&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $a_page + 1; ?>">›</a>
+                    <a class="admin-page-btn <?php echo ($a_page >= $t_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=<?php echo urlencode($active_art_tab); ?>&type=<?php echo urlencode($type_filter); ?>&rating=<?php echo urlencode($rating_filter); ?>&search=<?php echo urlencode($search_artworks); ?>&sort=<?php echo urlencode($sort_artworks); ?>&p=<?php echo $t_pages; ?>">»</a>
+                  </div>
+                <?php endif; ?>
+              </form>
+            <?php endif; ?>
           </div>
 
           <!-- Edit Artwork Modal -->
@@ -34737,7 +35585,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </div>
                     <div class="mb-3">
                       <label class="form-label text-secondary small fw-bold mb-1">CAPTION / DESCRIPTION</label>
-                      <textarea name="description" id="edit-art-desc" class="form-control bg-dark text-white border-secondary" rows="3" style="border-radius:10px; font-size:0.85rem;"></textarea>
+                      <textarea name="description" id="edit-art-desc" class="form-control bg-dark text-white border-secondary" rows="3" style="border-radius:12px; font-size:0.85rem;"></textarea>
                     </div>
                     <div class="row g-2 mb-3">
                       <div class="col-6">
@@ -35533,12 +36381,40 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             })();
           </script>
         <?php elseif (($_GET['page'] ?? '') === 'api'): ?>
-          <?php 
+          <?php
             $db = get_db();
-            $api_sort = $_GET['sort'] ?? 'newest'; 
-            $api_search = $_GET['search'] ?? '';
 
-            // 1. Compute Real-Time API Key Analytics & Quotas
+            // Ensure api_logs and quota columns are guaranteed on GET requests
+            try {
+              $api_cols = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('quota_limit', $api_cols)) {
+                $db->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
+              }
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS api_logs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  api_key_id INTEGER DEFAULT 0,
+                  token_prefix TEXT DEFAULT '',
+                  endpoint TEXT DEFAULT '',
+                  method TEXT DEFAULT 'GET',
+                  ip_address TEXT DEFAULT '',
+                  status_code INTEGER DEFAULT 200,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_logs_created ON api_logs(created_at);
+                CREATE INDEX IF NOT EXISTS idx_api_logs_status ON api_logs(status_code);
+              ");
+            } catch (Exception $e) {}
+
+            $active_api_tab = $_GET['tab'] ?? 'keys';
+            $api_sort = $_GET['sort'] ?? 'newest';
+            $api_search = trim($_GET['search'] ?? '');
+            $api_status_filter = $_GET['status'] ?? '';
+            $api_page = max(1, (int)($_GET['p'] ?? 1));
+            $api_limit = 25;
+            $api_offset = ($api_page - 1) * $api_limit;
+
+            // Global Metrics
             $total_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys")->fetchColumn() ?: 0);
             $active_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys WHERE status = 'active'")->fetchColumn() ?: 0);
             $pending_keys_count = (int)($db->query("SELECT COUNT(*) FROM api_keys WHERE status = 'pending'")->fetchColumn() ?: 0);
@@ -35547,7 +36423,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $current_month = date('Y-m');
             $monthly_requests = (int)($db->query("SELECT SUM(uses) FROM api_keys WHERE reset_month = '{$current_month}'")->fetchColumn() ?: 0);
 
-            // 2. Fetch Top 5 Active Consumer Applications for Charts
+            // Fetch Top 5 Consumers for Chart
             $stmt_top_apps = $db->query("
               SELECT name, uses, status 
               FROM api_keys 
@@ -35562,349 +36438,773 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $top_app_uses[] = (int)$top_app['uses'];
             }
           ?>
+
+          <style>
+            .api-tabs-container {
+              display: flex !important;
+              align-items: center;
+              gap: 0.5rem;
+              flex-wrap: nowrap !important;
+              overflow-x: auto !important;
+              overflow-y: hidden !important;
+              padding-bottom: 8px !important;
+              margin-bottom: 1.5rem !important;
+              scrollbar-width: thin;
+              scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+              -webkit-overflow-scrolling: touch;
+              width: 100%;
+            }
+            .api-tabs-container::-webkit-scrollbar { height: 4px; }
+            .api-tabs-container::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 4px; }
+            .api-tabs-container::-webkit-scrollbar-thumb:hover { background: #ff0044; }
+
+            .api-tab-btn {
+              padding: 0.6rem 1.25rem;
+              font-size: 0.88rem;
+              font-weight: 600;
+              border-radius: 12px;
+              color: var(--drive-text-muted);
+              border: 1px solid transparent;
+              background: transparent;
+              transition: all 0.15s ease;
+              text-decoration: none;
+              display: inline-flex;
+              align-items: center;
+              gap: 0.5rem;
+              white-space: nowrap !important;
+              flex-shrink: 0 !important;
+            }
+            .api-tab-btn:hover { background: rgba(255, 255, 255, 0.05); color: #ffffff; }
+            .api-tab-btn.active {
+              background: rgba(255, 0, 68, 0.15);
+              color: #ff4d4d;
+              border-color: rgba(255, 0, 68, 0.35);
+            }
+
+            .api-table-card {
+              background: #101010;
+              border: 1px solid #222222;
+              border-radius: 16px;
+              overflow: hidden;
+            }
+            .api-table {
+              width: 100%;
+              margin-bottom: 0;
+              border-collapse: collapse;
+            }
+            .api-table th {
+              background: #141414;
+              color: #aaaaaa;
+              font-size: 0.75rem;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              padding: 0.85rem 1.1rem;
+              border-bottom: 1px solid #222222;
+              white-space: nowrap !important;
+            }
+            .api-table td {
+              padding: 0.85rem 1.1rem;
+              border-bottom: 1px solid #1a1a1a;
+              font-size: 0.88rem;
+              color: #f1f1f1;
+              vertical-align: middle;
+              white-space: nowrap !important;
+            }
+            .api-table tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+            .api-token-badge {
+              font-family: 'JetBrains Mono', Consolas, monospace;
+              font-size: 0.82rem;
+              background: #08080c;
+              border: 1px solid #2a2a35;
+              padding: 0.3rem 0.65rem;
+              border-radius: 8px;
+              color: #38bdf8;
+              display: inline-flex;
+              align-items: center;
+              gap: 0.5rem;
+            }
+
+            .api-btn-copy {
+              background: rgba(255, 255, 255, 0.05);
+              border: 1px solid rgba(255, 255, 255, 0.1);
+              color: #aaaaaa;
+              border-radius: 6px;
+              padding: 2px 7px;
+              font-size: 0.72rem;
+              cursor: pointer;
+              transition: all 0.15s ease;
+            }
+            .api-btn-copy:hover {
+              background: #ff0044;
+              border-color: #ff0044;
+              color: #ffffff;
+            }
+          </style>
+
           <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
-              <h1 class="content-title m-0 fw-bold text-white">API Key Management &amp; Analytics</h1>
-              <div class="small text-secondary mt-1">Generate tokens, track request consumption metrics, and test live endpoints</div>
+              <h1 class="content-title m-0 fw-bold text-white">API Gateway &amp; Developer Suite</h1>
+              <div class="small text-secondary mt-1">Token issuance, monthly quotas, endpoint metrics, security rules, and real-time request audits</div>
             </div>
             <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
-              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end" style="max-width: 500px;">
-                <input type="hidden" name="access" value="admin">
-                <input type="hidden" name="page" value="api">
-                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
-                  <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest First</option>
-                  <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
-                  <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
-                </select>
-                <div class="position-relative flex-grow-1" style="min-width: 180px;">
-                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search tokens, apps, users..." value="<?php echo htmlspecialchars($api_search); ?>">
-                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
-                </div>
-              </form>
+              <a href="./#playground" target="_blank" class="admin-btn-pill admin-btn-primary text-nowrap">
+                <i class="bi bi-window-stack"></i> Open API Playground
+              </a>
             </div>
           </div>
 
           <div class="content-area-wrapper">
-            <!-- Analytics KPI Metric Cards -->
-            <div class="row g-3 mb-4">
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Total Tokens</span>
-                    <span class="text-danger"><i class="bi bi-key-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_keys_count); ?></div>
-                  <small class="text-secondary"><?php echo number_format($active_keys_count); ?> active &bull; <?php echo number_format($pending_keys_count); ?> pending</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Monthly Traffic</span>
-                    <span class="text-info"><i class="bi bi-arrow-down-up fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($monthly_requests); ?> <span class="fs-6 text-secondary fw-normal">calls</span></div>
-                  <small class="text-secondary">Requests logged in <?php echo date('F Y'); ?></small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">All-Time Requests</span>
-                    <span class="text-success"><i class="bi bi-activity fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_api_requests); ?></div>
-                  <small class="text-secondary">Cumulative developer API calls</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Quota Limit</span>
-                    <span class="text-warning"><i class="bi bi-speedometer2 fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white">1,000 <span class="fs-6 text-secondary fw-normal">req/mo</span></div>
-                  <small class="text-secondary">Auto-resets on the 1st of each month</small>
-                </div>
-              </div>
+            <!-- Navigation Sub-Tabs -->
+            <div class="api-tabs-container">
+              <a href="?access=admin&page=api&tab=keys" class="api-tab-btn <?php echo $active_api_tab === 'keys' ? 'active' : ''; ?>">
+                <i class="bi bi-key-fill"></i> API Tokens &amp; Quotas (<?php echo $total_keys_count; ?>)
+              </a>
+              <a href="?access=admin&page=api&tab=logs" class="api-tab-btn <?php echo $active_api_tab === 'logs' ? 'active' : ''; ?>">
+                <i class="bi bi-activity"></i> Live Traffic &amp; Logs
+              </a>
+              <a href="?access=admin&page=api&tab=settings" class="api-tab-btn <?php echo $active_api_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-lock-fill"></i> Gateway &amp; Security Settings
+              </a>
             </div>
 
-            <!-- Analytics Visual Charts Row -->
-            <div class="row g-4 mb-4">
-              <div class="col-12 col-xl-4">
-                <div class="admin-card p-4 h-100 d-flex flex-column">
-                  <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
-                    <i class="bi bi-pie-chart-fill text-danger"></i> Key Status Distribution
-                  </h5>
-                  <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
-                    <?php if ($total_keys_count === 0): ?>
-                      <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No API Keys Generated</div>
-                    <?php else: ?>
-                      <canvas id="apiKeyStatusChart"></canvas>
-                    <?php endif; ?>
+            <!-- TAB 1: API TOKENS & QUOTAS -->
+            <?php if ($active_api_tab === 'keys'): ?>
+              <!-- Analytics KPI Metrics Cards -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Total Tokens</span>
+                      <span class="text-danger"><i class="bi bi-key-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_keys_count); ?></div>
+                    <small class="text-secondary"><?php echo number_format($active_keys_count); ?> active &bull; <?php echo number_format($pending_keys_count); ?> pending</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Monthly Traffic</span>
+                      <span class="text-info"><i class="bi bi-arrow-down-up fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($monthly_requests); ?> <span class="fs-6 text-secondary fw-normal">calls</span></div>
+                    <small class="text-secondary">Requests logged in <?php echo date('F Y'); ?></small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">All-Time Requests</span>
+                      <span class="text-success"><i class="bi bi-activity fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_api_requests); ?></div>
+                    <small class="text-secondary">Cumulative developer API hits</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Banned Tokens</span>
+                      <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($banned_keys_count); ?></div>
+                    <small class="text-secondary">Suspended from making calls</small>
                   </div>
                 </div>
               </div>
 
-              <div class="col-12 col-xl-8">
-                <div class="admin-card p-4 h-100 d-flex flex-column">
-                  <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
-                      <i class="bi bi-bar-chart-fill text-info"></i> Top Request Consumer Applications
+              <!-- Visual Charts Matrix -->
+              <div class="row g-4 mb-4">
+                <div class="col-12 col-xl-4">
+                  <div class="admin-card p-4 h-100 d-flex flex-column">
+                    <h5 class="fw-bold text-white mb-3 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-pie-chart-fill text-danger"></i> Token Status Breakdown
                     </h5>
-                    <span class="admin-badge admin-badge-info">Monthly Consumption</span>
+                    <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
+                      <?php if ($total_keys_count === 0): ?>
+                        <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No API Keys Generated</div>
+                      <?php else: ?>
+                        <canvas id="apiKeyStatusChart"></canvas>
+                      <?php endif; ?>
+                    </div>
                   </div>
-                  <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
-                    <?php if (empty($top_app_uses) || array_sum($top_app_uses) === 0): ?>
-                      <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No usage activity recorded this month</div>
-                    <?php else: ?>
-                      <canvas id="apiTopConsumersChart"></canvas>
-                    <?php endif; ?>
+                </div>
+
+                <div class="col-12 col-xl-8">
+                  <div class="admin-card p-4 h-100 d-flex flex-column">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                        <i class="bi bi-bar-chart-fill text-info"></i> Top Request Consumer Applications
+                      </h5>
+                      <span class="admin-badge admin-badge-info">Monthly Consumption</span>
+                    </div>
+                    <div class="position-relative flex-grow-1" style="min-height: 220px; width: 100%;">
+                      <?php if (empty($top_app_uses) || array_sum($top_app_uses) === 0): ?>
+                        <div class="d-flex align-items-center justify-content-center h-100 text-secondary small">No usage activity recorded this month</div>
+                      <?php else: ?>
+                        <canvas id="apiTopConsumersChart"></canvas>
+                      <?php endif; ?>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
 
-            <!-- Create API Key Banner with Custom Quota Input -->
-            <div class="admin-card p-4 mb-4">
-              <div class="d-flex align-items-center gap-2 mb-1">
-                <i class="bi bi-plus-circle-fill text-danger fs-5"></i>
-                <h5 class="text-white fw-bold fs-6 m-0">Generate Custom API Key</h5>
+              <!-- Generate Token Banner (No Weird Wrap Layout) -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex align-items-center gap-2 mb-1">
+                  <i class="bi bi-plus-circle-fill text-danger fs-5"></i>
+                  <h5 class="text-white fw-bold fs-6 m-0">Issue New API Token</h5>
+                </div>
+                <p class="text-secondary small mb-3">Provision custom authorization credentials for external integrations, mobile apps, or bots.</p>
+
+                <form method="POST" action="?access=admin&page=api" class="d-flex flex-wrap align-items-center gap-3">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <div class="flex-grow-1" style="min-width: 240px;">
+                    <input type="text" name="key_name" class="admin-pill-input w-100" placeholder="Application Name (e.g. Discord Bot, Flutter App)" required>
+                  </div>
+                  <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                    <span class="text-secondary small fw-bold text-nowrap">Monthly Quota:</span>
+                    <select name="quota_limit" class="admin-pill-select" style="min-width: 140px;">
+                      <option value="500">500 req/mo</option>
+                      <option value="1000" selected>1,000 req/mo</option>
+                      <option value="5000">5,000 req/mo</option>
+                      <option value="10000">10,000 req/mo</option>
+                      <option value="50000">50,000 req/mo</option>
+                      <option value="0">Unlimited (No Limit)</option>
+                    </select>
+                  </div>
+                  <button type="submit" name="generate_api_key" class="admin-btn-pill admin-btn-primary text-nowrap flex-shrink-0" style="height: 40px; padding: 0 1.25rem;">
+                    <i class="bi bi-shield-plus me-1"></i> Generate Key
+                  </button>
+                </form>
               </div>
-              <p class="text-secondary small mb-3">Set custom monthly quota limits or grant unrestricted access to endpoints.</p>
-              <form method="POST" action="?access=admin&page=api" class="d-flex gap-2 flex-wrap align-items-center">
-                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                <input type="text" name="key_name" class="admin-pill-input flex-grow-1" placeholder="Application Name (e.g. Discord Bot, Mobile App)" required style="min-width: 220px;">
-                
-                <div class="d-flex align-items-center gap-2">
-                  <span class="text-secondary small fw-bold text-nowrap">Monthly Quota:</span>
-                  <select name="quota_limit" class="admin-pill-select" style="min-width: 140px;">
-                    <option value="500">500 req/mo</option>
-                    <option value="1000" selected>1,000 req/mo</option>
-                    <option value="5000">5,000 req/mo</option>
-                    <option value="10000">10,000 req/mo</option>
-                    <option value="50000">50,000 req/mo</option>
-                    <option value="100000">100,000 req/mo</option>
-                    <option value="0">Unlimited (No Cap)</option>
+
+              <!-- Filter & Search Toolbar -->
+              <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                <span class="text-secondary small fw-bold text-uppercase">Configured Access Tokens (<?php echo $total_keys_count; ?>)</span>
+                <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap" style="max-width: 520px;">
+                  <input type="hidden" name="access" value="admin">
+                  <input type="hidden" name="page" value="api">
+                  <input type="hidden" name="tab" value="keys">
+                  <select name="sort" class="admin-pill-select" style="min-width: 130px;" onchange="this.form.submit()">
+                    <option value="newest" <?php echo $api_sort === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                    <option value="oldest" <?php echo $api_sort === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
+                    <option value="modified" <?php echo $api_sort === 'modified' ? 'selected' : ''; ?>>Recently Modified</option>
                   </select>
-                </div>
-                
-                <button type="submit" name="generate_api_key" class="admin-btn-pill admin-btn-primary text-nowrap">Generate Key</button>
-              </form>
-            </div>
-            
-            <div class="admin-card mb-4">
-              <div class="table-responsive">
-                <table class="admin-table align-middle">
-                  <thead class="border-bottom border-secondary">
-                    <tr><th class="py-3 px-4">App Name</th><th class="py-3 px-4">Owner/Status</th><th class="py-3 px-4">Token Key</th><th class="py-3 px-4">Quota &amp; Usage</th><th class="py-3 px-4 text-end">Actions</th></tr>
-                  </thead>
-                  <tbody>
-                    <?php
-                      $api_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                      $api_limit = 25;
-                      $api_offset = ($api_page - 1) * $api_limit;
-                      $db = get_db();
-                      
-                      try {
-                        $db->exec("CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, token TEXT UNIQUE, name TEXT, status TEXT DEFAULT 'active', uses INTEGER DEFAULT 0, reset_month TEXT, expires_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, quota_limit INTEGER DEFAULT 1000);");
-                        $api_cols_admin = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
-                        if (!in_array('quota_limit', $api_cols_admin)) {
-                          $db->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
-                        }
-                        if (!in_array('updated_at', $api_cols_admin)) { 
-                          $db->exec("ALTER TABLE api_keys ADD COLUMN updated_at DATETIME;"); 
-                          $db->exec("UPDATE api_keys SET updated_at = created_at WHERE updated_at IS NULL;");
-                        }
-                      } catch(Exception $e) {}
-  
-                      $api_search = $_GET['search'] ?? '';
-                      $where_sql = "";
-                      $params = [];
-                      if ($api_search !== '') {
-                        $where_sql = "WHERE a.name LIKE ? OR a.token LIKE ? OR u.email LIKE ? OR u.artist LIKE ?";
-                        $params = ["%$api_search%", "%$api_search%", "%$api_search%", "%$api_search%"];
-                      }
-  
-                      $stmt_count = $db->prepare("SELECT COUNT(a.id) FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql");
-                      $stmt_count->execute($params);
-                      $total_apis = $stmt_count->fetchColumn();
-                      $total_api_pages = ceil($total_apis / $api_limit);
-  
-                      $api_sort = $_GET['sort'] ?? 'newest';
-                      $order_sql = "a.created_at DESC";
-                      if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
-                      elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
-  
-                      $stmt_keys = $db->prepare("SELECT a.*, u.email as user_email FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql LIMIT ? OFFSET ?");
-                      $param_idx = 1;
-                      foreach ($params as $pval) {
-                        $stmt_keys->bindValue($param_idx++, $pval, PDO::PARAM_STR);
-                      }
-                      $stmt_keys->bindValue($param_idx++, (int)$api_limit, PDO::PARAM_INT);
-                      $stmt_keys->bindValue($param_idx++, (int)$api_offset, PDO::PARAM_INT);
-                      $stmt_keys->execute();
-                      $keys = $stmt_keys->fetchAll();
-                      
-                      if (empty($keys)): ?>
-                        <tr><td colspan="5" class="text-center py-4 text-secondary">No API keys found.</td></tr>
-                    <?php else: foreach ($keys as $k):
-                      $k_quota = isset($k['quota_limit']) ? (int)$k['quota_limit'] : 1000;
-                      $is_unlim_key = ($k_quota === 0);
-                      $k_pct = $is_unlim_key ? 0 : min(100, round(($k['uses'] / max(1, $k_quota)) * 100));
-                    ?>
-                    <tr>
-                      <td class="py-3 px-4 fw-medium text-white">
-                        <div><?php echo htmlspecialchars($k['name']); ?></div>
-                        <small class="text-secondary font-monospace" style="font-size: 0.7rem;">ID #<?php echo $k['id']; ?></small>
-                      </td>
-                      <td class="py-3 px-4">
-                        <div class="small text-secondary mb-1"><?php echo $k['user_id'] == 0 ? 'System Admin' : htmlspecialchars($k['user_email'] ?? 'User ID: '.$k['user_id']); ?></div>
-                        <?php if ($k['status'] === 'pending'): ?>
-                          <span class="badge bg-info text-dark">Pending</span>
-                        <?php elseif ($k['status'] === 'banned'): ?>
-                          <span class="badge bg-danger">Banned</span>
-                        <?php else: ?>
-                          <span class="badge bg-success">Active</span>
-                        <?php endif; ?>
-                      </td>
-                      <td class="py-3 px-4 font-monospace text-info">
-                        <?php if ($k['status'] === 'pending'): ?>
-                          <i class="text-secondary">Hidden until verified</i>
-                        <?php else: ?>
-                          <div class="d-flex align-items-center gap-2">
-                            <span><?php echo htmlspecialchars($k['token']); ?></span>
-                            <button type="button" class="btn btn-sm btn-outline-info py-0 px-2" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($k['token']); ?>').then(()=>{this.innerHTML='<i class=\'bi bi-check-lg text-success\'></i>'; setTimeout(()=>this.innerHTML='<i class=\'bi bi-clipboard\'></i>', 2000);})" title="Copy Key"><i class="bi bi-clipboard"></i></button>
-                          </div>
-                        <?php endif; ?>
-                      </td>
-                      <td class="py-3 px-4 text-secondary small">
-                        <div class="mb-1 d-flex align-items-center gap-2">
-                          <?php if ($is_unlim_key): ?>
-                            <span class="badge bg-success bg-opacity-25 text-success border border-success"><i class="bi bi-infinity me-1"></i> Unlimited</span>
-                            <span class="text-white fw-bold font-monospace"><?php echo number_format($k['uses']); ?> calls</span>
-                          <?php else: ?>
-                            <div class="progress" style="height: 6px; width: 70px; background: #000;">
-                              <div class="progress-bar <?php echo $k_pct > 80 ? 'bg-danger' : ($k_pct > 50 ? 'bg-warning' : 'bg-info'); ?>" role="progressbar" style="width: <?php echo $k_pct; ?>%;"></div>
-                            </div>
-                            <span class="text-white fw-bold font-monospace"><?php echo number_format($k['uses']); ?> / <?php echo number_format($k_quota); ?></span>
-                          <?php endif; ?>
-                        </div>
-                        <div>Exp: <?php echo $k['expires_at'] ? date('Y-m-d', strtotime($k['expires_at'])) : 'Never'; ?></div>
-                      </td>
-                      <td class="py-3 px-4 text-end">
-                        <div class="d-flex gap-2 justify-content-end align-items-center flex-wrap">
-                          <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.65rem; font-size: 0.75rem;" onclick="openEditApiQuotaModal(<?php echo $k['id']; ?>, '<?php echo addslashes(htmlspecialchars($k['name'])); ?>', <?php echo $k_quota; ?>)">
-                            <i class="bi bi-sliders"></i> Quota
-                          </button>
-                          
-                          <form method="POST" action="?access=admin&page=api" class="m-0 d-flex gap-2">
-                            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                            <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
-                            
-                            <?php if ($k['status'] === 'pending'): ?>
-                              <button type="submit" name="verify_api_key" class="btn btn-sm btn-success">Verify</button>
-                            <?php elseif ($k['status'] === 'active'): ?>
-                              <button type="submit" name="ban_api_key" class="btn btn-sm btn-warning text-dark">Ban</button>
-                            <?php elseif ($k['status'] === 'banned'): ?>
-                              <button type="submit" name="unban_api_key" class="btn btn-sm btn-info text-dark">Unban</button>
-                            <?php endif; ?>
-                            
-                            <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this key immediately?');">Remove</button>
-                          </form>
-                        </div>
-                      </td>
-                    </tr>
-                    <?php endforeach; endif; ?>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <!-- Edit API Key Quota Limit Modal -->
-            <div class="modal fade" id="editApiQuotaModal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-centered modal-sm">
-                <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
-                  <div class="modal-header border-0 pb-1">
-                    <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-sliders text-warning me-2"></i> Custom API Quota</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                  <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                    <input type="text" name="search" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Search token, app, owner..." value="<?php echo htmlspecialchars($api_search); ?>">
+                    <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0" style="width: 20px; height: 20px;"><i class="bi bi-search"></i></button>
                   </div>
-                  <form method="POST" action="?access=admin&page=api">
+                  <?php if ($api_search !== ''): ?>
+                    <a href="?access=admin&page=api&tab=keys" class="admin-btn-pill" style="height: 38px; padding: 0 0.75rem;">Clear</a>
+                  <?php endif; ?>
+                </form>
+              </div>
+
+              <!-- Beautified Tokens Table (Strictly No Weird Wrap) -->
+              <?php
+                $where_sql = "";
+                $params = [];
+                if ($api_search !== '') {
+                  $where_sql = "WHERE a.name LIKE ? OR a.token LIKE ? OR u.email LIKE ? OR u.artist LIKE ?";
+                  $params = ["%$api_search%", "%$api_search%", "%$api_search%", "%$api_search%"];
+                }
+
+                $stmt_count = $db->prepare("SELECT COUNT(a.id) FROM api_keys a LEFT JOIN users u ON a.user_id = u.id $where_sql");
+                $stmt_count->execute($params);
+                $total_apis = (int)$stmt_count->fetchColumn();
+                $total_api_pages = ceil($total_apis / $api_limit);
+
+                $order_sql = "a.created_at DESC";
+                if ($api_sort === 'oldest') $order_sql = "a.created_at ASC";
+                elseif ($api_sort === 'modified') $order_sql = "a.updated_at DESC";
+
+                $stmt_keys = $db->prepare("
+                  SELECT a.*, u.email as user_email, u.artist as user_artist 
+                  FROM api_keys a 
+                  LEFT JOIN users u ON a.user_id = u.id 
+                  $where_sql 
+                  ORDER BY CASE WHEN a.status = 'pending' THEN 0 ELSE 1 END, $order_sql 
+                  LIMIT ? OFFSET ?
+                ");
+                $param_idx = 1;
+                foreach ($params as $pval) {
+                  $stmt_keys->bindValue($param_idx++, $pval, PDO::PARAM_STR);
+                }
+                $stmt_keys->bindValue($param_idx++, (int)$api_limit, PDO::PARAM_INT);
+                $stmt_keys->bindValue($param_idx++, (int)$api_offset, PDO::PARAM_INT);
+                $stmt_keys->execute();
+                $keys = $stmt_keys->fetchAll();
+              ?>
+
+              <div class="api-table-card mb-4">
+                <div class="table-responsive">
+                  <table class="api-table align-middle">
+                    <thead>
+                      <tr>
+                        <th style="width: 220px;">Application / Scope</th>
+                        <th style="width: 140px;">Status</th>
+                        <th>Secret Token</th>
+                        <th style="width: 240px;">Monthly Quota Usage</th>
+                        <th style="width: 130px;">Expiration</th>
+                        <th class="text-end" style="width: 180px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($keys)): ?>
+                        <tr><td colspan="6" class="text-center py-5 text-secondary">No API authorization keys found.</td></tr>
+                      <?php else: foreach ($keys as $k):
+                        $k_quota = isset($k['quota_limit']) ? (int)$k['quota_limit'] : 1000;
+                        $is_unlim = ($k_quota === 0);
+                        $k_pct = $is_unlim ? 0 : min(100, round(($k['uses'] / max(1, $k_quota)) * 100));
+                      ?>
+                        <tr>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <i class="bi bi-cpu-fill text-danger fs-5"></i>
+                              <div>
+                                <strong class="text-white d-block text-truncate" style="max-width: 180px;"><?php echo htmlspecialchars($k['name']); ?></strong>
+                                <small class="text-secondary font-monospace" style="font-size: 0.72rem;">
+                                  <?php echo $k['user_id'] == 0 ? 'Admin Issued' : htmlspecialchars($k['user_artist'] ?: $k['user_email']); ?>
+                                </small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <?php if ($k['status'] === 'pending'): ?>
+                              <span class="admin-badge admin-badge-warning"><i class="bi bi-hourglass-split"></i> Pending Review</span>
+                            <?php elseif ($k['status'] === 'banned'): ?>
+                              <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> Suspended</span>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-success"><i class="bi bi-check-circle-fill"></i> Active</span>
+                            <?php endif; ?>
+                          </td>
+                          <td>
+                            <?php if ($k['status'] === 'pending'): ?>
+                              <span class="text-secondary small fst-italic">Generated upon verification</span>
+                            <?php else: ?>
+                              <div class="api-token-badge">
+                                <span><?php echo htmlspecialchars(substr($k['token'], 0, 14)); ?>••••••••</span>
+                                <button type="button" class="api-btn-copy" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($k['token']); ?>').then(()=>{this.innerHTML='Copied!'; setTimeout(()=>this.innerHTML='Copy', 2000);});">
+                                  Copy
+                                </button>
+                              </div>
+                            <?php endif; ?>
+                          </td>
+                          <td>
+                            <?php if ($is_unlim): ?>
+                              <span class="admin-badge admin-badge-info font-monospace"><i class="bi bi-infinity me-1"></i> Unlimited</span>
+                              <span class="small font-monospace text-secondary ms-2"><?php echo number_format($k['uses']); ?> hits</span>
+                            <?php else: ?>
+                              <div class="d-flex align-items-center gap-2" style="width: 180px;">
+                                <div class="progress flex-grow-1" style="height: 6px; background: #000; border: 1px solid rgba(255,255,255,0.08);">
+                                  <div class="progress-bar <?php echo $k_pct > 80 ? 'bg-danger' : ($k_pct > 50 ? 'bg-warning' : 'bg-info'); ?>" style="width: <?php echo $k_pct; ?>%;"></div>
+                                </div>
+                                <span class="small font-monospace text-white"><?php echo number_format($k['uses']); ?>/<?php echo number_format($k_quota); ?></span>
+                              </div>
+                            <?php endif; ?>
+                          </td>
+                          <td class="font-monospace small text-secondary">
+                            <?php echo $k['expires_at'] ? date('M j, Y', strtotime($k['expires_at'])) : 'Never'; ?>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-2 flex-nowrap">
+                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.74rem;" onclick="openEditApiQuotaModal(<?php echo $k['id']; ?>, '<?php echo addslashes(htmlspecialchars($k['name'])); ?>', <?php echo $k_quota; ?>)">
+                                <i class="bi bi-sliders"></i> Quota
+                              </button>
+
+                              <form method="POST" action="?access=admin&page=api" class="m-0 d-inline-flex gap-1">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="key_id" value="<?php echo $k['id']; ?>">
+
+                                <?php if ($k['status'] === 'pending'): ?>
+                                  <button type="submit" name="verify_api_key" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.74rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);">Verify</button>
+                                <?php elseif ($k['status'] === 'active'): ?>
+                                  <button type="submit" name="ban_api_key" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.74rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);">Ban</button>
+                                <?php elseif ($k['status'] === 'banned'): ?>
+                                  <button type="submit" name="unban_api_key" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.74rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);">Unban</button>
+                                <?php endif; ?>
+
+                                <button type="submit" name="delete_api_key" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" onclick="return confirm('Revoke this API Key permanently?');" title="Revoke Token">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Pagination -->
+              <?php if ($total_api_pages > 1): ?>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=keys&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=keys&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $api_page - 2);
+                    $end_p = min($total_api_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($api_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=api&tab=keys&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=keys&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=keys&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $total_api_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+
+            <!-- TAB 2: LIVE TRAFFIC & LOGS -->
+            <?php elseif ($active_api_tab === 'logs'): ?>
+              <?php
+                $log_status_filter = $_GET['code'] ?? '';
+                $log_search = trim($_GET['log_search'] ?? '');
+                $log_where = ["1=1"];
+                $log_params = [];
+
+                if ($log_status_filter !== '') {
+                  $log_where[] = "l.status_code = ?";
+                  $log_params[] = (int)$log_status_filter;
+                }
+                if ($log_search !== '') {
+                  $log_where[] = "(l.endpoint LIKE ? OR l.ip_address LIKE ? OR l.token_prefix LIKE ? OR k.name LIKE ?)";
+                  $term = "%{$log_search}%";
+                  array_push($log_params, $term, $term, $term, $term);
+                }
+
+                $log_where_sql = "WHERE " . implode(' AND ', $log_where);
+
+                $total_logs = 0;
+                $ok_count = 0;
+                $unauth_count = 0;
+                $throttled_count = 0;
+                $api_logs = [];
+
+                try {
+                  $total_logs = (int)$db->query("SELECT COUNT(*) FROM api_logs")->fetchColumn();
+                  $ok_count = (int)$db->query("SELECT COUNT(*) FROM api_logs WHERE status_code = 200")->fetchColumn();
+                  $unauth_count = (int)$db->query("SELECT COUNT(*) FROM api_logs WHERE status_code = 401")->fetchColumn();
+                  $throttled_count = (int)$db->query("SELECT COUNT(*) FROM api_logs WHERE status_code = 429")->fetchColumn();
+
+                  $stmt_log_count = $db->prepare("SELECT COUNT(l.id) FROM api_logs l LEFT JOIN api_keys k ON l.api_key_id = k.id $log_where_sql");
+                  $stmt_log_count->execute($log_params);
+                  $filtered_total = (int)$stmt_log_count->fetchColumn();
+                  $total_log_pages = max(1, ceil($filtered_total / $api_limit));
+
+                  $stmt_logs = $db->prepare("
+                    SELECT l.*, k.name as key_name 
+                    FROM api_logs l 
+                    LEFT JOIN api_keys k ON l.api_key_id = k.id 
+                    $log_where_sql 
+                    ORDER BY l.id DESC 
+                    LIMIT ? OFFSET ?
+                  ");
+                  $p_idx = 1;
+                  foreach ($log_params as $p) {
+                    $stmt_logs->bindValue($p_idx++, $p);
+                  }
+                  $stmt_logs->bindValue($p_idx++, (int)$api_limit, PDO::PARAM_INT);
+                  $stmt_logs->bindValue($p_idx++, (int)$api_offset, PDO::PARAM_INT);
+                  $stmt_logs->execute();
+                  $api_logs = $stmt_logs->fetchAll();
+                } catch (Exception $e) {}
+              ?>
+
+              <!-- Real-Time Traffic KPI Cards -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Recorded Requests</span>
+                      <span class="text-info"><i class="bi bi-activity fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_logs); ?></div>
+                    <small class="text-secondary">Logged across all API endpoints</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Successful (200 OK)</span>
+                      <span class="text-success"><i class="bi bi-check-circle-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($ok_count); ?></div>
+                    <small class="text-secondary">Authorized payloads delivered</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Unauthorized (401)</span>
+                      <span class="text-danger"><i class="bi bi-shield-x fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($unauth_count); ?></div>
+                    <small class="text-secondary">Invalid or missing credentials</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Throttled (429)</span>
+                      <span class="text-warning"><i class="bi bi-speedometer2 fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($throttled_count); ?></div>
+                    <small class="text-secondary">Exceeded monthly quota cap</small>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Filter & Search Toolbar -->
+              <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                <span class="text-secondary small fw-bold text-uppercase">Live Request Feed (<?php echo number_format($filtered_total ?? 0); ?>)</span>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                  <form method="POST" action="?access=admin&page=api" class="m-0" onsubmit="return confirm('Purge all logged API requests?');">
                     <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                    <input type="hidden" name="update_api_quota" value="1">
-                    <input type="hidden" name="key_id" id="edit-quota-key-id" value="">
-                    <div class="modal-body p-3">
-                      <div class="mb-3">
-                        <span class="text-secondary small fw-bold">APP NAME</span>
-                        <div class="text-white fw-bold small text-truncate mt-1" id="edit-quota-key-name">Application</div>
-                      </div>
-                      <div class="mb-3">
-                        <label class="form-label text-secondary small fw-bold mb-1">MONTHLY REQUEST QUOTA</label>
-                        <select name="quota_limit" id="edit-quota-select" class="admin-pill-select w-100 mb-2" onchange="if(this.value==='custom'){ document.getElementById('custom-quota-input-box').style.display='block'; } else { document.getElementById('custom-quota-input-box').style.display='none'; }">
-                          <option value="500">500 req/month</option>
-                          <option value="1000">1,000 req/month (Default)</option>
-                          <option value="5000">5,000 req/month</option>
-                          <option value="10000">10,000 req/month</option>
-                          <option value="50000">50,000 req/month</option>
-                          <option value="100000">100,000 req/month</option>
-                          <option value="0">Unlimited (No Limit)</option>
-                          <option value="custom">Custom Value...</option>
-                        </select>
-                        <div id="custom-quota-input-box" style="display: none;">
-                          <input type="number" id="custom-quota-input" class="admin-pill-input w-100 font-monospace" placeholder="Enter custom number..." min="0" oninput="document.getElementById('edit-quota-select').value='custom';">
-                        </div>
-                      </div>
-                      <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">
-                        Save Quota
-                      </button>
+                    <button type="submit" name="clear_api_logs" class="admin-btn-pill text-danger" style="height: 36px; padding: 0 0.85rem;">
+                      <i class="bi bi-trash3"></i> Clear Logs
+                    </button>
+                  </form>
+                  <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap" style="max-width: 440px;">
+                    <input type="hidden" name="access" value="admin">
+                    <input type="hidden" name="page" value="api">
+                    <input type="hidden" name="tab" value="logs">
+                    <select name="code" class="admin-pill-select" style="min-width: 120px;" onchange="this.form.submit()">
+                      <option value="" <?php echo $log_status_filter === '' ? 'selected' : ''; ?>>All Statuses</option>
+                      <option value="200" <?php echo $log_status_filter === '200' ? 'selected' : ''; ?>>200 OK</option>
+                      <option value="401" <?php echo $log_status_filter === '401' ? 'selected' : ''; ?>>401 Denied</option>
+                      <option value="429" <?php echo $log_status_filter === '429' ? 'selected' : ''; ?>>429 Throttled</option>
+                    </select>
+                    <div class="position-relative flex-grow-1" style="min-width: 160px;">
+                      <input type="text" name="log_search" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Search endpoint, IP..." value="<?php echo htmlspecialchars($log_search); ?>">
+                      <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0"><i class="bi bi-search"></i></button>
                     </div>
                   </form>
                 </div>
               </div>
-            </div>
 
-            <script>
-              function openEditApiQuotaModal(id, name, currentQuota) {
-                document.getElementById('edit-quota-key-id').value = id;
-                document.getElementById('edit-quota-key-name').textContent = '#' + id + ' ' + name;
-                const sel = document.getElementById('edit-quota-select');
-                const customBox = document.getElementById('custom-quota-input-box');
-                const customInp = document.getElementById('custom-quota-input');
-                
-                const foundOpt = Array.from(sel.options).find(o => o.value == currentQuota);
-                if (foundOpt && foundOpt.value !== 'custom') {
-                  sel.value = currentQuota;
-                  customBox.style.display = 'none';
-                } else {
-                  sel.value = 'custom';
-                  customInp.value = currentQuota;
-                  customBox.style.display = 'block';
-                }
-                new bootstrap.Modal(document.getElementById('editApiQuotaModal')).show();
-              }
-            </script>
-            <?php if ($total_api_pages > 1): ?>
-            <div class="admin-pagination">
-              <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page - 1; ?>">‹</a>
+              <!-- Unwrapped Live Stream Table -->
+              <div class="api-table-card mb-4">
+                <div class="table-responsive">
+                  <table class="api-table align-middle">
+                    <thead>
+                      <tr>
+                        <th style="width: 160px;">Timestamp</th>
+                        <th style="width: 90px;">Method</th>
+                        <th style="width: 110px;">Status</th>
+                        <th>Endpoint Route</th>
+                        <th>Token &amp; Consumer</th>
+                        <th class="text-end" style="width: 140px;">Client IP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($api_logs)): ?>
+                        <tr><td colspan="6" class="text-center py-5 text-secondary">No API request traffic logged yet.</td></tr>
+                      <?php else: foreach ($api_logs as $log): ?>
+                        <tr>
+                          <td class="text-secondary font-monospace small">
+                            <?php echo date('M j, H:i:s', strtotime($log['created_at'])); ?>
+                          </td>
+                          <td>
+                            <span class="badge bg-dark border border-secondary text-white font-monospace"><?php echo htmlspecialchars($log['method']); ?></span>
+                          </td>
+                          <td>
+                            <?php if ($log['status_code'] == 200): ?>
+                              <span class="admin-badge admin-badge-success">200 OK</span>
+                            <?php elseif ($log['status_code'] == 429): ?>
+                              <span class="admin-badge admin-badge-warning">429 LIMIT</span>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-danger"><?php echo $log['status_code']; ?> ERR</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="font-monospace text-info">
+                            /index.php?action=<?php echo htmlspecialchars($log['endpoint']); ?>
+                          </td>
+                          <td>
+                            <strong class="text-white"><?php echo htmlspecialchars($log['key_name'] ?: 'App #' . $log['api_key_id']); ?></strong>
+                            <span class="text-secondary font-monospace small ms-1">(<?php echo htmlspecialchars($log['token_prefix']); ?>)</span>
+                          </td>
+                          <td class="text-end font-monospace text-secondary small">
+                            <?php echo htmlspecialchars($log['ip_address']); ?>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <?php if (isset($total_log_pages) && $total_log_pages > 1): ?>
+                <div class="admin-pagination">
+                  <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=logs&code=<?php echo urlencode($log_status_filter); ?>&log_search=<?php echo urlencode($log_search); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($api_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=logs&code=<?php echo urlencode($log_status_filter); ?>&log_search=<?php echo urlencode($log_search); ?>&p=<?php echo $api_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $api_page - 2);
+                    $end_p = min($total_log_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($api_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=api&tab=logs&code=<?php echo urlencode($log_status_filter); ?>&log_search=<?php echo urlencode($log_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($api_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=logs&code=<?php echo urlencode($log_status_filter); ?>&log_search=<?php echo urlencode($log_search); ?>&p=<?php echo $api_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($api_page >= $total_log_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&tab=logs&code=<?php echo urlencode($log_status_filter); ?>&log_search=<?php echo urlencode($log_search); ?>&p=<?php echo $total_log_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+
+            <!-- TAB 3: GATEWAY & SECURITY SETTINGS -->
+            <?php elseif ($active_api_tab === 'settings'): ?>
               <?php
-                $start_p = max(1, $api_page - 2);
-                $end_p = min($total_api_pages, $start_p + 4);
-                if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                $db = get_db();
+                $g_limit = (int)($db->query("SELECT value FROM site_settings WHERE key = 'api_global_rate_limit'")->fetchColumn() ?: 150);
+                $g_cors = $db->query("SELECT value FROM site_settings WHERE key = 'api_cors_origins'")->fetchColumn() ?: '*';
+                $g_https = $db->query("SELECT value FROM site_settings WHERE key = 'api_require_https'")->fetchColumn() === '1';
+                $g_expiry = $db->query("SELECT value FROM site_settings WHERE key = 'api_default_expiry'")->fetchColumn() ?: '1_month';
+                $g_blacklist = $db->query("SELECT value FROM site_settings WHERE key = 'api_ip_blacklist'")->fetchColumn() ?: '';
+                $g_logging = $db->query("SELECT value FROM site_settings WHERE key = 'api_logging_enabled'")->fetchColumn() !== '0';
               ?>
-              <?php for ($i = $start_p; $i <= $end_p; $i++): ?>
-                <a class="admin-page-btn <?php echo ($api_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-              <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $api_page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($api_page >= $total_api_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=api&search=<?php echo urlencode($api_search); ?>&sort=<?php echo urlencode($api_sort); ?>&p=<?php echo $total_api_pages; ?>">»</a>
-            </div>
+              <div class="admin-card p-4 mb-4 w-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-shield-lock-fill text-danger"></i> Global API Gateway Configuration
+                    </h5>
+                    <div class="small text-secondary mt-1">CORS headers, rate limiting, IP security constraints, and token lifecycles</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Gateway Engine Active</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=api&tab=settings" class="d-flex flex-column gap-3 w-100">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_api_gateway_settings" value="1">
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">CORS ALLOWED ORIGIN(S)</label>
+                    <input type="text" name="api_cors_origins" class="admin-pill-input w-100 font-monospace" value="<?php echo htmlspecialchars($g_cors); ?>" placeholder="*" required>
+                    <small class="text-secondary d-block mt-1">Use <code class="text-info">*</code> for public access or comma-separate domains (e.g. <code class="text-white">https://myapp.com, https://player.site</code>).</small>
+                  </div>
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">GLOBAL RATE LIMIT (REQ / MIN / IP)</label>
+                      <input type="number" name="api_rate_limit" class="admin-pill-input w-100 font-monospace" min="10" max="10000" value="<?php echo $g_limit; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">DEFAULT TOKEN EXPIRATION</label>
+                      <select name="api_default_expiry" class="admin-pill-select w-100">
+                        <option value="1_month" <?php echo $g_expiry === '1_month' ? 'selected' : ''; ?>>1 Month (Default)</option>
+                        <option value="3_months" <?php echo $g_expiry === '3_months' ? 'selected' : ''; ?>>3 Months</option>
+                        <option value="6_months" <?php echo $g_expiry === '6_months' ? 'selected' : ''; ?>>6 Months</option>
+                        <option value="1_year" <?php echo $g_expiry === '1_year' ? 'selected' : ''; ?>>1 Year</option>
+                        <option value="never" <?php echo $g_expiry === 'never' ? 'selected' : ''; ?>>Never Expire</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enforce HTTPS on API Calls</strong>
+                      <span class="text-secondary small">Reject non-SSL plain HTTP requests with 403 Forbidden.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="api_require_https" value="1" <?php echo $g_https ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enable Real-Time Traffic Logging</strong>
+                      <span class="text-secondary small">Records request route, caller IP, and HTTP response code to the audit log.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="api_logging_enabled" value="1" <?php echo $g_logging ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">IP BLACKLIST (COMMA SEPARATED)</label>
+                    <textarea name="api_ip_blacklist" class="form-control bg-dark text-white border-secondary font-monospace" rows="2" style="border-radius: 12px; font-size: 0.85rem;" placeholder="e.g. 192.168.1.100, 10.0.0.50"><?php echo htmlspecialchars($g_blacklist); ?></textarea>
+                    <small class="text-secondary d-block mt-1">Blocked IPs will immediately receive 403 Access Denied on any API invocation.</small>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Gateway Settings
+                  </button>
+                </form>
+              </div>
             <?php endif; ?>
           </div>
 
+          <!-- Edit API Key Quota Limit Modal -->
+          <div class="modal fade" id="editApiQuotaModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-sliders text-warning me-2"></i> Custom API Quota</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=api">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="update_api_quota" value="1">
+                  <input type="hidden" name="key_id" id="edit-quota-key-id" value="">
+                  <div class="modal-body p-3 text-start">
+                    <div class="mb-3">
+                      <span class="text-secondary small fw-bold">APP NAME</span>
+                      <div class="text-white fw-bold small text-truncate mt-1" id="edit-quota-key-name">Application</div>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">MONTHLY REQUEST QUOTA</label>
+                      <select name="quota_limit" id="edit-quota-select" class="admin-pill-select w-100 mb-2" onchange="if(this.value==='custom'){ document.getElementById('custom-quota-input-box').style.display='block'; } else { document.getElementById('custom-quota-input-box').style.display='none'; }">
+                        <option value="500">500 req/month</option>
+                        <option value="1000">1,000 req/month (Default)</option>
+                        <option value="5000">5,000 req/month</option>
+                        <option value="10000">10,000 req/month</option>
+                        <option value="50000">50,000 req/month</option>
+                        <option value="100000">100,000 req/month</option>
+                        <option value="0">Unlimited (No Limit)</option>
+                        <option value="custom">Custom Value...</option>
+                      </select>
+                      <div id="custom-quota-input-box" style="display: none;">
+                        <input type="number" id="custom-quota-input" class="admin-pill-input w-100 font-monospace" placeholder="Enter custom number..." min="0" oninput="document.getElementById('edit-quota-select').value='custom';">
+                      </div>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">
+                      Save Quota
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
           <script>
+            function openEditApiQuotaModal(id, name, currentQuota) {
+              document.getElementById('edit-quota-key-id').value = id;
+              document.getElementById('edit-quota-key-name').textContent = '#' + id + ' ' + name;
+              const sel = document.getElementById('edit-quota-select');
+              const customBox = document.getElementById('custom-quota-input-box');
+              const customInp = document.getElementById('custom-quota-input');
+
+              const foundOpt = Array.from(sel.options).find(o => o.value == currentQuota);
+              if (foundOpt && foundOpt.value !== 'custom') {
+                sel.value = currentQuota;
+                customBox.style.display = 'none';
+              } else {
+                sel.value = 'custom';
+                customInp.value = currentQuota;
+                customBox.style.display = 'block';
+              }
+              new bootstrap.Modal(document.getElementById('editApiQuotaModal')).show();
+            }
+
             (function() {
               if (typeof Chart === 'undefined') return;
               if (window.apiKeyStatusChartInstance instanceof Chart) window.apiKeyStatusChartInstance.destroy();
@@ -35913,7 +37213,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               Chart.defaults.color = '#aaaaaa';
               Chart.defaults.font.family = "'Roboto', sans-serif";
 
-              // 1. Status Distribution Doughnut
               const ctxStatus = document.getElementById('apiKeyStatusChart');
               if (ctxStatus && <?php echo $total_keys_count; ?> > 0) {
                 window.apiKeyStatusChartInstance = new Chart(ctxStatus.getContext('2d'), {
@@ -35930,14 +37229,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: {
-                      legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } }
-                    }
+                    plugins: { legend: { position: 'right', labels: { color: '#ffffff', boxWidth: 12 } } }
                   }
                 });
               }
 
-              // 2. Top Apps Horizontal Bar Chart
               const ctxConsumers = document.getElementById('apiTopConsumersChart');
               if (ctxConsumers && <?php echo count($top_app_uses); ?> > 0) {
                 window.apiTopConsumersChartInstance = new Chart(ctxConsumers.getContext('2d'), {
@@ -35969,9 +37265,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         ticks: { color: '#ffffff', font: { weight: 'bold' } }
                       }
                     },
-                    plugins: {
-                      legend: { display: false }
-                    }
+                    plugins: { legend: { display: false } }
                   }
                 });
               }
@@ -35985,7 +37279,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.3';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.4';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
@@ -35999,19 +37293,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $local_lines++;
             }
 
-            // 2. High-Speed Cached Multi-CDN Probe (2-Minute Cache prevents freezing on tab switches)
+            // 2. High-Speed Cached Multi-CDN Probe & Payload Storage
             $probe_cache_dir = MUSIC_DIR . '/.gallery_cache';
             if (!is_dir($probe_cache_dir)) @mkdir($probe_cache_dir, 0777, true);
             $probe_cache_file = $probe_cache_dir . '/gh_probe_' . md5($target_branch) . '.json';
+            $payload_cache_file = $probe_cache_dir . '/gh_payload_' . md5($target_branch) . '.php.tmp';
             $cached_probe = null;
 
             if (!$force_refresh && file_exists($probe_cache_file) && (time() - filemtime($probe_cache_file)) < 120) {
               $cached_probe = @json_decode(@file_get_contents($probe_cache_file), true);
             }
 
+            // Always bypass cache if on diff tab and local payload file is missing or empty
+            if ($active_tab === 'diff' && (!file_exists($payload_cache_file) || filesize($payload_cache_file) < 10000)) {
+              $cached_probe = null;
+            }
+
             if ($cached_probe && is_array($cached_probe) && !empty($cached_probe['remote_available'])) {
               $remote_available = true;
-              $remote_code = ($active_tab === 'diff' && !empty($cached_probe['remote_code'])) ? $cached_probe['remote_code'] : false;
+              $remote_code = file_exists($payload_cache_file) ? @file_get_contents($payload_cache_file) : false;
               $remote_size = (int)($cached_probe['remote_size'] ?? 0);
               $remote_lines = (int)($cached_probe['remote_lines'] ?? 0);
               $remote_hash = $cached_probe['remote_hash'] ?? '';
@@ -36082,10 +37382,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $remote_ver_match);
               $remote_version = $remote_ver_match[1] ?? 'Unknown';
 
-              if ($remote_available) {
+              if ($remote_available && $remote_code) {
+                @file_put_contents($payload_cache_file, $remote_code);
                 @file_put_contents($probe_cache_file, json_encode([
                   'remote_available' => true,
-                  'remote_code' => $active_tab === 'diff' ? $remote_code : '',
                   'remote_size' => $remote_size,
                   'remote_lines' => $remote_lines,
                   'remote_hash' => $remote_hash,
@@ -36095,6 +37395,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   'ping_latency_ms' => $ping_latency_ms
                 ]));
               }
+            }
+
+            // Guaranteed Fallback: If on diff tab and remote_code is not loaded yet, read payload cache
+            if ($active_tab === 'diff' && empty($remote_code) && file_exists($payload_cache_file)) {
+              $remote_code = @file_get_contents($payload_cache_file);
             }
 
             $is_identical = $remote_available && !empty($remote_hash) && hash_equals($local_hash, $remote_hash);
@@ -36381,6 +37686,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               </a>
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=history" class="update-tab-btn <?php echo $active_tab === 'history' ? 'active' : ''; ?>">
                 <i class="bi bi-journal-text"></i> Update Audit Logs
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=maintenance" class="update-tab-btn <?php echo $active_tab === 'maintenance' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-shaded"></i> Maintenance Mode
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=settings" class="update-tab-btn <?php echo $active_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> Update Preferences
+              </a>
+              <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=integrity" class="update-tab-btn <?php echo $active_tab === 'integrity' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-lock-fill"></i> Security &amp; Integrity
               </a>
               <a href="?access=admin&page=update&branch=<?php echo urlencode($target_branch); ?>&tab=backups" class="update-tab-btn <?php echo $active_tab === 'backups' ? 'active' : ''; ?>">
                 <i class="bi bi-clock-history"></i> Backup &amp; Rollback Vault (<?php echo count($backups); ?>)
@@ -36867,6 +38181,236 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </table>
                 </div>
               </div>
+
+            <!-- TAB 8: MAINTENANCE MODE & ACCESS GATES -->
+            <?php elseif ($active_tab === 'maintenance'): ?>
+              <?php
+                $db = get_db();
+                $m_enabled = $db->query("SELECT value FROM site_settings WHERE key = 'site_maintenance_mode'")->fetchColumn() === '1';
+                $m_reason = $db->query("SELECT value FROM site_settings WHERE key = 'site_maintenance_reason'")->fetchColumn() ?: 'System upgrade in progress. Please check back shortly.';
+                $m_ips = $db->query("SELECT value FROM site_settings WHERE key = 'site_maintenance_allowed_ips'")->fetchColumn() ?: '';
+                $current_ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+              ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-shield-shaded <?php echo $m_enabled ? 'text-danger' : 'text-success'; ?>"></i> Update Maintenance Gate
+                    </h5>
+                    <div class="small text-secondary mt-1">Suspend public and user actions during updates to prevent database locks and playback crashes.</div>
+                  </div>
+                  <span class="admin-badge <?php echo $m_enabled ? 'admin-badge-danger' : 'admin-badge-success'; ?>">
+                    <?php echo $m_enabled ? 'Maintenance Active' : 'Normal Operations'; ?>
+                  </span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=update" class="d-flex flex-column gap-3" style="max-width: 640px;">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="toggle_maintenance_mode" value="1">
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enable Maintenance Lock</strong>
+                      <span class="text-secondary small">Only logged-in administrators and whitelisted IPs can access the site.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="maintenance_enabled" value="1" id="m_toggle" <?php echo $m_enabled ? 'checked' : ''; ?> style="width: 40px; height: 22px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">MAINTENANCE REASON / PUBLIC NOTICE</label>
+                    <textarea name="maintenance_reason" class="form-control bg-dark text-white border-secondary" rows="2" style="border-radius: 12px; font-size: 0.85rem;"><?php echo htmlspecialchars($m_reason); ?></textarea>
+                  </div>
+
+                  <div>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label text-secondary small fw-bold mb-0">WHITELISTED IP ADDRESSES (COMMA SEPARATED)</label>
+                      <button type="button" class="btn btn-sm btn-link text-info p-0 text-decoration-none small" onclick="const f = document.getElementById('m_ips_input'); f.value = f.value ? (f.value + ', <?php echo $current_ip; ?>') : '<?php echo $current_ip; ?>';">
+                        + Add My Current IP (<?php echo $current_ip; ?>)
+                      </button>
+                    </div>
+                    <input type="text" name="allowed_ips" id="m_ips_input" class="admin-pill-input w-100 font-monospace" placeholder="e.g. 192.168.1.5, 10.0.0.1" value="<?php echo htmlspecialchars($m_ips); ?>">
+                    <small class="text-secondary d-block mt-1">Leave empty to only allow authenticated administrators.</small>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Maintenance Settings
+                  </button>
+                </form>
+              </div>
+
+            <!-- TAB 9: UPDATE PREFERENCES & CUSTOM SOURCE -->
+            <?php elseif ($active_tab === 'settings'): ?>
+              <?php
+                $db = get_db();
+                $c_repo = $db->query("SELECT value FROM site_settings WHERE key = 'update_custom_repo'")->fetchColumn() ?: 'HirotakaDango/PHP-Music';
+                $c_cdn = $db->query("SELECT value FROM site_settings WHERE key = 'update_cdn_priority'")->fetchColumn() ?: 'github';
+                $c_timeout = (int)($db->query("SELECT value FROM site_settings WHERE key = 'update_network_timeout'")->fetchColumn() ?: 30);
+                $c_retention = (int)($db->query("SELECT value FROM site_settings WHERE key = 'update_backup_retention'")->fetchColumn() ?: 5);
+              ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-sliders text-warning"></i> Update Channel &amp; Engine Preferences
+                    </h5>
+                    <div class="small text-secondary mt-1">Configure custom repository forks, CDN fallback mirrors, and network constraints.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-warning">Global Config</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=update" class="d-flex flex-column gap-3" style="max-width: 640px;">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_update_preferences" value="1">
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">GITHUB REPOSITORY / FORK (OWNER/REPO)</label>
+                    <input type="text" name="custom_repo" class="admin-pill-input w-100 font-monospace" value="<?php echo htmlspecialchars($c_repo); ?>" placeholder="HirotakaDango/PHP-Music" required>
+                    <small class="text-secondary d-block mt-1">Set to your personal fork if deploying customized downstream branches.</small>
+                  </div>
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">PRIMARY CDN PROBE MIRROR</label>
+                      <select name="cdn_priority" class="admin-pill-select w-100">
+                        <option value="github" <?php echo $c_cdn === 'github' ? 'selected' : ''; ?>>GitHub Raw (Default)</option>
+                        <option value="jsdelivr" <?php echo $c_cdn === 'jsdelivr' ? 'selected' : ''; ?>>jsDelivr Global CDN</option>
+                        <option value="fastly" <?php echo $c_cdn === 'fastly' ? 'selected' : ''; ?>>Fastly CDN Mirror</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">NETWORK TIMEOUT (SECONDS)</label>
+                      <input type="number" name="network_timeout" class="admin-pill-input w-100 font-monospace" min="5" max="120" value="<?php echo $c_timeout; ?>" required>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">AUTO-BACKUP VAULT RETENTION CAP</label>
+                    <input type="number" name="backup_retention" class="admin-pill-input w-100 font-monospace" min="1" max="50" value="<?php echo $c_retention; ?>" required>
+                    <small class="text-secondary d-block mt-1">Number of pre-update safety snapshots kept before automatic purging.</small>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-check2-circle me-1"></i> Save Update Preferences
+                  </button>
+                </form>
+              </div>
+
+            <!-- TAB 10: FILE INTEGRITY & SECURITY HARDENING -->
+            <?php elseif ($active_tab === 'integrity'): ?>
+              <?php
+                $htaccess_file = MUSIC_DIR . '/.htaccess';
+                $nginx_file = MUSIC_DIR . '/nginx-phpmusic.conf';
+                $robots_file = MUSIC_DIR . '/robots.txt';
+                $db_file = DB_FILE;
+
+                $has_htaccess = file_exists($htaccess_file);
+                $has_nginx = file_exists($nginx_file);
+                $has_robots = file_exists($robots_file);
+                $db_writable = is_writable($db_file);
+
+                // Check for unauthorized scripts in upload directories
+                $rogue_scripts = [];
+                $scan_dirs = [MUSIC_DIR . '/uploads', MUSIC_DIR . '/users_drive'];
+                foreach ($scan_dirs as $s_dir) {
+                  if (is_dir($s_dir)) {
+                    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($s_dir, FilesystemIterator::SKIP_DOTS));
+                    foreach ($it as $f) {
+                      if ($f->isFile()) {
+                        $ext = strtolower($f->getExtension());
+                        if (in_array($ext, ['php', 'phtml', 'phar', 'cgi', 'pl', 'py', 'sh', 'asp', 'aspx', 'jsp'])) {
+                          $rogue_scripts[] = str_replace(['\\', MUSIC_DIR], ['/', ''], $f->getPathname());
+                        }
+                      }
+                    }
+                  }
+                }
+              ?>
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-shield-lock-fill text-danger"></i> Firewall &amp; Filesystem Integrity Monitor
+                    </h5>
+                    <div class="small text-secondary mt-1">Verify that core web server firewalls and directory execution locks remain operational.</div>
+                  </div>
+                  <form method="POST" action="?access=admin&page=update" class="m-0" onsubmit="return confirm('Regenerate server firewall rules (.htaccess, NGINX conf, and robots.txt)?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <button type="submit" name="rearm_security_firewalls" class="admin-btn-pill">
+                      <i class="bi bi-arrow-repeat text-info me-1"></i> Re-arm Firewall Shields
+                    </button>
+                  </form>
+                </div>
+
+                <div class="d-flex flex-column mb-4">
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Apache Universal Firewall (.htaccess)</strong>
+                      <span class="text-secondary small font-monospace"><?php echo $htaccess_file; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $has_htaccess ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $has_htaccess ? 'bi-shield-check' : 'bi-shield-x'; ?>"></i>
+                      <?php echo $has_htaccess ? 'Active & Enforcing' : 'Missing File'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">NGINX Hardening Configuration (nginx-phpmusic.conf)</strong>
+                      <span class="text-secondary small font-monospace"><?php echo $nginx_path; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $has_nginx ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $has_nginx ? 'bi-shield-check' : 'bi-shield-x'; ?>"></i>
+                      <?php echo $has_nginx ? 'Generated & Present' : 'Missing File'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">AI Scraper &amp; Crawler Shield (robots.txt)</strong>
+                      <span class="text-secondary small font-monospace"><?php echo $robots_file; ?></span>
+                    </div>
+                    <span class="admin-badge <?php echo $has_robots ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $has_robots ? 'bi-shield-check' : 'bi-shield-x'; ?>"></i>
+                      <?php echo $has_robots ? 'Blocking Scrapers' : 'Missing File'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">SQLite Database File Security (music.db)</strong>
+                      <span class="text-secondary small">Direct browser access is blocked by URL firewall and .htaccess</span>
+                    </div>
+                    <span class="admin-badge <?php echo $db_writable ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo $db_writable ? 'bi-lock-fill' : 'bi-unlock-fill'; ?>"></i>
+                      <?php echo $db_writable ? 'Secure & Read/Write' : 'Permission Error'; ?>
+                    </span>
+                  </div>
+
+                  <div class="diag-row">
+                    <div>
+                      <strong class="text-white d-block">Upload Execution Lockdown (uploads/ &amp; users_drive/)</strong>
+                      <span class="text-secondary small">Scans for prohibited executable scripts placed in public upload directories</span>
+                    </div>
+                    <span class="admin-badge <?php echo empty($rogue_scripts) ? 'admin-badge-success' : 'admin-badge-danger'; ?>">
+                      <i class="bi <?php echo empty($rogue_scripts) ? 'bi-check-circle-fill' : 'bi-exclamation-triangle-fill'; ?>"></i>
+                      <?php echo empty($rogue_scripts) ? 'Clean (0 Scripts)' : count($rogue_scripts) . ' Threat(s) Found!'; ?>
+                    </span>
+                  </div>
+                </div>
+
+                <?php if (!empty($rogue_scripts)): ?>
+                  <div class="p-3 rounded-3 bg-danger bg-opacity-10 border border-danger">
+                    <strong class="text-danger d-block mb-1"><i class="bi bi-exclamation-octagon-fill me-1"></i> Warning: Script files found inside user directories:</strong>
+                    <ul class="mb-0 small font-monospace text-white">
+                      <?php foreach ($rogue_scripts as $rs): ?>
+                        <li><?php echo htmlspecialchars($rs); ?></li>
+                      <?php endforeach; ?>
+                    </ul>
+                  </div>
+                <?php endif; ?>
+              </div>
             <?php endif; ?>
           </div>
 
@@ -37230,7 +38774,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             // Client-Side Visual Line Diff Engine (Executes on-demand only when Diff tab is active)
-            (function buildVisualDiff() {
+            (async function buildVisualDiff() {
               const diffBox = document.getElementById('smart-diff-container');
               if (!diffBox) return;
 
@@ -37238,15 +38782,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               return;
               <?php else: ?>
               <?php
-                // Load local code safely in bounded memory only for Diff view
                 $diff_local = @file_get_contents(__FILE__) ?: '';
                 $diff_remote = (string)($remote_code ?: '');
               ?>
               const localCode = <?php echo json_encode($diff_local); ?>;
-              const remoteCode = <?php echo json_encode($diff_remote); ?>;
+              let remoteCode = <?php echo json_encode($diff_remote); ?>;
 
-              if (!remoteCode) {
-                diffBox.innerHTML = '<div class="text-center py-4 text-danger small">Cannot render diff: Remote code could not be downloaded.</div>';
+              // Dual-layer fallback: Fetch via jsDelivr CDN if server-side cache was not resolved
+              if (!remoteCode || remoteCode.length < 10000) {
+                diffBox.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching remote code via CDN fallback...</div>';
+                try {
+                  const cdnUrls = [
+                    "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php",
+                    "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/<?php echo htmlspecialchars($target_branch); ?>/index.php"
+                  ];
+                  for (const url of cdnUrls) {
+                    const res = await fetch(url, { cache: 'no-store' });
+                    if (res.ok) {
+                      const txt = await res.text();
+                      if (txt && txt.length > 10000 && txt.includes('<?php echo "<?php"; ?>')) {
+                        remoteCode = txt;
+                        break;
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.warn('Client-side CDN fetch error:', e);
+                }
+              }
+
+              if (!remoteCode || remoteCode.length < 10000) {
+                diffBox.innerHTML = '<div class="text-center py-4 text-danger small"><i class="bi bi-exclamation-triangle me-1"></i> Cannot render diff: Remote code could not be downloaded from GitHub or CDN.</div>';
                 return;
               }
 
@@ -38032,7 +39598,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               --dbm-radius: 8px;
               --dbm-shadow: 0 4px 12px rgba(0,0,0,0.5);
               display: flex;
-              height: 100vh;
+              height: 100dvh;
+              max-height: 100dvh;
               background: var(--dbm-bg);
               color: var(--dbm-text);
               font-size: 14px;
@@ -38154,7 +39721,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             @media(max-width: 991px) {
               #dbm-app { flex-direction: column; height: auto; }
-              .dbm-sidebar { position: fixed; top: 0; left: -320px; width: 280px; height: 100vh; z-index: 1050; border-right: 1px solid var(--dbm-border); transition: left 0.3s ease; display: flex; flex-direction: column; }
+              .dbm-sidebar { position: fixed; top: 0; left: -320px; width: 280px; height: 100dvh; z-index: 1050; border-right: 1px solid var(--dbm-border); transition: left 0.3s ease; display: flex; flex-direction: column; }
               .dbm-sidebar.open { left: 0; }
               .dbm-sidebar-section { display: block; padding: 0.75rem 0; }
               .dbm-sidebar-item { border: none; border-left: 3px solid transparent; border-radius: 0; margin-bottom: 0; }
@@ -56554,32 +58121,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php else: ?>
           <?php
             $db = get_db();
+            $active_user_tab = $_GET['tab'] ?? 'directory';
             $search = trim($_GET['search'] ?? ''); 
-            $sort_admin = $_GET['sort'] ?? 'newest';
-            $page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : (isset($_GET['page']) && is_numeric($_GET['page']) ? max(1, (int)$_GET['page']) : 1);
+            $sort_admin = $_GET['sort'] ?? ($active_user_tab === 'verification' ? 'pending' : 'newest');
+            $page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
             $offset = ($page - 1) * ADMIN_PAGE_SIZE;
 
             // Global KPI Summary Metrics
             $total_all_users = (int)($db->query("SELECT COUNT(id) FROM users")->fetchColumn() ?: 0);
             $total_verified_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE verified = 'yes'")->fetchColumn() ?: 0);
+            $total_pending_verifications = (int)($db->query("SELECT COUNT(id) FROM users WHERE verified = 'pending' OR reset_requested = 1")->fetchColumn() ?: 0);
             $total_admin_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE is_admin = 1 OR status = 'super_admin'")->fetchColumn() ?: 0);
             $total_banned_users = (int)($db->query("SELECT COUNT(id) FROM users WHERE banned = 1")->fetchColumn() ?: 0);
 
             $where_clauses = [];
             $params = [];
+
+            if ($active_user_tab === 'verification') {
+              $where_clauses[] = "(verified = 'pending' OR reset_requested = 1)";
+            }
+
             if ($search !== '') {
               if (preg_match('/^(?:uid|user|id):(\d+)$/i', $search, $m_id)) {
                 $where_clauses[] = "id = ?";
                 $params[] = (int)$m_id[1];
               } elseif (is_numeric($search)) {
                 $where_clauses[] = "(id = ? OR email LIKE ? OR artist LIKE ?)";
-                $params[] = (int)$search;
-                $params[] = "%$search%";
-                $params[] = "%$search%";
+                $params = [(int)$search, "%$search%", "%$search%"];
               } else {
                 $where_clauses[] = "(email LIKE ? OR artist LIKE ?)";
-                $params[] = "%$search%";
-                $params[] = "%$search%";
+                $params = ["%$search%", "%$search%"];
               }
             }
             if ($sort_admin === 'pending') $where_clauses[] = "verified = 'pending'";
@@ -56594,7 +58165,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $total_users_stmt = $db->prepare("SELECT COUNT(id) FROM users $where");
             $total_users_stmt->execute($params);
             $total_users = (int)$total_users_stmt->fetchColumn();
-            $total_pages = ceil($total_users / ADMIN_PAGE_SIZE);
+            $total_pages = max(1, ceil($total_users / ADMIN_PAGE_SIZE));
             
             $admin_sort_map = [
               'newest' => 'ORDER BY id DESC',
@@ -56619,7 +58190,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $users = $stmt->fetchAll();
           ?>
 
-          <!-- Drive-Themed User Management Studio Header -->
           <div class="page-header d-flex flex-column gap-3">
             <div class="d-flex flex-column text-start">
               <div class="d-flex align-items-center gap-3">
@@ -56635,6 +58205,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="users">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($active_user_tab); ?>">
                 <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
                   <option value="newest" <?php echo $sort_admin === 'newest' ? 'selected' : ''; ?>>Newest Accounts</option>
                   <option value="oldest" <?php echo $sort_admin === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
@@ -56654,361 +58225,516 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
 
           <div class="content-area-wrapper">
-            <!-- Metrics KPI Cards Row -->
-            <div class="row g-3 mb-4">
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Total Users</span>
-                    <span class="text-danger"><i class="bi bi-people-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_all_users); ?></div>
-                  <small class="text-secondary"><?php echo number_format($total_users); ?> matching active filter</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Verified Artists</span>
-                    <span class="text-success"><i class="bi bi-patch-check-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_verified_users); ?></div>
-                  <small class="text-secondary">Approved for music uploads</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Administrators</span>
-                    <span class="text-primary"><i class="bi bi-shield-lock-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_admin_users); ?></div>
-                  <small class="text-secondary">Elevated staff & super admins</small>
-                </div>
-              </div>
-
-              <div class="col-12 col-sm-6 col-xl-3">
-                <div class="admin-card p-3 h-100">
-                  <div class="d-flex justify-content-between align-items-center mb-1">
-                    <span class="text-secondary small fw-bold text-uppercase">Banned &amp; Restricted</span>
-                    <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
-                  </div>
-                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_users); ?></div>
-                  <small class="text-secondary">Account / rhythm game suspensions</small>
-                </div>
-              </div>
+            <!-- Sub-Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=users&tab=directory" class="update-tab-btn <?php echo $active_user_tab === 'directory' ? 'active' : ''; ?>">
+                <i class="bi bi-people-fill"></i> User Directory (<?php echo number_format($total_all_users); ?>)
+              </a>
+              <a href="?access=admin&page=users&tab=verification" class="update-tab-btn <?php echo $active_user_tab === 'verification' ? 'active' : ''; ?>">
+                <i class="bi bi-patch-check-fill"></i> Verification &amp; Requests (<?php echo number_format($total_pending_verifications); ?>)
+              </a>
+              <a href="?access=admin&page=users&tab=settings" class="update-tab-btn <?php echo $active_user_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> User Policies &amp; Defaults
+              </a>
             </div>
 
-            <!-- Modern Table Layout -->
-            <div class="admin-card mb-4">
-              <div class="table-responsive">
-                <table class="admin-table text-nowrap align-middle">
-                  <thead>
-                    <tr>
-                      <th style="width: 50px;">Avatar</th>
-                      <th style="width: 70px;">ID</th>
-                      <th>Artist Account</th>
-                      <th>Account Badges</th>
-                      <th>Daily Uploads</th>
-                      <th>Fast Jumpers</th>
-                      <th class="text-end" style="width: 140px;">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php if (empty($users)): ?>
-                      <tr><td colspan="7" class="text-center py-5 text-secondary">No user records found matching your query.</td></tr>
-                    <?php else: foreach ($users as $user): 
-                      $user_payload = $user;
-                      $user_payload['csrf_token'] = $_SESSION['admin_csrf_token'];
-                      $user_payload['current_page'] = $page;
-                      $user_payload['current_search'] = $search;
-                      $user_payload['current_sort'] = $sort_admin;
-                      $json_data = htmlspecialchars(json_encode($user_payload), ENT_QUOTES, 'UTF-8');
-                    ?>
-                      <tr>
-                        <td>
-                          <img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 38px; height: 38px; object-fit: cover; background: #000; border: 1px solid var(--drive-border);" alt="">
-                        </td>
-                        <td class="text-secondary font-monospace small">#<?php echo $user['id']; ?></td>
-                        <td>
-                          <div class="fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
-                          <small class="text-secondary font-monospace" style="font-size: 0.75rem;"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></small>
-                        </td>
-                        <td>
-                          <div class="d-flex flex-wrap gap-1 align-items-center">
-                            <?php if ($user['status'] === 'super_admin'): ?>
-                              <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-shaded"></i> Super Admin</span>
-                            <?php elseif ($user['is_admin'] == 1): ?>
-                              <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-lock-fill"></i> Admin</span>
-                            <?php endif; ?>
-
-                            <?php if ($user['reset_requested'] == 1): ?>
-                              <span class="admin-badge admin-badge-warning"><i class="bi bi-key-fill"></i> Reset Req</span>
-                            <?php endif; ?>
-
-                            <?php if ($user['verified'] === 'yes'): ?>
-                              <span class="admin-badge admin-badge-success"><i class="bi bi-patch-check-fill"></i> Verified</span>
-                            <?php elseif ($user['verified'] === 'pending'): ?>
-                              <span class="admin-badge admin-badge-info"><i class="bi bi-hourglass-split"></i> Pending</span>
-                            <?php endif; ?>
-
-                            <?php if ($user['banned'] && abs($user['rhythm_strikes']) < 3): ?>
-                              <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> Banned</span>
-                            <?php endif; ?>
-
-                            <?php if ($user['rhythm_strikes'] > 0 && !$user['banned']): ?>
-                              <span class="admin-badge admin-badge-warning"><i class="bi bi-controller"></i> Game Ban (<?php echo $user['rhythm_strikes']; ?>/3)</span>
-                            <?php elseif (abs($user['rhythm_strikes']) > 0 && !$user['banned']): ?>
-                              <span class="admin-badge admin-badge-secondary"><i class="bi bi-controller"></i> Strikes (<?php echo abs($user['rhythm_strikes']); ?>/3)</span>
-                            <?php elseif (abs($user['rhythm_strikes']) >= 3 && $user['banned']): ?>
-                              <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> 3/3 Game Ban</span>
-                            <?php endif; ?>
-                          </div>
-                        </td>
-                        <td>
-                          <div class="text-white fw-bold font-monospace"><?php echo (int)($user['daily_upload_count'] ?? 0); ?> / 10</div>
-                          <small class="text-secondary font-monospace" style="font-size: 0.72rem;">Last: <?php echo htmlspecialchars($user['last_upload_date'] ?? 'Never'); ?></small>
-                        </td>
-                        <td>
-                          <div class="d-flex align-items-center gap-1">
-                            <a href="?access=admin&page=songs&search=uid:<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="View Songs Uploaded by User">
-                              <i class="bi bi-music-note-list"></i> Songs
-                            </a>
-                            <a href="?access=admin&page=drive&path=<?php echo urlencode('users_drive/user_' . $user['id'] . '_folder'); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Browse User Personal Drive">
-                              <i class="bi bi-folder2-open"></i> Drive
-                            </a>
-                            <a href="?access=admin&page=storage&search=<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" title="Inspect Storage Quota">
-                              <i class="bi bi-hdd-network"></i> Quota
-                            </a>
-                          </div>
-                        </td>
-                        <td class="text-end">
-                          <div class="d-flex align-items-center justify-content-end gap-2">
-                            <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
-                              <i class="bi bi-pencil-fill"></i> Edit
-                            </button>
-                            <div class="dropdown">
-                              <button class="admin-btn-pill p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" data-bs-popper-config='{"strategy":"fixed"}' style="width: 30px; height: 30px;">
-                                <i class="bi bi-three-dots-vertical"></i>
-                              </button>
-                              <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg border-secondary" style="background-color: #181818; z-index: 1060;">
-                                <li>
-                                  <form method="POST" action="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="m-0">
-                                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
-                                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                    
-                                    <button type="submit" name="generate_reset_link" class="dropdown-item d-flex align-items-center gap-2 text-info fw-bold">
-                                      <i class="bi bi-envelope-check"></i> Generate Reset Link
-                                    </button>
-                                    
-                                    <button type="submit" name="toggle_verify" class="dropdown-item d-flex align-items-center gap-2 text-white">
-                                      <i class="bi bi-patch-check text-success"></i> 
-                                      <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
-                                    </button>
-                                    
-                                    <?php if ($user['status'] !== 'super_admin'): ?>
-                                      <button type="submit" name="toggle_admin" class="dropdown-item d-flex align-items-center gap-2 text-white">
-                                        <i class="bi bi-shield-lock text-warning"></i> 
-                                        <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
-                                      </button>
-                                      
-                                      <?php if ($user['is_admin'] == 1): ?>
-                                        <?php
-                                          $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                          $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
-                                          $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
-                                        ?>
-                                        <button type="button" class="dropdown-item d-flex align-items-center gap-2 text-success fw-bold" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
-                                          <i class="bi bi-ui-checks"></i> Manage Permissions
-                                        </button>
-                                      <?php endif; ?>
-                                      
-                                      <button type="submit" name="toggle_ban" class="dropdown-item d-flex align-items-center gap-2 text-white">
-                                        <i class="bi bi-slash-circle text-warning"></i> 
-                                        <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
-                                      </button>
-                                      
-                                      <?php if (abs($user['rhythm_strikes']) >= 3): ?>
-                                        <button type="submit" name="reset_rhythm_history" class="dropdown-item d-flex align-items-center gap-2 text-danger fw-bold" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
-                                          <i class="bi bi-arrow-counterclockwise"></i> Reset Rhythm History & Unban
-                                        </button>
-                                      <?php else: ?>
-                                        <button type="submit" name="toggle_rhythm_ban" class="dropdown-item d-flex align-items-center gap-2 text-white">
-                                          <i class="bi bi-controller text-warning"></i> 
-                                          <?php echo $user['rhythm_strikes'] > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'; ?> (<?php echo abs($user['rhythm_strikes']); ?>/3)
-                                        </button>
-                                      <?php endif; ?>
-                                      
-                                      <li><hr class="dropdown-divider border-secondary opacity-50"></li>
-                                      <button type="submit" name="soft_delete_user" class="dropdown-item d-flex align-items-center gap-2 text-warning fw-bold" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
-                                        <i class="bi bi-person-fill-x"></i> Soft Delete User
-                                      </button>
-                                      
-                                      <button type="submit" name="permanent_delete_user" class="dropdown-item d-flex align-items-center gap-2 text-danger fw-bold" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
-                                        <i class="bi bi-trash2-fill"></i> Permanent Delete
-                                      </button>
-                                    <?php endif; ?>
-                                    <li><hr class="dropdown-divider border-secondary opacity-50"></li>
-                                    <button type="button" class="dropdown-item d-flex align-items-center gap-2 text-info fw-bold" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
-                                      <i class="bi bi-controller"></i> View Rhythm History
-                                    </button>
-                                  </form>
-                                </li>
-                              </ul>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    <?php endforeach; endif; ?>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            
-            <div class="modal fade" id="user-details-modal" tabindex="-1">
-              <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
-                <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
-                  <div class="modal-header border-0 pb-3" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-                    <h5 class="modal-title text-white fw-bold"><i class="bi bi-person-lines-fill text-info me-2"></i> User Properties &amp; Preferences</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                  </div>
-                  <div class="modal-body p-4" id="user-details-modal-body">
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            <script>
-              function openUserModal(btn) {
-                const userData = JSON.parse(btn.getAttribute('data-user'));
-                const modalBody = document.getElementById('user-details-modal-body');
-                
-                let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
-                try {
-                  const settings = JSON.parse(userData.settings || '{}');
-                  if (settings.admin_permissions) u_perms = settings.admin_permissions;
-                } catch(e) {}
-                const permsJson = JSON.stringify(u_perms).replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                
-                const isSuperAdmin = userData.status === 'super_admin';
-                
-                let actionsHtml = `
-                  <form method="POST" action="?access=admin&page=users&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
-                    <input type="hidden" name="csrf_token" value="${userData.csrf_token}">
-                    <input type="hidden" name="user_id" value="${userData.id}">
-                    
-                    <div class="d-flex flex-column gap-2 mt-3">
-                      <div class="d-flex gap-2 mb-2">
-                        <a href="?access=admin&page=songs&search=uid:${encodeURIComponent(userData.id)}" class="btn btn-sm btn-outline-info flex-grow-1 fw-bold">
-                          <i class="bi bi-music-note-list me-1"></i> User Songs
-                        </a>
-                        <a href="?access=admin&page=drive&path=${encodeURIComponent('users_drive/user_' + userData.id + '_folder')}" class="btn btn-sm btn-outline-warning flex-grow-1 fw-bold">
-                          <i class="bi bi-folder2-open me-1"></i> User Drive
-                        </a>
-                      </div>
-
-                      <button type="submit" name="generate_reset_link" class="btn border-0 btn-outline-info text-start fw-bold d-flex align-items-center gap-2">
-                        <i class="bi bi-envelope-check"></i> Generate Reset Link
-                      </button>
-                      
-                      <button type="submit" name="toggle_verify" class="btn border-0 btn-outline-success text-start fw-bold d-flex align-items-center gap-2">
-                        <i class="bi bi-patch-check"></i> ${userData.verified === 'yes' ? 'Revoke Verification' : (userData.verified === 'pending' ? 'Approve Upload Request' : 'Verify User')}
-                      </button>
-                `;
-                
-                if (!isSuperAdmin) {
-                  actionsHtml += `
-                      <button type="submit" name="toggle_admin" class="btn border-0 btn-outline-warning text-start fw-bold d-flex align-items-center gap-2">
-                        <i class="bi bi-shield-lock"></i> ${userData.is_admin == 1 ? 'Revoke Admin Status' : 'Make Administrator'}
-                      </button>
-                  `;
-                  
-                  if (userData.is_admin == 1) {
-                    actionsHtml += `
-                      <button type="button" class="btn border-0 btn-outline-light text-start fw-bold d-flex align-items-center gap-2" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); openPermissionsModal(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}', '${permsJson}')">
-                        <i class="bi bi-ui-checks"></i> Manage Permissions
-                      </button>
-                    `;
-                  }
-                  
-                  actionsHtml += `
-                      <button type="submit" name="toggle_ban" class="btn border-0 btn-outline-danger text-start fw-bold d-flex align-items-center gap-2">
-                        <i class="bi bi-slash-circle"></i> ${userData.banned ? 'Unban User' : 'Ban User'}
-                      </button>
-                      
-                      <hr class="border-secondary opacity-50 my-2">
-                      <button type="submit" name="soft_delete_user" class="btn border-0 btn-outline-warning text-start fw-bold d-flex align-items-center gap-2" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
-                        <i class="bi bi-person-fill-x"></i> Soft Delete User
-                      </button>
-                      
-                      <button type="submit" name="permanent_delete_user" class="btn border-0 btn-outline-danger text-start fw-bold d-flex align-items-center gap-2" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
-                        <i class="bi bi-trash2-fill"></i> Permanent Delete
-                      </button>
-                  `;
-                }
-                
-                actionsHtml += `
-                    </div>
-                  </form>
-                `;
-
-                const badgeHtml = userData.banned ? '<span class="badge bg-danger">Banned</span>' : '<span class="badge bg-success">Active</span>';
-                const adminBadge = userData.is_admin == 1 ? '<span class="badge bg-primary">Admin</span>' : '';
-                const verifyBadge = userData.verified === 'yes' ? '<span class="badge bg-success">Verified</span>' : (userData.verified === 'pending' ? '<span class="badge bg-info text-dark">Pending</span>' : '<span class="badge bg-secondary">Unverified</span>');
-
-                modalBody.innerHTML = `
-                  <div class="row g-4">
-                    <div class="col-md-5 text-center border-end border-secondary">
-                      <img src="?access=api&action=get_profile_picture&id=${userData.id}&v=${Date.now()}" class="rounded-circle shadow-lg mb-3" style="width: 120px; height: 120px; object-fit: cover; border: 4px solid var(--ytm-surface-2);">
-                      <h4 class="text-white fw-bold mb-1 text-truncate">${userData.artist}</h4>
-                      <p class="text-secondary small mb-3">${userData.email || 'Anonymous'}</p>
-                      
-                      <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
-                        ${badgeHtml} ${adminBadge} ${verifyBadge}
-                      </div>
-                      
-                      <div class="bg-dark rounded p-3 text-start border border-secondary">
-                        <div class="small text-secondary mb-2">User ID: <strong class="text-white float-end">${userData.id}</strong></div>
-                        <div class="small text-secondary mb-2">Uploads: <strong class="text-white float-end">${userData.daily_upload_count}</strong></div>
-                        <div class="small text-secondary mb-1">Last Upload: <strong class="text-white float-end">${userData.last_upload_date || 'Never'}</strong></div>
-                      </div>
-                      
-                      <button type="button" class="btn btn-dark w-100 fw-bold mt-3 border-secondary" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewRhythmHistory(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
-                        <i class="bi bi-controller text-info"></i> View Rhythm History
-                      </button>
-                    </div>
-                    
-                    <div class="col-md-7">
-                      <h6 class="text-secondary fw-bold text-uppercase" style="letter-spacing: 1px;">Actions & Properties</h6>
-                      ${actionsHtml}
-                    </div>
-                  </div>
-                `;
-                
-                new bootstrap.Modal(document.getElementById('user-details-modal')).show();
-              }
-            </script>
-            <?php if ($total_pages > 1): ?>
-            <div class="admin-pagination mt-4">
-              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=1">«</a>
-              <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page - 1; ?>">‹</a>
+            <?php if ($active_user_tab === 'settings'): ?>
               <?php
-                $start_page = max(1, $page - 2);
-                $end_page = min($total_pages, $start_page + 4);
-                if ($end_page - $start_page < 4) {
-                  $start_page = max(1, $end_page - 4);
-                }
+                $u_reg_mode = $db->query("SELECT value FROM site_settings WHERE key = 'users_reg_mode'")->fetchColumn() ?: 'open';
+                $u_daily = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_daily_upload_limit'")->fetchColumn() ?: 10);
+                $u_quota_bytes = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_default_drive_quota'")->fetchColumn() ?: 2147483648);
+                $u_quota_gb = round($u_quota_bytes / 1073741824, 1);
               ?>
-              <?php for ($i = $start_page; $i <= $end_page; $i++): ?>
-                <a class="admin-page-btn <?php echo ($page == $i) ? 'active' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
-              <?php endfor; ?>
-              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page + 1; ?>">›</a>
-              <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $total_pages; ?>">»</a>
-            </div>
+              <div class="admin-card p-4 mb-4 w-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-sliders text-danger"></i> Registration &amp; Account Policies
+                    </h5>
+                    <div class="small text-secondary mt-1">Configure user signup rules, default storage quotas, and rate limits.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Global User Policy</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=users" class="d-flex flex-column gap-3 w-100">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_users_policies" value="1">
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">REGISTRATION GATE</label>
+                      <select name="reg_mode" class="admin-pill-select w-100">
+                        <option value="open" <?php echo $u_reg_mode === 'open' ? 'selected' : ''; ?>>Open (Public Registration)</option>
+                        <option value="approval" <?php echo $u_reg_mode === 'approval' ? 'selected' : ''; ?>>Approval Required</option>
+                        <option value="closed" <?php echo $u_reg_mode === 'closed' ? 'selected' : ''; ?>>Closed (Disabled)</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">DAILY UPLOAD LIMIT (SONGS/DAY)</label>
+                      <input type="number" name="daily_upload_limit" class="admin-pill-input w-100 font-monospace" min="1" max="100" value="<?php echo $u_daily; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">DEFAULT DRIVE QUOTA (GB)</label>
+                      <input type="number" step="0.5" name="default_drive_quota_gb" class="admin-pill-input w-100 font-monospace" min="0.5" max="100" value="<?php echo $u_quota_gb; ?>" required>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Policy Settings
+                  </button>
+                </form>
+              </div>
+            <?php else: ?>
+              <!-- Metrics KPI Cards Row -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Total Users</span>
+                      <span class="text-danger"><i class="bi bi-people-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_all_users); ?></div>
+                    <small class="text-secondary"><?php echo number_format($total_users); ?> matching active filter</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Verified Artists</span>
+                      <span class="text-success"><i class="bi bi-patch-check-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_verified_users); ?></div>
+                    <small class="text-secondary">Approved for music uploads</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Administrators</span>
+                      <span class="text-primary"><i class="bi bi-shield-lock-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_admin_users); ?></div>
+                    <small class="text-secondary">Elevated staff & super admins</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Banned &amp; Restricted</span>
+                      <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_banned_users); ?></div>
+                    <small class="text-secondary">Suspended from site actions</small>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Users Table -->
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table text-nowrap align-middle">
+                    <thead>
+                      <tr>
+                        <th style="width: 50px;">Avatar</th>
+                        <th style="width: 70px;">ID</th>
+                        <th>Artist Account</th>
+                        <th>Account Badges</th>
+                        <th>Daily Uploads</th>
+                        <th>Fast Jumpers</th>
+                        <th class="text-end" style="width: 140px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($users)): ?>
+                        <tr><td colspan="7" class="text-center py-5 text-secondary">No user records found matching your query.</td></tr>
+                      <?php else: foreach ($users as $user): 
+                        $user_payload = $user;
+                        $user_payload['csrf_token'] = $_SESSION['admin_csrf_token'];
+                        $user_payload['current_page'] = $page;
+                        $user_payload['current_search'] = $search;
+                        $user_payload['current_sort'] = $sort_admin;
+                        $json_data = htmlspecialchars(json_encode($user_payload), ENT_QUOTES, 'UTF-8');
+                      ?>
+                        <tr>
+                          <td>
+                            <img src="?access=api&action=get_profile_picture&id=<?php echo $user['id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 38px; height: 38px; object-fit: cover; background: #000; border: 1px solid var(--drive-border);" alt="">
+                          </td>
+                          <td class="text-secondary font-monospace small">#<?php echo $user['id']; ?></td>
+                          <td>
+                            <div class="fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
+                            <small class="text-secondary font-monospace" style="font-size: 0.75rem;"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></small>
+                          </td>
+                          <td>
+                            <div class="d-flex flex-wrap gap-1 align-items-center">
+                              <?php if ($user['status'] === 'super_admin'): ?>
+                                <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-shaded"></i> Super Admin</span>
+                              <?php elseif ($user['is_admin'] == 1): ?>
+                                <span class="admin-badge admin-badge-primary"><i class="bi bi-shield-lock-fill"></i> Admin</span>
+                              <?php endif; ?>
+
+                              <?php if ($user['reset_requested'] == 1): ?>
+                                <span class="admin-badge admin-badge-warning"><i class="bi bi-key-fill"></i> Reset Req</span>
+                              <?php endif; ?>
+
+                              <?php if ($user['verified'] === 'yes'): ?>
+                                <span class="admin-badge admin-badge-success"><i class="bi bi-patch-check-fill"></i> Verified</span>
+                              <?php elseif ($user['verified'] === 'pending'): ?>
+                                <span class="admin-badge admin-badge-info"><i class="bi bi-hourglass-split"></i> Pending</span>
+                              <?php endif; ?>
+
+                              <?php if ($user['banned'] && abs($user['rhythm_strikes']) < 3): ?>
+                                <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> Banned</span>
+                              <?php endif; ?>
+
+                              <?php if ($user['rhythm_strikes'] > 0 && !$user['banned']): ?>
+                                <span class="admin-badge admin-badge-warning"><i class="bi bi-controller"></i> Game Ban (<?php echo $user['rhythm_strikes']; ?>/3)</span>
+                              <?php elseif (abs($user['rhythm_strikes']) > 0 && !$user['banned']): ?>
+                                <span class="admin-badge admin-badge-secondary"><i class="bi bi-controller"></i> Strikes (<?php echo abs($user['rhythm_strikes']); ?>/3)</span>
+                              <?php elseif (abs($user['rhythm_strikes']) >= 3 && $user['banned']): ?>
+                                <span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill"></i> 3/3 Game Ban</span>
+                              <?php endif; ?>
+                            </div>
+                          </td>
+                          <td>
+                            <div class="text-white fw-bold font-monospace"><?php echo (int)($user['daily_upload_count'] ?? 0); ?> / 10</div>
+                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;">Last: <?php echo htmlspecialchars($user['last_upload_date'] ?? 'Never'); ?></small>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-1">
+                              <a href="?access=admin&page=songs&search=uid:<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" title="View Songs Uploaded by User">
+                                <i class="bi bi-music-note-list"></i> Songs
+                              </a>
+                              <a href="?access=admin&page=drive&path=<?php echo urlencode('users_drive/user_' . $user['id'] . '_folder'); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Browse User Personal Drive">
+                                <i class="bi bi-folder2-open"></i> Drive
+                              </a>
+                              <a href="?access=admin&page=storage&search=<?php echo urlencode($user['id']); ?>" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" title="Inspect Storage Quota">
+                                <i class="bi bi-hdd-network"></i> Quota
+                              </a>
+                            </div>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-2">
+                              <button type="button" class="admin-btn-pill" style="height: 30px; padding: 0 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openUserModal(this)" data-user="<?php echo $json_data; ?>">
+                                <i class="bi bi-pencil-fill"></i> Edit
+                              </button>
+                              <div class="dropdown">
+                                <button class="admin-btn-pill p-0 d-flex align-items-center justify-content-center" type="button" data-bs-toggle="dropdown" data-bs-boundary="window" style="width: 32px; height: 32px; border-radius: 50%;">
+                                  <i class="bi bi-three-dots-vertical"></i>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow-lg user-action-menu">
+                                  <li>
+                                    <form method="POST" action="?access=admin&page=users&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>" class="m-0 d-flex flex-column gap-1">
+                                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                      <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                      
+                                      <button type="submit" name="generate_reset_link" class="dropdown-item item-info">
+                                        <i class="bi bi-envelope-check text-info"></i> Generate Reset Link
+                                      </button>
+                                      
+                                      <button type="submit" name="toggle_verify" class="dropdown-item">
+                                        <i class="bi bi-patch-check text-success"></i> 
+                                        <?php echo $user['verified'] === 'yes' ? 'Revoke Verification' : ($user['verified'] === 'pending' ? 'Approve Upload Request' : 'Verify User'); ?>
+                                      </button>
+                                      
+                                      <?php if ($user['status'] !== 'super_admin'): ?>
+                                        <button type="submit" name="toggle_admin" class="dropdown-item">
+                                          <i class="bi bi-shield-lock text-warning"></i> 
+                                          <?php echo $user['is_admin'] == 1 ? 'Revoke Admin Status' : 'Make Administrator'; ?>
+                                        </button>
+                                        
+                                        <?php if ($user['is_admin'] == 1): ?>
+                                          <?php
+                                            $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
+                                            $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                                            $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
+                                          ?>
+                                          <button type="button" class="dropdown-item" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
+                                            <i class="bi bi-ui-checks text-success"></i> Manage Permissions
+                                          </button>
+                                        <?php endif; ?>
+                                        
+                                        <button type="submit" name="toggle_ban" class="dropdown-item item-warning">
+                                          <i class="bi bi-slash-circle text-warning"></i> 
+                                          <?php echo $user['banned'] ? 'Unban User' : 'Ban User'; ?>
+                                        </button>
+                                        
+                                        <?php if (abs($user['rhythm_strikes']) >= 3): ?>
+                                          <button type="submit" name="reset_rhythm_history" class="dropdown-item item-danger" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
+                                            <i class="bi bi-arrow-counterclockwise text-danger"></i> Reset Rhythm History
+                                          </button>
+                                        <?php else: ?>
+                                          <button type="submit" name="toggle_rhythm_ban" class="dropdown-item">
+                                            <i class="bi bi-controller text-warning"></i> 
+                                            <?php echo $user['rhythm_strikes'] > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'; ?> (<?php echo abs($user['rhythm_strikes']); ?>/3)
+                                          </button>
+                                        <?php endif; ?>
+                                        
+                                        <div class="dropdown-divider"></div>
+                                        <button type="submit" name="soft_delete_user" class="dropdown-item item-warning" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
+                                          <i class="bi bi-person-fill-x text-warning"></i> Soft Delete User
+                                        </button>
+                                        
+                                        <button type="submit" name="permanent_delete_user" class="dropdown-item item-danger" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
+                                          <i class="bi bi-trash2-fill text-danger"></i> Permanent Delete
+                                        </button>
+                                      <?php endif; ?>
+                                      <div class="dropdown-divider"></div>
+                                      <button type="button" class="dropdown-item item-info" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
+                                        <i class="bi bi-controller text-info"></i> View Rhythm History
+                                      </button>
+                                    </form>
+                                  </li>
+                                </ul>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Pagination -->
+              <?php if ($total_pages > 1): ?>
+                <div class="admin-pagination mt-4">
+                  <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&tab=<?php echo urlencode($active_user_tab); ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=users&tab=<?php echo urlencode($active_user_tab); ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page - 1; ?>">‹</a>
+                  <?php
+                    $start_page = max(1, $page - 2);
+                    $end_page = min($total_pages, $start_page + 4);
+                    if ($end_page - $start_page < 4) {
+                      $start_page = max(1, $end_page - 4);
+                    }
+                    for ($i = $start_page; $i <= $end_page; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($page == $i) ? 'active' : ''; ?>" href="?access=admin&page=users&tab=<?php echo urlencode($active_user_tab); ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&tab=<?php echo urlencode($active_user_tab); ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=users&tab=<?php echo urlencode($active_user_tab); ?>&search=<?php echo urlencode($search); ?>&sort=<?php echo urlencode($sort_admin); ?>&p=<?php echo $total_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
             <?php endif; ?>
           </div>
+
+          <!-- User Details Modal -->
+          <div class="modal fade" id="user-details-modal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+              <div class="modal-content user-modal-box">
+                <div class="modal-header user-modal-header border-0">
+                  <div class="d-flex align-items-center gap-2">
+                    <div style="width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, #ff0044, #990022); display: flex; align-items: center; justify-content: center; color: #fff;">
+                      <i class="bi bi-person-gear"></i>
+                    </div>
+                    <h5 class="modal-title text-white fw-bold m-0" style="font-size: 1.05rem;">User Profile &amp; Account Controls</h5>
+                  </div>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body user-modal-body p-4" id="user-details-modal-body">
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <script>
+            function openUserModal(btn) {
+              const userData = JSON.parse(btn.getAttribute('data-user'));
+              const modalBody = document.getElementById('user-details-modal-body');
+              
+              let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+              try {
+                const settings = JSON.parse(userData.settings || '{}');
+                if (settings.admin_permissions) u_perms = settings.admin_permissions;
+              } catch(e) {}
+              const permsJson = JSON.stringify(u_perms).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+              const isSuperAdmin = userData.status === 'super_admin';
+
+              const roleBadge = isSuperAdmin
+                ? '<span class="admin-badge admin-badge-primary"><i class="bi bi-shield-shaded me-1"></i>Super Admin</span>'
+                : (userData.is_admin == 1 ? '<span class="admin-badge admin-badge-primary"><i class="bi bi-shield-lock-fill me-1"></i>Admin</span>' : '<span class="admin-badge admin-badge-secondary"><i class="bi bi-person me-1"></i>Member</span>');
+
+              const verifyBadge = userData.verified === 'yes'
+                ? '<span class="admin-badge admin-badge-success"><i class="bi bi-patch-check-fill me-1"></i>Verified</span>'
+                : (userData.verified === 'pending' ? '<span class="admin-badge admin-badge-warning"><i class="bi bi-hourglass-split me-1"></i>Pending</span>' : '<span class="admin-badge admin-badge-secondary">Unverified</span>');
+
+              const statusBadge = userData.banned == 1
+                ? '<span class="admin-badge admin-badge-danger"><i class="bi bi-slash-circle-fill me-1"></i>Banned</span>'
+                : '<span class="admin-badge admin-badge-success"><i class="bi bi-check-circle-fill me-1"></i>Active</span>';
+
+              const rhythmBadge = userData.rhythm_strikes > 0
+                ? `<span class="admin-badge admin-badge-warning"><i class="bi bi-controller me-1"></i>Game Ban (${userData.rhythm_strikes}/3)</span>`
+                : (absStrikes = Math.abs(userData.rhythm_strikes || 0), absStrikes > 0 ? `<span class="admin-badge admin-badge-secondary"><i class="bi bi-controller me-1"></i>Strikes (${absStrikes}/3)</span>` : '');
+
+              modalBody.innerHTML = `
+                <!-- Top Hero Profile Card -->
+                <div class="user-card-hero mb-4">
+                  <div class="d-flex align-items-center gap-3 flex-wrap">
+                    <div class="position-relative">
+                      <img src="?access=api&action=get_profile_picture&id=${userData.id}&v=${Date.now()}" class="user-avatar-glow" alt="">
+                      <span class="position-absolute bottom-0 end-0 badge rounded-pill ${userData.banned == 1 ? 'bg-danger' : 'bg-success'} border border-dark p-1" style="width: 14px; height: 14px;"></span>
+                    </div>
+                    <div class="flex-grow-1 min-w-0">
+                      <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
+                        <h4 class="text-white fw-bold m-0 text-truncate" style="font-size: 1.25rem;">${userData.artist}</h4>
+                        <span class="text-secondary font-monospace small">#${userData.id}</span>
+                      </div>
+                      <div class="text-secondary small font-monospace text-truncate mb-2">${userData.email || 'Anonymous'}</div>
+                      <div class="d-flex flex-wrap gap-1 align-items-center">
+                        ${roleBadge}
+                        ${verifyBadge}
+                        ${statusBadge}
+                        ${rhythmBadge}
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Quick Stats Grid -->
+                  <div class="row g-2 mt-3 pt-3 border-top border-secondary border-opacity-25 font-monospace">
+                    <div class="col-4">
+                      <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
+                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Uploads Today</div>
+                        <div class="text-white fw-bold fs-6 mt-1">${userData.daily_upload_count || 0} / 10</div>
+                      </div>
+                    </div>
+                    <div class="col-4">
+                      <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
+                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Last Upload</div>
+                        <div class="text-white fw-bold small text-truncate mt-1">${userData.last_upload_date || 'Never'}</div>
+                      </div>
+                    </div>
+                    <div class="col-4">
+                      <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
+                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Reset Request</div>
+                        <div class="fw-bold fs-6 mt-1 ${userData.reset_requested == 1 ? 'text-warning' : 'text-secondary'}">${userData.reset_requested == 1 ? 'Pending' : 'None'}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Quick Resource Jump Buttons -->
+                  <div class="d-flex gap-2 mt-3 pt-2">
+                    <a href="?access=admin&page=songs&search=uid:${encodeURIComponent(userData.id)}" class="admin-btn-pill flex-grow-1 justify-content-center text-decoration-none" style="height: 34px; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);">
+                      <i class="bi bi-music-note-beamed"></i> User Songs
+                    </a>
+                    <a href="?access=admin&page=drive&path=${encodeURIComponent('users_drive/user_' + userData.id + '_folder')}" class="admin-btn-pill flex-grow-1 justify-content-center text-decoration-none" style="height: 34px; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);">
+                      <i class="bi bi-folder2-open"></i> User Drive
+                    </a>
+                    <button type="button" class="admin-btn-pill flex-grow-1 justify-content-center" style="height: 34px; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewRhythmHistory(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
+                      <i class="bi bi-controller"></i> Rhythm Scores
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Account Management Action Form -->
+                <form method="POST" action="?access=admin&page=users&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
+                  <input type="hidden" name="csrf_token" value="${userData.csrf_token}">
+                  <input type="hidden" name="user_id" value="${userData.id}">
+
+                  <div class="row g-3">
+                    <!-- Left Column: Verification & Security Controls -->
+                    <div class="col-12 col-md-6">
+                      <span class="text-secondary small fw-bold text-uppercase d-block mb-2" style="letter-spacing: 0.6px;">Access &amp; Roles</span>
+                      <div class="d-flex flex-column gap-2">
+                        <button type="submit" name="generate_reset_link" class="user-action-card-btn">
+                          <span class="d-flex align-items-center gap-2">
+                            <i class="bi bi-envelope-check text-info fs-6"></i>
+                            <span>Generate Reset Link</span>
+                          </span>
+                          <i class="bi bi-arrow-right-short text-secondary"></i>
+                        </button>
+
+                        <button type="submit" name="toggle_verify" class="user-action-card-btn">
+                          <span class="d-flex align-items-center gap-2">
+                            <i class="bi bi-patch-check text-success fs-6"></i>
+                            <span>${userData.verified === 'yes' ? 'Revoke Verification' : (userData.verified === 'pending' ? 'Approve Upload Request' : 'Grant Verification')}</span>
+                          </span>
+                          <span class="admin-badge ${userData.verified === 'yes' ? 'admin-badge-success' : 'admin-badge-secondary'}">${userData.verified === 'yes' ? 'Verified' : 'Unverified'}</span>
+                        </button>
+
+                        ${!isSuperAdmin ? `
+                          <button type="submit" name="toggle_admin" class="user-action-card-btn">
+                            <span class="d-flex align-items-center gap-2">
+                              <i class="bi bi-shield-lock text-warning fs-6"></i>
+                              <span>${userData.is_admin == 1 ? 'Revoke Admin Role' : 'Promote to Admin'}</span>
+                            </span>
+                            <span class="admin-badge ${userData.is_admin == 1 ? 'admin-badge-primary' : 'admin-badge-secondary'}">${userData.is_admin == 1 ? 'Admin' : 'Member'}</span>
+                          </button>
+                        ` : ''}
+
+                        ${userData.is_admin == 1 && !isSuperAdmin ? `
+                          <button type="button" class="user-action-card-btn" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); openPermissionsModal(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}', '${permsJson}')">
+                            <span class="d-flex align-items-center gap-2">
+                              <i class="bi bi-ui-checks text-success fs-6"></i>
+                              <span>Manage Permissions</span>
+                            </span>
+                            <i class="bi bi-gear text-secondary"></i>
+                          </button>
+                        ` : ''}
+                      </div>
+                    </div>
+
+                    <!-- Right Column: Moderation & Restrictions -->
+                    <div class="col-12 col-md-6">
+                      <span class="text-secondary small fw-bold text-uppercase d-block mb-2" style="letter-spacing: 0.6px;">Restrictions &amp; Safety</span>
+                      <div class="d-flex flex-column gap-2">
+                        ${!isSuperAdmin ? `
+                          <button type="submit" name="toggle_ban" class="user-action-card-btn ${userData.banned ? 'warning-btn' : 'danger-btn'}">
+                            <span class="d-flex align-items-center gap-2">
+                              <i class="bi bi-slash-circle ${userData.banned ? 'text-success' : 'text-danger'} fs-6"></i>
+                              <span>${userData.banned ? 'Lift Account Ban' : 'Ban Account'}</span>
+                            </span>
+                            <span class="admin-badge ${userData.banned ? 'admin-badge-danger' : 'admin-badge-success'}">${userData.banned ? 'Banned' : 'Active'}</span>
+                          </button>
+
+                          ${Math.abs(userData.rhythm_strikes || 0) >= 3 ? `
+                            <button type="submit" name="reset_rhythm_history" class="user-action-card-btn danger-btn" onclick="return confirm('Reset all rhythm strikes history to 0/3 and fully unban this account?');">
+                              <span class="d-flex align-items-center gap-2">
+                                <i class="bi bi-arrow-counterclockwise text-danger fs-6"></i>
+                                <span>Reset 3/3 Rhythm Ban</span>
+                              </span>
+                              <span class="admin-badge admin-badge-danger">Strike 3/3</span>
+                            </button>
+                          ` : `
+                            <button type="submit" name="toggle_rhythm_ban" class="user-action-card-btn warning-btn">
+                              <span class="d-flex align-items-center gap-2">
+                                <i class="bi bi-controller text-warning fs-6"></i>
+                                <span>${userData.rhythm_strikes > 0 ? 'Unban from Rhythm Game' : 'Ban from Rhythm Game'}</span>
+                              </span>
+                              <span class="admin-badge admin-badge-warning">${Math.abs(userData.rhythm_strikes || 0)}/3</span>
+                            </button>
+                          `}
+
+                          <button type="submit" name="soft_delete_user" class="user-action-card-btn warning-btn" onclick="return confirm('Soft delete this user? Their account will be anonymized and locked, but their uploaded music and posts will remain.');">
+                            <span class="d-flex align-items-center gap-2">
+                              <i class="bi bi-person-fill-x text-warning fs-6"></i>
+                              <span>Soft Delete Account</span>
+                            </span>
+                            <i class="bi bi-exclamation-triangle text-warning"></i>
+                          </button>
+
+                          <button type="submit" name="permanent_delete_user" class="user-action-card-btn danger-btn" onclick="return confirm('Permanently delete this user and ALL their data (music, posts, files)? This action cannot be undone.');">
+                            <span class="d-flex align-items-center gap-2">
+                              <i class="bi bi-trash2-fill text-danger fs-6"></i>
+                              <span>Permanent Delete (Full Wipe)</span>
+                            </span>
+                            <i class="bi bi-x-octagon text-danger"></i>
+                          </button>
+                        ` : `
+                          <div class="p-3 rounded-3 bg-dark border border-secondary border-opacity-25 text-secondary small">
+                            <i class="bi bi-shield-lock-fill text-primary me-1"></i> Super Admin account properties are immutable and cannot be restricted or removed.
+                          </div>
+                        `}
+                      </div>
+                    </div>
+                  </div>
+                </form>
+              `;
+              
+              new bootstrap.Modal(document.getElementById('user-details-modal')).show();
+            }
+          </script>
         <?php endif; ?>
         </div><!-- #admin-dynamic-content -->
       </main>
@@ -58694,6 +60420,19 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
         if ($quota_max === 0 || $key_row['uses'] < $quota_max) {
           $db_fw->prepare("UPDATE api_keys SET uses = uses + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$key_row['id']]);
           $is_valid_api = true;
+
+          // Asynchronous request logging
+          try {
+            $is_logging = $db_fw->query("SELECT value FROM site_settings WHERE key = 'api_logging_enabled'")->fetchColumn() !== '0';
+            if ($is_logging) {
+              $req_method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+              $req_endpoint = $_GET['action'] ?? 'index';
+              $req_ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+              $tok_prefix = substr($api_key, 0, 8) . '...';
+              $db_fw->prepare("INSERT INTO api_logs (api_key_id, token_prefix, endpoint, method, ip_address, status_code) VALUES (?, ?, ?, ?, ?, 200)")
+                    ->execute([(int)$key_row['id'], $tok_prefix, $req_endpoint, $req_method, $req_ip]);
+            }
+          } catch (Exception $e) {}
         } else {
           http_response_code(429);
           header('Content-Type: application/json; charset=utf-8');
