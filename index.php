@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.5');
+define('APP_VERSION', '11.6');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -18212,8 +18212,57 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       @file_put_contents($htaccessFile, "<IfModule mod_authz_core.c>\n  Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n  Order Deny,Allow\n  Deny from all\n</IfModule>");
     }
   }
+
+  function migrateArtworkAssetsFormat($db, $config) {
+    try {
+      $stmt = $db->query("
+        SELECT ai.id as img_id, ai.artwork_id, ai.file_name, ai.sort_order, a.user_id
+        FROM artwork_images ai
+        JOIN artworks a ON ai.artwork_id = a.id
+        WHERE ai.file_name NOT LIKE 'uid_%'
+        ORDER BY ai.artwork_id ASC, ai.sort_order ASC
+      ");
+      $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+      if (empty($rows)) return;
+
+      $db->beginTransaction();
+      $updateStmt = $db->prepare("UPDATE artwork_images SET file_name = ? WHERE id = ?");
+
+      foreach ($rows as $row) {
+        $oldRel = $row['file_name'];
+        $oldFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $oldRel);
+        $ext = strtolower(pathinfo($oldRel, PATHINFO_EXTENSION)) ?: 'jpg';
+        $sortOrder = (int)$row['sort_order'];
+        $userId = (int)$row['user_id'];
+        $artId = (int)$row['artwork_id'];
+
+        $newRel = "uid_" . $userId . "/data/imageid-" . $sortOrder . "/imageassets_" . $artId . "/" . $artId . "_i" . $sortOrder . "." . $ext;
+        $newFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
+
+        if (file_exists($oldFullPath) && is_file($oldFullPath)) {
+          $newDir = dirname($newFullPath);
+          if (!is_dir($newDir)) @mkdir($newDir, 0755, true);
+          @rename($oldFullPath, $newFullPath);
+
+          $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($oldRel) . '.jpg';
+          if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($oldRel);
+          $newThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $newRel) . '.jpg';
+          $newThumbDir = dirname($newThumb);
+          if (!is_dir($newThumbDir)) @mkdir($newThumbDir, 0755, true);
+          if (file_exists($oldThumb)) {
+            @rename($oldThumb, $newThumb);
+          }
+        }
+
+        $updateStmt->execute([$newRel, $row['img_id']]);
+      }
+      $db->commit();
+    } catch (Exception $e) {
+      if ($db->inTransaction()) $db->rollBack();
+    }
+  }
   
-  function getArtworkDB() {
+  function getArtworkDB($config) {
     $db = get_db();
     if (function_exists('init_db')) {
       try { init_db($db); } catch (Exception $e) {}
@@ -18336,6 +18385,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     try { $db->exec("ALTER TABLE artworks ADD COLUMN series_name TEXT DEFAULT '';"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE artworks ADD COLUMN chapter_number REAL DEFAULT 1;"); } catch(Exception $e) {}
 
+    migrateArtworkAssetsFormat($db, $config);
     return $db;
   }
 
@@ -18645,7 +18695,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   }
   
   try {
-    $db = getArtworkDB();
+    $db = getArtworkDB($config);
     $currentUser = getCurrentUser($db);
     $isInitialSetup = false;
   } catch (Exception $e) {
@@ -19274,7 +19324,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             $dim = @getimagesize($fPath);
             $w = $dim ? $dim[0] : ($img['width'] ?? 0);
             $h = $dim ? $dim[1] : ($img['height'] ?? 0);
-  
+
+            $ext = strtolower(pathinfo($fName, PATHINFO_EXTENSION)) ?: 'jpg';
+            $destRel = "uid_" . $user['id'] . "/data/imageid-0/imageassets_" . $newArtId . "/" . $newArtId . "_i0." . $ext;
+            $destFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $destRel);
+
+            if ($fName !== $destRel && file_exists($fPath)) {
+              if (!is_dir(dirname($destFullPath))) @mkdir(dirname($destFullPath), 0755, true);
+              @rename($fPath, $destFullPath);
+
+              $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fName) . '.jpg';
+              if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fName);
+              $newThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $destRel) . '.jpg';
+              if (!is_dir(dirname($newThumb))) @mkdir(dirname($newThumb), 0755, true);
+              if (file_exists($oldThumb)) @rename($oldThumb, $newThumb);
+
+              $fName = $destRel;
+              $fPath = $destFullPath;
+            }
+
             $stmtImg = $db->prepare("
               INSERT INTO artwork_images (artwork_id, file_name, file_size, width, height, mime_type, phash, sort_order, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -19350,12 +19418,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         foreach ($images as $order => $img) {
           $fName = $img['file_name'] ?? ($img['file_key'] ?? '');
           if (!$fName) continue;
+
+          $ext = strtolower(pathinfo($fName, PATHINFO_EXTENSION)) ?: 'jpg';
+          $destRel = "uid_" . $user['id'] . "/data/imageid-" . $order . "/imageassets_" . $artworkId . "/" . $artworkId . "_i" . $order . "." . $ext;
+          $oldFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $fName);
+          $destFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $destRel);
+
+          if ($fName !== $destRel && file_exists($oldFullPath)) {
+            if (!is_dir(dirname($destFullPath))) @mkdir(dirname($destFullPath), 0755, true);
+            @rename($oldFullPath, $destFullPath);
+
+            $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fName) . '.jpg';
+            if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fName);
+            $newThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $destRel) . '.jpg';
+            if (!is_dir(dirname($newThumb))) @mkdir(dirname($newThumb), 0755, true);
+            if (file_exists($oldThumb)) @rename($oldThumb, $newThumb);
+
+            $fName = $destRel;
+          }
+
           $keptFiles[] = $fName;
-  
+
           if (isset($existingMap[$fName])) {
             $stmtUpdateImg->execute([$order, $existingMap[$fName]]);
           } else {
-            $fPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $fName;
+            $fPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $fName);
             $sz = file_exists($fPath) ? filesize($fPath) : ($img['size'] ?? 0);
             $dim = @getimagesize($fPath);
             $w = $dim ? $dim[0] : ($img['width'] ?? 0);
@@ -19463,19 +19550,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $params[] = $userId;
       }
   
-      if ($feed === 'manga' || $type === 'manga') {
+      if ($feed === 'manga') {
         $where[] = "a.type = 'manga'";
       } elseif ($type === 'artworks') {
         $where[] = "a.type != 'manga'";
-      } elseif ($type === 'illust') {
-        $where[] = "a.type = 'illust'";
-      } elseif ($type === 'video') {
-        $where[] = "a.type = 'video'";
-      } elseif ($feed === 'favorites') {
-        // In favorites feed without type filter, allow all types favorited by the user
-      } else {
-        // Strictly exclude manga from all standard illust/video/home feeds
-        $where[] = "a.type != 'manga'";
+      } elseif ($type !== 'all' && in_array($type, ['illust', 'video', 'manga'])) {
+        $where[] = "a.type = ?";
+        $params[] = $type;
       }
   
       if ($rating === 'r18') {
@@ -19740,10 +19821,286 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $nextStmt = $db->prepare("SELECT id FROM artworks WHERE id > ? ORDER BY id ASC LIMIT 1");
       $nextStmt->execute([$id]);
       $art['next_id'] = $nextStmt->fetchColumn() ?: null;
+
+      if ($art['type'] === 'manga') {
+        $parodyTrim = trim($art['parodies'] ?? '');
+        $seriesTrim = trim($art['series_name'] ?? '');
+        $seriesWhere = "a.user_id = ? AND a.type = 'manga'";
+        $seriesParams = [(int)$art['user_id']];
+        if ($seriesTrim !== '') {
+          $seriesWhere .= " AND (a.series_name = ? OR a.title = ?)";
+          $seriesParams[] = $seriesTrim;
+          $seriesParams[] = $seriesTrim;
+        } elseif ($parodyTrim !== '') {
+          $seriesWhere .= " AND a.parodies = ?";
+          $seriesParams[] = $parodyTrim;
+        }
+        $seriesStmt = $db->prepare("
+          SELECT a.id, a.title, a.created_at,
+            (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file,
+            (SELECT COUNT(*) FROM artwork_images WHERE artwork_id = a.id) as page_count
+          FROM artworks a
+          WHERE {$seriesWhere}
+          ORDER BY a.chapter_number ASC, a.created_at ASC, a.id ASC
+        ");
+        $seriesStmt->execute($seriesParams);
+        $seriesList = $seriesStmt->fetchAll();
+
+        $currIdx = 0;
+        foreach ($seriesList as $k => $item) {
+          if ((int)$item['id'] === (int)$art['id']) {
+            $currIdx = $k;
+            break;
+          }
+        }
+
+        $art['manga_series'] = $seriesList;
+        $art['series_title'] = $seriesTrim !== '' ? $seriesTrim : ($parodyTrim !== '' ? $parodyTrim : 'Manga Series');
+        $art['series_index'] = $currIdx + 1;
+        $art['series_total'] = count($seriesList);
+        $art['series_prev'] = ($currIdx > 0) ? $seriesList[$currIdx - 1] : null;
+        $art['series_next'] = ($currIdx < count($seriesList) - 1) ? $seriesList[$currIdx + 1] : null;
+      }
   
       jsonResponse($art);
     }
   
+    if ($action === 'artwork_export') {
+      $artworkId = intval($_GET['id'] ?? 0);
+      $stmt = $db->prepare("SELECT * FROM artworks WHERE id = ?");
+      $stmt->execute([$artworkId]);
+      $art = $stmt->fetch();
+      if (!$art) jsonResponse(['error' => 'Artwork not found.'], 404);
+
+      if (!class_exists('ZipArchive')) {
+        jsonResponse(['error' => 'Server ZipArchive extension is required.'], 500);
+      }
+
+      $stmtImgs = $db->prepare("SELECT * FROM artwork_images WHERE artwork_id = ? ORDER BY sort_order ASC, id ASC");
+      $stmtImgs->execute([$artworkId]);
+      $rawImages = $stmtImgs->fetchAll();
+
+      $tempZip = $config['chunk_dir'] . DIRECTORY_SEPARATOR . 'export_' . $artworkId . '_' . bin2hex(random_bytes(6)) . '.zip';
+      $zip = new ZipArchive();
+      if ($zip->open($tempZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        jsonResponse(['error' => 'Failed to initialize export package.'], 500);
+      }
+
+      $itemsList = [];
+      foreach ($rawImages as $idx => $img) {
+        $fPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $img['file_name']);
+        if (file_exists($fPath) && is_file($fPath)) {
+          $ext = strtolower(pathinfo($img['file_name'], PATHINFO_EXTENSION)) ?: 'jpg';
+          $entryName = $idx . '.' . $ext;
+          $zip->addFile($fPath, 'items/' . $entryName);
+          $itemsList[] = [
+            'sort_order' => (int)$img['sort_order'],
+            'file'       => $entryName,
+            'mime_type'  => $img['mime_type'],
+            'width'      => (int)$img['width'],
+            'height'     => (int)$img['height'],
+            'phash'      => $img['phash']
+          ];
+        }
+      }
+
+      $infoPayload = [
+        'hdpost_special_key' => 'HDPOST_EXPORT_KEY_POST_v1_VALIDATED',
+        'version'            => '1.0',
+        'exported_at'        => time(),
+        'artwork'            => [
+          'title'          => $art['title'],
+          'series_name'    => $art['series_name'] ?? '',
+          'chapter_number' => (float)($art['chapter_number'] ?? 1),
+          'description'    => $art['description'],
+          'type'           => $art['type'],
+          'rating'         => $art['rating'],
+          'is_ai'          => (int)$art['is_ai'],
+          'is_original'    => (int)$art['is_original'],
+          'tools'          => $art['tools'],
+          'parodies'       => $art['parodies'],
+          'characters'     => $art['characters'],
+          'tags'           => $art['tags'],
+          'source_url'     => $art['source_url']
+        ],
+        'items'              => $itemsList
+      ];
+
+      $zip->addFromString('info.json', json_encode($infoPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+      $zip->close();
+
+      if (!file_exists($tempZip) || filesize($tempZip) === 0) {
+        @unlink($tempZip);
+        jsonResponse(['error' => 'Failed to build export package.'], 500);
+      }
+
+      $safeTitle = preg_replace('/[^\w\-]+/u', '_', trim($art['title'])) ?: 'artwork';
+      $downloadName = "{$safeTitle}_{$art['id']}_export.zip";
+      $zipSize = filesize($tempZip);
+
+      if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+      @ini_set('zlib.output_compression', 'Off');
+      while (ob_get_level() > 0) @ob_end_clean();
+
+      header('Content-Type: application/zip');
+      header('Content-Disposition: attachment; filename="' . $downloadName . '"; filename*=UTF-8\'\'' . rawurlencode($downloadName));
+      header('Content-Length: ' . $zipSize);
+      header('Cache-Control: no-cache, no-store, must-revalidate');
+
+      $fp = @fopen($tempZip, 'rb');
+      if ($fp) {
+        while (!feof($fp)) {
+          echo fread($fp, 256 * 1024);
+          @flush();
+        }
+        fclose($fp);
+      }
+      @unlink($tempZip);
+      exit;
+    }
+
+    if ($action === 'artwork_import') {
+      verifyCsrfToken();
+      $user = requireAuth($db);
+
+      if (empty($_FILES['import_file']['tmp_name']) || !file_exists($_FILES['import_file']['tmp_name'])) {
+        jsonResponse(['error' => 'Please choose an export file to import.'], 400);
+      }
+
+      $tmpPath = $_FILES['import_file']['tmp_name'];
+      $clientName = $_FILES['import_file']['name'] ?? '';
+      $ext = strtolower(pathinfo($clientName, PATHINFO_EXTENSION));
+
+      $infoData = null;
+      $zipArchive = null;
+
+      if ($ext === 'zip' && class_exists('ZipArchive')) {
+        $zip = new ZipArchive();
+        if ($zip->open($tmpPath) === true) {
+          $infoRaw = $zip->getFromName('info.json');
+          if ($infoRaw !== false) {
+            $infoData = json_decode($infoRaw, true);
+            $zipArchive = $zip;
+          } else {
+            $zip->close();
+          }
+        }
+      }
+
+      if (!$infoData) {
+        $rawContent = @file_get_contents($tmpPath);
+        $infoData = json_decode($rawContent, true);
+      }
+
+      if (!is_array($infoData) || empty($infoData['hdpost_special_key']) || $infoData['hdpost_special_key'] !== 'HDPOST_EXPORT_KEY_POST_v1_VALIDATED') {
+        if ($zipArchive) $zipArchive->close();
+        jsonResponse(['error' => 'Import rejected: missing or invalid special key in info.json.'], 400);
+      }
+
+      $art = $infoData['artwork'] ?? [];
+      $title = trim($art['title'] ?? 'Imported Artwork');
+      $seriesName = trim($art['series_name'] ?? '');
+      $chapterNum = (float)($art['chapter_number'] ?? 1);
+      $description = trim($art['description'] ?? '');
+      $type = in_array($art['type'] ?? '', ['illust', 'video', 'manga']) ? $art['type'] : 'illust';
+      $rating = in_array($art['rating'] ?? '', ['all', 'r18']) ? $art['rating'] : 'all';
+      $isAi = !empty($art['is_ai']) ? 1 : 0;
+      $isOriginal = isset($art['is_original']) ? (!empty($art['is_original']) ? 1 : 0) : 1;
+      $tools = trim($art['tools'] ?? '');
+      $parodies = trim($art['parodies'] ?? '');
+      $characters = trim($art['characters'] ?? '');
+      $sourceUrl = trim($art['source_url'] ?? '');
+      $rawTags = trim($art['tags'] ?? '');
+      $items = $infoData['items'] ?? ($infoData['images'] ?? []);
+
+      if (empty($items) || !is_array($items)) {
+        if ($zipArchive) $zipArchive->close();
+        jsonResponse(['error' => 'No media items found in the imported package.'], 400);
+      }
+
+      $db->beginTransaction();
+      try {
+        $now = time();
+        $stmt = $db->prepare("
+          INSERT INTO artworks (
+            user_id, title, series_name, chapter_number, description, type, rating, is_ai, is_original,
+            tools, parodies, characters, tags, source_url, phash, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+        ");
+        $stmt->execute([
+          $user['id'], $title, $seriesName, $chapterNum, $description, $type, $rating, $isAi, $isOriginal,
+          $tools, $parodies, $characters, $rawTags, $sourceUrl, $now, $now
+        ]);
+        $newArtId = (int)$db->lastInsertId();
+
+        $stmtImg = $db->prepare("
+          INSERT INTO artwork_images (artwork_id, file_name, file_size, width, height, mime_type, phash, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+
+        $leadHash = '';
+        foreach ($items as $idx => $item) {
+          $binData = '';
+          $itemExt = 'jpg';
+          $mime = $item['mime_type'] ?? 'image/jpeg';
+
+          if ($zipArchive && !empty($item['file'])) {
+            $binData = $zipArchive->getFromName('items/' . $item['file']);
+            $itemExt = strtolower(pathinfo($item['file'], PATHINFO_EXTENSION)) ?: 'jpg';
+          } elseif (!empty($item['data_base64'])) {
+            $binData = base64_decode($item['data_base64']);
+            if (strpos($mime, 'png') !== false) $itemExt = 'png';
+            elseif (strpos($mime, 'gif') !== false) $itemExt = 'gif';
+            elseif (strpos($mime, 'webp') !== false) $itemExt = 'webp';
+            elseif (strpos($mime, 'mp4') !== false) $itemExt = 'mp4';
+            elseif (strpos($mime, 'webm') !== false) $itemExt = 'webm';
+          }
+
+          if ($binData === false || strlen($binData) === 0) continue;
+
+          $destRel = "uid_" . $user['id'] . "/data/imageid-" . $idx . "/imageassets_" . $newArtId . "/" . $newArtId . "_i" . $idx . "." . $itemExt;
+          $destFull = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $destRel);
+
+          if (!is_dir(dirname($destFull))) @mkdir(dirname($destFull), 0755, true);
+          file_put_contents($destFull, $binData);
+
+          $thumbRel = $destRel . '.jpg';
+          $thumbFull = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $thumbRel);
+          if (!is_dir(dirname($thumbFull))) @mkdir(dirname($thumbFull), 0755, true);
+          createThumbnail($destFull, $thumbFull, $config['thumb_width'], $config['thumb_quality']);
+
+          $pHash = compute_phash($thumbFull);
+          if ($idx === 0) $leadHash = $pHash;
+
+          $sz = strlen($binData);
+          $dim = @getimagesize($destFull);
+          $w = $dim ? $dim[0] : (int)($item['width'] ?? 0);
+          $h = $dim ? $dim[1] : (int)($item['height'] ?? 0);
+
+          $stmtImg->execute([$newArtId, $destRel, $sz, $w, $h, $mime, $pHash, $idx, $now]);
+        }
+
+        if ($leadHash) {
+          $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?")->execute([$leadHash, $newArtId]);
+        }
+
+        $tagsArray = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,#、\s]+/u', $rawTags)))));
+        $tagStmt = $db->prepare("INSERT INTO tags (artwork_id, tag_name) VALUES (?, ?)");
+        foreach ($tagsArray as $tName) {
+          if ($tName !== '') $tagStmt->execute([$newArtId, mb_substr($tName, 0, 40)]);
+        }
+
+        if ($zipArchive) $zipArchive->close();
+        $db->commit();
+        logActivity($db, $user['id'], 'artwork_import', $newArtId, "Imported artwork '{$title}'");
+        jsonResponse(['success' => true, 'artwork_id' => $newArtId]);
+      } catch (Exception $e) {
+        if ($zipArchive) $zipArchive->close();
+        $db->rollBack();
+        jsonResponse(['error' => 'Failed to import post: ' . $e->getMessage()], 500);
+      }
+    }
+
     if ($action === 'artwork_zip') {
       $artworkId = intval($_GET['id'] ?? 0);
       if ($artworkId <= 0) {
@@ -20091,33 +20448,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     }
   
     if ($action === 'thumb' || $action === 'raw') {
-      $rawFile = basename($_GET['f'] ?? '');
-      $file = preg_replace('/[^a-zA-Z0-9_\.-]/', '', $rawFile);
+      $rawFile = str_replace('\\', '/', trim($_GET['f'] ?? ''));
+      if (strpos($rawFile, '..') !== false || strpos($rawFile, ':') !== false) {
+        header('HTTP/1.0 403 Forbidden');
+        exit;
+      }
+      $file = preg_replace('/[^a-zA-Z0-9_\.\/-]/', '', $rawFile);
+      $file = ltrim($file, '/');
       if (!$file || !preg_match('/\.(jpg|jpeg|png|gif|webp|avif|bmp|mp4|webm|mov|mkv|ogg)$/i', $file)) {
         header('HTTP/1.0 404 Not Found');
         exit;
       }
-  
+
       $isThumb = ($action === 'thumb');
-      $rawBaseName = preg_replace('/^thumb_/', '', preg_replace('/\.jpg$/i', '', $file));
-      $rawPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $rawBaseName;
-      if (!file_exists($rawPath)) {
-        $rawPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . preg_replace('/^thumb_/', '', $file);
-      }
-      if (!file_exists($rawPath)) {
-        $rawPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $file;
-      }
-  
+      $osRelPath = str_replace('/', DIRECTORY_SEPARATOR, $file);
+      $rawPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $osRelPath;
+
       if ($isThumb) {
-        $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . $file . '.jpg';
+        $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRelPath . '.jpg';
         if (!file_exists($thumbCandidate)) {
-          $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $file;
+          $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRelPath;
         }
         if (!file_exists($thumbCandidate)) {
-          $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . $file;
+          $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($file) . '.jpg';
         }
         if (!file_exists($thumbCandidate) && file_exists($rawPath)) {
-          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . $file . '.jpg';
+          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRelPath . '.jpg';
+          if (!is_dir(dirname($targetThumb))) @mkdir(dirname($targetThumb), 0755, true);
           if (createThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
             $thumbCandidate = $targetThumb;
           }
@@ -20135,7 +20492,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           streamRangeFile($rawPath, $mime);
         }
       }
-  
+
       header('HTTP/1.0 404 Not Found');
       exit;
     }
@@ -20678,6 +21035,124 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           font-weight: 800;
           letter-spacing: 0.5px;
         }
+
+        /* Manga Series Component */
+        .manga-series-card {
+          background: var(--bg-surface);
+          border: 1px solid var(--border-subtle);
+          border-radius: 10px;
+          padding: 0.6rem 0.75rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.45rem;
+        }
+        .manga-series-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.4rem;
+        }
+        .manga-series-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.25rem;
+          background: rgba(249, 115, 22, 0.15);
+          color: #f97316;
+          font-weight: 800;
+          font-size: 0.65rem;
+          padding: 0.15rem 0.4rem;
+          border-radius: 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.4px;
+          flex-shrink: 0;
+        }
+        .manga-series-nav-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 0.4rem;
+        }
+        .manga-series-nav-btn {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 28px;
+          padding: 0 0.5rem;
+          background: var(--bg-surface-elevated);
+          border: 1px solid var(--border-subtle);
+          border-radius: 6px;
+          color: var(--text-primary);
+          font-size: 0.75rem;
+          font-weight: 600;
+          text-decoration: none;
+          cursor: pointer;
+          transition: all 0.15s;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .manga-series-nav-btn:hover {
+          border-color: var(--border-strong);
+          background: var(--bg-surface-hover);
+        }
+        .manga-series-nav-btn.disabled {
+          opacity: 0.35;
+          cursor: not-allowed;
+          pointer-events: none;
+        }
+        .manga-series-episodes-sheet {
+          display: flex;
+          flex-direction: column;
+          gap: 0.6rem;
+          max-height: 380px;
+          overflow-y: auto;
+          padding-right: 0.3rem;
+        }
+        .manga-series-episode-item {
+          display: flex;
+          align-items: center;
+          gap: 0.85rem;
+          padding: 0.6rem 0.8rem;
+          border-radius: 10px;
+          background: var(--bg-surface-elevated);
+          border: 1px solid var(--border-subtle);
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+        .manga-series-episode-item:hover {
+          border-color: var(--accent);
+          background: var(--bg-surface-hover);
+        }
+        .manga-series-episode-item.current {
+          border-color: #f97316;
+          background: rgba(249, 115, 22, 0.1);
+        }
+        .manga-series-episode-thumb {
+          width: 50px;
+          height: 50px;
+          border-radius: 6px;
+          object-fit: cover;
+          background: #000;
+          flex-shrink: 0;
+        }
+
+        /* Import Drop Zone */
+        .import-drop-zone {
+          border: 2px dashed var(--border-strong);
+          background: var(--bg-surface-elevated);
+          border-radius: 12px;
+          padding: 1.5rem 1rem;
+          text-align: center;
+          cursor: pointer;
+          transition: border-color 0.15s, background 0.15s;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 0.45rem;
+        }
+        .import-drop-zone:hover, .import-drop-zone.dragover {
+          border-color: var(--accent);
+          background: var(--accent-alpha);
+        }
         .art-card.manga-card {
           border-radius: 14px !important;
           border-color: rgba(255, 255, 255, 0.08);
@@ -20689,9 +21164,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           border-color: rgba(245, 158, 11, 0.45);
           box-shadow: 0 12px 28px rgba(0, 0, 0, 0.8);
         }
-        .art-card.manga-card .art-thumb-wrap {
-          aspect-ratio: 2 / 3 !important;
+        .art-card.ratio-9-16 .art-thumb-wrap,
+        .manga-card.ratio-9-16 .art-thumb-wrap {
+          aspect-ratio: 9 / 16 !important;
           border-radius: 13px 13px 0 0;
+        }
+        .art-card:not(.ratio-9-16) .art-thumb-wrap {
+          aspect-ratio: 1 / 1 !important;
         }
     
         .art-card-info {
@@ -21139,6 +21618,73 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           overflow: hidden;
           background: var(--bg-base);
           border: 1px solid var(--border-subtle);
+          cursor: grab;
+          user-select: none;
+          touch-action: none;
+          transition: transform 0.18s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.18s, opacity 0.15s;
+        }
+        .upload-preview-item:active {
+          cursor: grabbing;
+        }
+        .upload-preview-item.free-drag-placeholder {
+          opacity: 0.25;
+          border: 2px dashed var(--accent) !important;
+          background: var(--accent-alpha) !important;
+          transform: scale(0.94);
+        }
+        .free-drag-clone {
+          position: fixed !important;
+          z-index: 999999 !important;
+          pointer-events: none !important;
+          opacity: 0.95;
+          transform: scale(1.06) rotate(2.5deg);
+          box-shadow: 0 16px 36px rgba(0, 0, 0, 0.8), 0 0 0 2px var(--accent);
+          border-radius: 10px;
+          overflow: hidden;
+          background: var(--bg-surface-elevated);
+          margin: 0 !important;
+        }
+        .free-drag-clone img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+        .upload-item-reorder {
+          position: absolute;
+          bottom: 22px;
+          left: 4px;
+          right: 4px;
+          display: flex;
+          justify-content: space-between;
+          pointer-events: none;
+          z-index: 4;
+          opacity: 0;
+          transition: opacity 0.15s ease;
+        }
+        .upload-preview-item:hover .upload-item-reorder,
+        .upload-preview-item:focus-within .upload-item-reorder {
+          opacity: 1;
+        }
+        .reorder-btn {
+          pointer-events: auto;
+          width: 22px;
+          height: 22px;
+          border-radius: 4px;
+          background: rgba(0, 0, 0, 0.78);
+          color: #fff;
+          font-size: 0.75rem;
+          font-weight: 700;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          transition: background 0.15s, border-color 0.15s;
+        }
+        .reorder-btn:hover {
+          background: var(--accent);
+          border-color: var(--accent);
         }
         .upload-preview-item img {
           width: 100%;
@@ -21803,6 +22349,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.theme = localStorage.getItem('hd_theme') || 'dark';
             this.chunkSize = <?= (int)$config['max_chunk_size'] ?>;
             this.uploadQueue = [];
+            this.freeDrag = null;
+            this.onFreeDragMove = this.handleFreeDragMove.bind(this);
+            this.onFreeDragEnd = this.handleFreeDragEnd.bind(this);
             this.currentLeadIndex = 0;
             this.adminState = { tab: 'users', page: 1, q: '', sort: 'id_asc' };
             this.initTheme();
@@ -21898,18 +22447,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 return;
               }
 
-              // 2. Artwork Post Navigation
+              // 2. Artwork Post Navigation (Arrow Left for Next, Arrow Right for Previous)
               if (!hash.startsWith('#/artwork/')) return;
 
               if (e.key === 'ArrowLeft') {
                 e.preventDefault();
                 if (this.currentNextPostId) {
                   this.navigateToArtwork(this.currentNextPostId);
+                } else {
+                  this.toast('No next post.');
                 }
               } else if (e.key === 'ArrowRight') {
                 e.preventDefault();
                 if (this.currentPrevPostId) {
                   this.navigateToArtwork(this.currentPrevPostId);
+                } else {
+                  this.toast('No previous post.');
                 }
               }
             });
@@ -22404,8 +22957,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   const rawTags = (art.tags || '').split(/[,#、\s]+/).filter(Boolean);
                   const previewTags = rawTags.slice(0, 2);
   
+                  // In non-Manga pages (Home, Explore, Rankings, etc.), thumbnails remain 1:1 ratio
                   html += `
-                    <div class="art-card ${isManga ? 'manga-card' : ''}" onclick="app.nav('#/artwork/${art.id}')">
+                    <div class="art-card" onclick="app.nav('#/artwork/${art.id}')">
                       <div class="art-thumb-wrap">
                         ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
                         ${pageCount > 1 ? `<div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</div>` : ''}
@@ -22526,8 +23080,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   const coverUrl = item.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}` : '';
                   const seriesUrl = `#/manga/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
                   html += `
-                    <div class="art-card manga-card" onclick="app.nav('${seriesUrl}')">
-                      <div class="art-thumb-wrap" style="aspect-ratio:9/14 !important;">
+                    <div class="art-card manga-card ratio-9-16" onclick="app.nav('${seriesUrl}')">
+                      <div class="art-thumb-wrap" style="aspect-ratio: 9 / 16 !important;">
                         ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">No Cover</div>'}
                         <div class="badge-page-count"><i class="bi bi-journal-text me-1"></i>${item.total_chapters} Ch.</div>
                         ${item.rating === 'r18' ? '<div class="badge-flag">R-18</div>' : ''}
@@ -23081,6 +23635,133 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               this.showModal(html);
             } catch(e) {
               this.toast('Failed to load chapter menu.');
+            }
+          }
+
+          showMangaSeriesModal() {
+            if (!this.currentArt || !this.currentArt.manga_series) return;
+            const art = this.currentArt;
+            const series = art.manga_series;
+            const html = `
+              <div class="modal-header">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                  <span class="manga-series-badge">Series</span>
+                  <span>${this.escape(art.series_title)}</span>
+                  <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">(${series.length} works)</span>
+                </div>
+                <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+              </div>
+              <div class="modal-body">
+                <div class="manga-series-episodes-sheet">
+                  ${series.map((item, idx) => {
+                    const isCurrent = Number(item.id) === Number(art.id);
+                    return `
+                      <div class="manga-series-episode-item ${isCurrent ? 'current' : ''}" onclick="app.closeModal(); app.nav('#/artwork/${item.id}')">
+                        <img src="?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file || '')}" class="manga-series-episode-thumb" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(item.cover_file || '')}'">
+                        <div style="flex:1; min-width:0;">
+                          <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.2rem;">
+                            <span style="font-weight:700; font-size:0.75rem; color:${isCurrent ? '#f97316' : 'var(--text-muted)'};">#${idx + 1}</span>
+                            ${isCurrent ? '<span style="background:#f97316; color:#fff; font-size:0.65rem; font-weight:800; padding:0.1rem 0.4rem; border-radius:4px;">READING</span>' : ''}
+                          </div>
+                          <div style="font-weight:700; font-size:0.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${this.escape(item.title)}</div>
+                          <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.2rem;">${item.page_count || 1}P &bull; ${new Date(item.created_at * 1000).toLocaleDateString()}</div>
+                        </div>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn-subtle" onclick="app.closeModal()">Close</button>
+              </div>
+            `;
+            this.showModal(html);
+          }
+
+          showImportModal() {
+            const html = `
+              <div class="modal-header">
+                <span>Import Post Package</span>
+                <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+              </div>
+              <form onsubmit="app.handleImportSubmit(event)">
+                <div class="modal-body" style="gap:1rem;">
+                  <p style="font-size:0.84rem; color:var(--text-secondary); line-height:1.5;">
+                    Select an exported post package (containing <code>info.json</code> and <code>items/</code>) to restore all artwork metadata, multi-page media, and tags.
+                  </p>
+
+                  <div class="import-drop-zone" id="import-drop-box" onclick="document.getElementById('import-file-elem').click()">
+                    <svg viewBox="0 0 24 24" style="width:36px; height:36px; color:var(--accent);"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+                    <span style="font-weight:700; font-size:0.9rem;">Click to choose or drag &amp; drop file</span>
+                    <span style="font-size:0.75rem; color:var(--text-muted);">Supports .zip packages &amp; .json exports</span>
+                    <input type="file" id="import-file-elem" name="import_file" accept=".zip,.json,application/zip,application/json" style="display:none;" onchange="app.handleImportFileSelect(this)" required>
+                  </div>
+
+                  <div id="import-file-details" style="display:none; align-items:center; justify-content:space-between; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; padding:0.6rem 0.85rem;">
+                    <div style="display:flex; align-items:center; gap:0.55rem; min-width:0;">
+                      <svg viewBox="0 0 24 24" style="width:18px; height:18px; color:#10b981; flex-shrink:0;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+                      <span id="import-chosen-name" style="font-weight:600; font-size:0.82rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+                    </div>
+                    <span id="import-chosen-size" style="font-size:0.75rem; color:var(--text-muted); flex-shrink:0;"></span>
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn-subtle" onclick="app.closeModal()">Cancel</button>
+                  <button type="submit" class="btn-primary" id="btn-import-submit">Import Post</button>
+                </div>
+              </form>
+            `;
+            this.showModal(html);
+
+            const dropBox = document.getElementById('import-drop-box');
+            const fileInput = document.getElementById('import-file-elem');
+            if (dropBox && fileInput) {
+              dropBox.ondragover = (e) => { e.preventDefault(); dropBox.classList.add('dragover'); };
+              dropBox.ondragleave = () => dropBox.classList.remove('dragover');
+              dropBox.ondrop = (e) => {
+                e.preventDefault();
+                dropBox.classList.remove('dragover');
+                if (e.dataTransfer.files.length) {
+                  fileInput.files = e.dataTransfer.files;
+                  this.handleImportFileSelect(fileInput);
+                }
+              };
+            }
+          }
+
+          handleImportFileSelect(input) {
+            const file = input.files && input.files[0];
+            const detailsBox = document.getElementById('import-file-details');
+            const nameSpan = document.getElementById('import-chosen-name');
+            const sizeSpan = document.getElementById('import-chosen-size');
+
+            if (file && detailsBox && nameSpan && sizeSpan) {
+              nameSpan.innerText = file.name;
+              const sizeKB = (file.size / 1024).toFixed(1);
+              sizeSpan.innerText = file.size > 1048576 ? `${(file.size / 1048576).toFixed(1)} MB` : `${sizeKB} KB`;
+              detailsBox.style.display = 'flex';
+            }
+          }
+
+          async handleImportSubmit(e) {
+            e.preventDefault();
+            const btn = document.getElementById('btn-import-submit');
+            if (btn) {
+              btn.disabled = true;
+              btn.innerText = 'Importing...';
+            }
+            const fd = new FormData(e.target);
+            try {
+              const res = await this.api('artwork_import', fd, 'POST');
+              this.closeModal();
+              this.toast('Post imported successfully!');
+              this.nav(`#/artwork/${res.artwork_id}`);
+            } catch(err) {
+              this.toast(err.message);
+              if (btn) {
+                btn.disabled = false;
+                btn.innerText = 'Import Post';
+              }
             }
           }
 
@@ -23829,11 +24510,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
             try {
               const art = await this.api('artwork_get', { id });
-              if (art.type === 'manga') {
-                const sTitle = art.series_name || art.title;
-                this.nav(`#/manga/series/${encodeURIComponent(sTitle)}/userid/${art.user_id}`);
-                return;
-              }
               this.setTitle(`${art.title} by ${art.artist_name}`);
               this.currentArt = art;
               this.currentLeadIndex = 0;
@@ -23849,9 +24525,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const leadImg = images[0] || {};
               const isLeadVid = art.type === 'video' || (leadImg.mime_type && leadImg.mime_type.startsWith('video/'));
     
-              // Previous/next post IDs for touch swipe and keyboard navigation
-              const prevPostId = art.prev_id || null;
-              const nextPostId = art.next_id || null;
+              // Previous/next post IDs (supports series chaining for manga)
+              const prevPostId = (art.type === 'manga' && art.series_prev) ? art.series_prev.id : (art.prev_id || null);
+              const nextPostId = (art.type === 'manga' && art.series_next) ? art.series_next.id : (art.next_id || null);
               this.currentPrevPostId = prevPostId;
               this.currentNextPostId = nextPostId;
   
@@ -23969,6 +24645,57 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   renderedDescription = this.escape(art.description).replace(/\n/g, '<br>');
                 }
               }
+
+              const seriesTitle = (art.series_name || art.series_title || art.title || '').trim();
+              const chapterNum = art.chapter_number || 1;
+              const readMangaUrl = `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${art.user_id}/read/chapter/${chapterNum}/page/1`;
+              const seriesViewUrl = `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${art.user_id}`;
+
+              let mangaSeriesHtml = '';
+              if (art.type === 'manga' && art.manga_series && art.manga_series.length) {
+                const prevEp = art.series_prev;
+                const nextEp = art.series_next;
+                mangaSeriesHtml = `
+                  <div class="manga-series-card">
+                    <div class="manga-series-header">
+                      <div style="display:flex; align-items:center; gap:0.4rem; min-width:0; flex:1;">
+                        <span class="manga-series-badge">Series</span>
+                        <span style="font-weight:700; font-size:0.82rem; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${this.escape(art.series_title)}">${this.escape(art.series_title)}</span>
+                        <span style="font-size:0.75rem; color:var(--text-muted); font-weight:600; flex-shrink:0;">(${art.series_index}/${art.series_total})</span>
+                      </div>
+                      <button type="button" class="btn-subtle" style="height:24px; padding:0 0.5rem; font-size:0.7rem; gap:0.25rem; flex-shrink:0;" onclick="app.showMangaSeriesModal()" title="View All Episodes">
+                        <svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                        <span>All (${art.series_total})</span>
+                      </button>
+                    </div>
+
+                    <div style="display:flex; gap:0.4rem; margin-top:0.2rem;">
+                      <a href="${readMangaUrl}" class="btn-primary" style="flex:1; height:28px; font-size:0.75rem; justify-content:center; gap:0.35rem; text-decoration:none;">
+                        <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
+                        <span>Read as Manga</span>
+                      </a>
+                      <a href="${seriesViewUrl}" class="btn-subtle" style="flex:1; height:28px; font-size:0.75rem; justify-content:center; gap:0.35rem; text-decoration:none;">
+                        <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                        <span>Series View</span>
+                      </a>
+                    </div>
+
+                    <div class="manga-series-nav-row">
+                      ${nextEp ? `
+                        <a href="#/artwork/${nextEp.id}" class="manga-series-nav-btn" title="Next: ${this.escape(nextEp.title)}">&larr; Next</a>
+                      ` : `
+                        <div class="manga-series-nav-btn disabled">&larr; Next</div>
+                      `}
+
+                      ${prevEp ? `
+                        <a href="#/artwork/${prevEp.id}" class="manga-series-nav-btn" title="Previous: ${this.escape(prevEp.title)}">Prev &rarr;</a>
+                      ` : `
+                        <div class="manga-series-nav-btn disabled">Prev &rarr;</div>
+                      `}
+                    </div>
+                  </div>
+                `;
+              }
     
               let html = `
                 <div class="viewer-layout">
@@ -24007,6 +24734,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       </div>
   
                       <div style="display:flex; gap:0.6rem; margin-top:0.4rem; flex-wrap:wrap;">
+                        ${art.type === 'manga' ? `
+                          <a href="${readMangaUrl}" class="btn-primary" style="gap:0.4rem; text-decoration:none;">
+                            <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
+                            <span>Read as Manga</span>
+                          </a>
+                          <a href="${seriesViewUrl}" class="btn-subtle" style="gap:0.4rem; text-decoration:none;">
+                            <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                            <span>View Manga Series</span>
+                          </a>
+                        ` : ''}
                         <button class="btn-subtle ${art.user_liked ? 'active like' : ''}" style="gap:0.4rem;" onclick="app.toggleLike(${art.id}, this)">
                           <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                           <span>Like (${art.like_count || 0})</span>
@@ -24015,6 +24752,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
                           <span>Share</span>
                         </button>
+                        <a href="?access=artwork&action=artwork_export&id=${art.id}" class="btn-subtle" style="gap:0.4rem;" download>
+                          <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                          <span>Export Post (.zip)</span>
+                        </a>
                         ${images.length > 1 ? `
                           <button type="button" class="btn-subtle" style="gap:0.4rem;" onclick="app.downloadArtworkZip(${art.id})">
                             <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
@@ -24062,6 +24803,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       `}
                       <button class="btn-subtle" style="width:100%; margin-top:0.35rem;" onclick="app.nav('#/user/${art.user_id}')">View All Works</button>
                     </div>
+
+                    ${mangaSeriesHtml}
   
                     <div style="background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:1rem; display:flex; flex-direction:column; gap:0.6rem;">
                       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -24324,15 +25067,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const elapsed = Date.now() - startTime;
   
               // Swipe threshold: 45px horizontal, predominantly horizontal, within 600ms
+              // Swipe Left for Prev Post, Swipe Right for Next Post
               if (Math.abs(diffX) > 45 && Math.abs(diffX) > Math.abs(diffY) * 1.3 && elapsed < 600) {
                 if (diffX < 0) {
-                  // Swipe Left -> Next Post
-                  if (nextId) this.navigateToArtwork(nextId);
-                  else this.toast('No next post.');
-                } else if (diffX > 0) {
-                  // Swipe Right -> Previous Post
+                  // Swipe Left -> Previous Post
                   if (prevId) this.navigateToArtwork(prevId);
                   else this.toast('No previous post.');
+                } else if (diffX > 0) {
+                  // Swipe Right -> Next Post
+                  if (nextId) this.navigateToArtwork(nextId);
+                  else this.toast('No next post.');
                 }
               }
             };
@@ -24504,14 +25248,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const profChar = profParams.get('character') || '';
               const profParody = profParams.get('parody') || '';
   
-              const activeTab = profParams.get('tab') || 'artworks';
-              const isFavArtworks = activeTab === 'favorites_artworks' || activeTab === 'favorites';
+              const activeTab = profParams.get('tab') || 'all';
+              const isFavAll = activeTab === 'favorites_all' || activeTab === 'favorites';
+              const isFavArtworks = activeTab === 'favorites_artworks';
               const isFavManga = activeTab === 'favorites_manga';
-              const isFavTab = isFavArtworks || isFavManga;
+              const isFavTab = isFavAll || isFavArtworks || isFavManga;
 
               let favLabel = 'Favorites';
               if (isFavManga) favLabel = 'Fav: Manga';
-              else if (isFavArtworks && activeTab !== 'favorites') favLabel = 'Fav: Artworks';
+              else if (isFavArtworks) favLabel = 'Fav: Artworks';
+              else if (isFavAll && activeTab !== 'favorites') favLabel = 'Fav: All';
 
               let prof;
               try {
@@ -24554,12 +25300,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 reqData.feed = 'favorites';
                 reqData.type = 'artworks';
                 reqData.user_id = prof.id;
+              } else if (isFavAll) {
+                reqData.feed = 'favorites';
+                reqData.type = 'all';
+                reqData.user_id = prof.id;
               } else if (activeTab === 'manga') {
                 reqData.user_id = prof.id;
                 reqData.type = 'manga';
-              } else {
+              } else if (activeTab === 'artworks') {
                 reqData.user_id = prof.id;
                 reqData.type = 'artworks';
+              } else {
+                reqData.user_id = prof.id;
+                reqData.type = 'all';
               }
 
               const arts = await this.api('artworks_list', reqData);
@@ -24593,23 +25346,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
                 </div>
 
-                <!-- Clean Equal-Width Semantic Underline Tabs -->
-                <div style="display:grid; grid-template-columns:repeat(3, 1fr); width:100%; max-width:384px; margin-bottom:1.2rem; position:relative; z-index:50; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; text-rendering:optimizeLegibility;">
-                  <button type="button" role="tab" style="display:flex; align-items:center; justify-content:center; gap:0.4rem; width:100%; padding:0.5rem 0.2rem; cursor:pointer; font-weight:700; font-size:13px; color:${activeTab === 'artworks' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'artworks' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:color 0.15s ease, border-color 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="app.switchProfileTab('artworks')">
-                    <svg viewBox="0 0 24 24" style="width:15px;height:15px;" shape-rendering="geometricPrecision"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                <!-- Scrollable Underline Profile Tabs with All, Artworks, Manga, and Favorites -->
+                <div style="display:flex; gap:0.4rem; width:100%; overflow-x:auto; white-space:nowrap; scrollbar-width:none; -webkit-overflow-scrolling:touch; margin-bottom:1.2rem; border-bottom:1px solid var(--border-subtle); position:relative; z-index:50;">
+                  <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${activeTab === 'all' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'all' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none; flex-shrink:0;" onclick="app.switchProfileTab('all')">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                    <span>All</span>
+                  </button>
+                  <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${activeTab === 'artworks' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'artworks' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none; flex-shrink:0;" onclick="app.switchProfileTab('artworks')">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
                     <span>Artworks</span>
                   </button>
-                  <button type="button" role="tab" style="display:flex; align-items:center; justify-content:center; gap:0.4rem; width:100%; padding:0.5rem 0.2rem; cursor:pointer; font-weight:700; font-size:13px; color:${activeTab === 'manga' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'manga' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:color 0.15s ease, border-color 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="app.switchProfileTab('manga')">
-                    <svg viewBox="0 0 24 24" style="width:15px;height:15px;" shape-rendering="geometricPrecision"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
+                  <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${activeTab === 'manga' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'manga' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none; flex-shrink:0;" onclick="app.switchProfileTab('manga')">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
                     <span>Manga</span>
                   </button>
-                  <div style="position:relative; width:100%; display:flex;" onmouseleave="const m = this.querySelector('.dropdown-menu-list'); if (m) m.style.display = 'none';">
-                    <button type="button" role="tab" style="display:flex; align-items:center; justify-content:center; gap:0.4rem; width:100%; padding:0.5rem 0.2rem; cursor:pointer; font-weight:700; font-size:13px; color:${isFavTab ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${isFavTab ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:color 0.15s ease, border-color 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="const m = this.nextElementSibling; m.style.display = m.style.display === 'flex' ? 'none' : 'flex';">
-                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;" shape-rendering="geometricPrecision"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                      <span style="overflow:hidden; text-overflow:ellipsis;">${favLabel}</span>
-                      <svg viewBox="0 0 24 24" style="width:12px;height:12px;margin-left:1px;" shape-rendering="geometricPrecision"><path d="M7 10l5 5 5-5z"/></svg>
+                  <div style="position:relative; display:inline-flex; flex-shrink:0;" onmouseleave="const m = this.querySelector('.dropdown-menu-list'); if (m) m.style.display = 'none';">
+                    <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${isFavTab ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${isFavTab ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="const m = this.nextElementSibling; m.style.display = m.style.display === 'flex' ? 'none' : 'flex';">
+                      <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                      <span>${favLabel}</span>
+                      <svg viewBox="0 0 24 24" style="width:13px;height:13px;margin-left:1px;"><path d="M7 10l5 5 5-5z"/></svg>
                     </button>
-                    <div class="dropdown-menu-list" style="display:none; position:absolute; top:calc(100% + 6px); right:0; min-width:185px; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; box-shadow:var(--shadow-md); z-index:100; padding:0.35rem; flex-direction:column; gap:0.2rem;">
+                    <div class="dropdown-menu-list" style="display:none; position:absolute; top:calc(100% + 4px); right:0; min-width:180px; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; box-shadow:var(--shadow-md); z-index:100; padding:0.35rem; flex-direction:column; gap:0.2rem;">
+                      <div class="nav-item ${isFavAll ? 'active' : ''}" style="padding:0.45rem 0.75rem; font-size:12px; border-radius:6px; cursor:pointer;" onclick="app.switchProfileTab('favorites_all')">
+                        All Favorites
+                      </div>
                       <div class="nav-item ${isFavArtworks ? 'active' : ''}" style="padding:0.45rem 0.75rem; font-size:12px; border-radius:6px; cursor:pointer;" onclick="app.switchProfileTab('favorites_artworks')">
                         Artworks (Illust &amp; Video)
                       </div>
@@ -24663,23 +25423,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 html += `<div class="center-msg">No ${activeTab.replace('_', ' ')} available for this artist.</div>`;
               } else {
                 html += `<div class="art-grid">`;
+                const isMangaTab = (activeTab === 'manga' || activeTab === 'favorites_manga');
+
                 arts.artworks.forEach(art => {
                   const coverFileName = art.cover_file || '';
                   const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
                   const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
-                  const isManga = art.type === 'manga' || activeTab.includes('manga');
+                  const isManga = art.type === 'manga';
                   const pageCount = Number(art.page_count || 1);
                   const viewCount = Number(art.view_count || 0);
                   const likeCount = Number(art.like_count || 0);
 
+                  // In Manga tab, click opens view manga. In non-Manga tabs, click opens view post.
                   const seriesTitle = art.series_name || art.title;
                   const authorUid = art.user_id || prof.id;
-                  const cardTarget = isManga
+                  const cardTarget = isMangaTab
                     ? `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`
                     : `#/artwork/${art.id}`;
 
+                  // 9:16 aspect ratio only in Manga tab; 1:1 in non-Manga tabs
+                  const ratioClass = isMangaTab ? 'manga-card ratio-9-16' : '';
+
                   html += `
-                    <div class="art-card ${isManga ? 'manga-card' : ''}" onclick="app.nav('${cardTarget}')">
+                    <div class="art-card ${ratioClass}" onclick="app.nav('${cardTarget}')">
                       <div class="art-thumb-wrap">
                         ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
                         
@@ -24867,8 +25633,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.uploadQueue = [...(artData.images || [])];
     
             const html = `
-            <div class="studio-card">
-              <h2 style="font-size:1.4rem; font-weight:800; margin-bottom:1.2rem;">${editId ? 'Edit Artwork Studio' : 'Publish Artwork or Video'}</h2>
+              <div class="studio-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem; flex-wrap:wrap; gap:0.6rem;">
+                  <h2 style="font-size:1.4rem; font-weight:800; margin:0;">${editId ? 'Edit Artwork Studio' : 'Publish Artwork or Video'}</h2>
+                  ${!editId ? `
+                    <button type="button" class="btn-primary" onclick="app.showImportModal()">
+                      <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+                      <span>Import Post</span>
+                    </button>
+                  ` : ''}
+                </div>
     
                 <form onsubmit="app.handleArtworkSubmit(event)">
                   <input type="hidden" name="id" value="${artData.id || 0}">
@@ -25052,13 +25826,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const thumbUrl = `?access=artwork&action=thumb&f=${encodeURIComponent(item.file_name)}`;
               const displayName = item.original || item.file_name || `Media #${idx + 1}`;
               return `
-                <div class="upload-preview-item">
+                <div class="upload-preview-item" data-uid="${idx}" onpointerdown="app.handleFreeDragStart(event, ${idx})">
                   <img src="${thumbUrl}" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(item.file_name)}'">
                   <span class="upload-item-order">#${idx + 1}</span>
                   ${item.is_video ? `<span class="badge-flag video" style="top:26px;left:4px;font-size:0.6rem;z-index:3;">VIDEO</span>` : ''}
-                  <span class="upload-item-del" onclick="app.removeStudioImage(${idx})">
+                  <span class="upload-item-del" onclick="event.stopPropagation(); app.removeStudioImage(${idx})" title="Remove file">
                     <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
                   </span>
+                  <div class="upload-item-reorder">
+                    ${idx > 0 ? `
+                      <button type="button" class="reorder-btn" onclick="event.stopPropagation(); app.moveStudioImage(${idx}, -1)" title="Move Left / Earlier">&larr;</button>
+                    ` : `<div></div>`}
+                    ${idx < this.uploadQueue.length - 1 ? `
+                      <button type="button" class="reorder-btn" onclick="event.stopPropagation(); app.moveStudioImage(${idx}, 1)" title="Move Right / Later">&rarr;</button>
+                    ` : `<div></div>`}
+                  </div>
                   <div class="upload-item-name" title="${this.escape(displayName)}">${this.escape(displayName)}</div>
                 </div>
               `;
@@ -25067,6 +25849,105 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     
           removeStudioImage(idx) {
             this.uploadQueue.splice(idx, 1);
+            this.renderStudioPreviews();
+          }
+
+          handleFreeDragStart(e, idx) {
+            if (e.target.closest('.upload-item-del') || e.target.closest('.reorder-btn')) return;
+            if (e.button !== undefined && e.button !== 0) return;
+
+            const itemEl = e.currentTarget;
+            const rect = itemEl.getBoundingClientRect();
+
+            this.freeDrag = {
+              startX: e.clientX,
+              startY: e.clientY,
+              offsetX: e.clientX - rect.left,
+              offsetY: e.clientY - rect.top,
+              width: rect.width,
+              height: rect.height,
+              startIndex: idx,
+              itemEl: itemEl,
+              clone: null,
+              isDragging: false
+            };
+
+            window.addEventListener('pointermove', this.onFreeDragMove);
+            window.addEventListener('pointerup', this.onFreeDragEnd);
+            window.addEventListener('pointercancel', this.onFreeDragEnd);
+          }
+
+          handleFreeDragMove(e) {
+            if (!this.freeDrag) return;
+
+            if (!this.freeDrag.isDragging) {
+              const dist = Math.hypot(e.clientX - this.freeDrag.startX, e.clientY - this.freeDrag.startY);
+              if (dist < 6) return;
+
+              this.freeDrag.isDragging = true;
+              const clone = this.freeDrag.itemEl.cloneNode(true);
+              clone.classList.add('free-drag-clone');
+              clone.style.width = `${this.freeDrag.width}px`;
+              clone.style.height = `${this.freeDrag.height}px`;
+              clone.style.left = `${e.clientX - this.freeDrag.offsetX}px`;
+              clone.style.top = `${e.clientY - this.freeDrag.offsetY}px`;
+              document.body.appendChild(clone);
+              this.freeDrag.clone = clone;
+              this.freeDrag.itemEl.classList.add('free-drag-placeholder');
+            }
+
+            if (this.freeDrag.clone) {
+              this.freeDrag.clone.style.left = `${e.clientX - this.freeDrag.offsetX}px`;
+              this.freeDrag.clone.style.top = `${e.clientY - this.freeDrag.offsetY}px`;
+            }
+
+            const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('.upload-preview-item');
+            const grid = document.getElementById('studio-preview-grid');
+
+            if (target && grid && target !== this.freeDrag.itemEl && target.parentNode === grid) {
+              const targetRect = target.getBoundingClientRect();
+              const isAfter = (e.clientX > targetRect.left + targetRect.width / 2);
+              const nextSibling = isAfter ? target.nextSibling : target;
+
+              if (nextSibling !== this.freeDrag.itemEl) {
+                grid.insertBefore(this.freeDrag.itemEl, nextSibling);
+                Array.from(grid.querySelectorAll('.upload-preview-item')).forEach((el, i) => {
+                  const badge = el.querySelector('.upload-item-order');
+                  if (badge) badge.innerText = `#${i + 1}`;
+                });
+              }
+            }
+          }
+
+          handleFreeDragEnd(e) {
+            window.removeEventListener('pointermove', this.onFreeDragMove);
+            window.removeEventListener('pointerup', this.onFreeDragEnd);
+            window.removeEventListener('pointercancel', this.onFreeDragEnd);
+
+            if (!this.freeDrag) return;
+
+            if (this.freeDrag.clone) {
+              this.freeDrag.clone.remove();
+            }
+
+            if (this.freeDrag.isDragging) {
+              this.freeDrag.itemEl.classList.remove('free-drag-placeholder');
+              const grid = document.getElementById('studio-preview-grid');
+              if (grid) {
+                const newOrder = Array.from(grid.querySelectorAll('.upload-preview-item')).map(el => parseInt(el.dataset.uid, 10));
+                this.uploadQueue = newOrder.map(originalIdx => this.uploadQueue[originalIdx]);
+                this.renderStudioPreviews();
+              }
+            }
+
+            this.freeDrag = null;
+          }
+
+          moveStudioImage(fromIdx, delta) {
+            const toIdx = fromIdx + delta;
+            if (toIdx < 0 || toIdx >= this.uploadQueue.length) return;
+            const item = this.uploadQueue.splice(fromIdx, 1)[0];
+            this.uploadQueue.splice(toIdx, 0, item);
             this.renderStudioPreviews();
           }
     
@@ -37780,7 +38661,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.5';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.6';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
