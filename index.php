@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.6');
+define('APP_VERSION', '11.7');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 define('DAILY_UPLOAD_LIMIT', 10);
@@ -18191,17 +18191,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
   $config = [
     'app_name'        => 'PHPMusicPost',
-    'data_dir'        => $baseDir . '/uploads/artworks',
-    'upload_dir'      => $baseDir . '/uploads/artworks',
-    'thumb_dir'       => $baseDir . '/uploads/artworks/thumbs',
+    'data_dir'        => $baseDir . '/phpmusicpost/artworks',
+    'upload_dir'      => $baseDir . '/phpmusicpost/artworks',
+    'thumb_dir'       => $baseDir . '/phpmusicpost/artworks/thumbs',
     'chunk_dir'       => $baseDir . '/.tmp_uploads/chunks',
-    'version_dir'     => $baseDir . '/uploads/artworks/versions',
+    'version_dir'     => $baseDir . '/phpmusicpost/artworks/versions',
     'max_chunk_size'  => 2 * 1024 * 1024,
     'thumb_width'     => 480,
     'thumb_quality'   => 88,
     'allow_r18'       => true,
     'allowed_exts'    => ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'mp4', 'webm', 'mov', 'mkv', 'ogg']
   ];
+
+  // Automatically migrate existing legacy storage folder if present
+  $legacyUploadDir = $baseDir . '/uploads/artworks';
+  if (is_dir($legacyUploadDir) && !is_dir($config['upload_dir'])) {
+    @mkdir(dirname($config['upload_dir']), 0755, true);
+    @rename($legacyUploadDir, $config['upload_dir']);
+  }
   
   foreach ([$config['data_dir'], $config['upload_dir'], $config['thumb_dir'], $config['chunk_dir'], $config['version_dir']] as $dir) {
     if (!is_dir($dir)) {
@@ -18219,42 +18226,59 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         SELECT ai.id as img_id, ai.artwork_id, ai.file_name, ai.sort_order, a.user_id
         FROM artwork_images ai
         JOIN artworks a ON ai.artwork_id = a.id
-        WHERE ai.file_name NOT LIKE 'uid_%'
         ORDER BY ai.artwork_id ASC, ai.sort_order ASC
       ");
       $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
       if (empty($rows)) return;
 
-      $db->beginTransaction();
-      $updateStmt = $db->prepare("UPDATE artwork_images SET file_name = ? WHERE id = ?");
-
+      $updates = [];
       foreach ($rows as $row) {
-        $oldRel = $row['file_name'];
-        $oldFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $oldRel);
+        $oldRel = str_replace('\\', '/', $row['file_name']);
         $ext = strtolower(pathinfo($oldRel, PATHINFO_EXTENSION)) ?: 'jpg';
         $sortOrder = (int)$row['sort_order'];
         $userId = (int)$row['user_id'];
         $artId = (int)$row['artwork_id'];
 
         $newRel = "uid_" . $userId . "/data/imageid-" . $sortOrder . "/imageassets_" . $artId . "/" . $artId . "_i" . $sortOrder . "." . $ext;
-        $newFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $newRel);
+        if ($oldRel !== $newRel) {
+          $updates[] = [
+            'img_id'  => $row['img_id'],
+            'old_rel' => $oldRel,
+            'new_rel' => $newRel
+          ];
+        }
+      }
+
+      if (empty($updates)) return;
+
+      $db->beginTransaction();
+      $updateStmt = $db->prepare("UPDATE artwork_images SET file_name = ? WHERE id = ?");
+
+      foreach ($updates as $u) {
+        $oldFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $u['old_rel']);
+        if (!file_exists($oldFullPath)) {
+          $legacyCheck = $baseDir . '/uploads/artworks' . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $u['old_rel']);
+          if (file_exists($legacyCheck)) $oldFullPath = $legacyCheck;
+        }
+        $newFullPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $u['new_rel']);
 
         if (file_exists($oldFullPath) && is_file($oldFullPath)) {
           $newDir = dirname($newFullPath);
           if (!is_dir($newDir)) @mkdir($newDir, 0755, true);
           @rename($oldFullPath, $newFullPath);
 
-          $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($oldRel) . '.jpg';
-          if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($oldRel);
-          $newThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $newRel) . '.jpg';
+          $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $u['old_rel']) . '.jpg';
+          if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($u['old_rel']) . '.jpg';
+          if (!file_exists($oldThumb)) $oldThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($u['old_rel']);
+
+          $newThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $u['new_rel']) . '.jpg';
           $newThumbDir = dirname($newThumb);
           if (!is_dir($newThumbDir)) @mkdir($newThumbDir, 0755, true);
           if (file_exists($oldThumb)) {
             @rename($oldThumb, $newThumb);
           }
         }
-
-        $updateStmt->execute([$newRel, $row['img_id']]);
+        $updateStmt->execute([$u['new_rel'], $u['img_id']]);
       }
       $db->commit();
     } catch (Exception $e) {
@@ -18372,6 +18396,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       CREATE INDEX IF NOT EXISTS idx_tags_artwork ON tags(artwork_id);
       CREATE INDEX IF NOT EXISTS idx_comments_art ON comments(artwork_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_activity_user ON activity_log(user_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS encyclopedias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        name TEXT NOT NULL,
+        body TEXT DEFAULT '',
+        updated_at INTEGER NOT NULL,
+        updated_by INTEGER DEFAULT 0,
+        UNIQUE(category, name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_encyclopedias_cat_name ON encyclopedias(category, name);
+
+      CREATE TABLE IF NOT EXISTS encyclopedia_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        name TEXT NOT NULL,
+        body TEXT DEFAULT '',
+        edit_summary TEXT DEFAULT '',
+        user_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_enc_rev_cat_name ON encyclopedia_revisions(category, name, created_at DESC);
     ");
 
     try { $db->exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT '';"); } catch(Exception $e) {}
@@ -18390,14 +18436,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   }
 
   function getCurrentUser($db) {
-    $uid = (int)($_SESSION['user_id'] ?? 0);
-    if ($uid <= 0) return null;
+    if (session_status() === PHP_SESSION_NONE) {
+      @session_start();
+    }
+
+    // Synchronize parent PHPMusic session and prevent stale/swapped account exploits
+    $uid = 0;
+    if (!empty($_SESSION['user']) && is_array($_SESSION['user']) && !empty($_SESSION['user']['id'])) {
+      $uid = (int)$_SESSION['user']['id'];
+    } elseif (!empty($_SESSION['id']) && (int)$_SESSION['id'] > 0) {
+      $uid = (int)$_SESSION['id'];
+    } elseif (!empty($_SESSION['user_id']) && (int)$_SESSION['user_id'] > 0) {
+      $uid = (int)$_SESSION['user_id'];
+    }
+
+    if ($uid <= 0) {
+      unset($_SESSION['user_id'], $_SESSION['user_artist']);
+      return null;
+    }
+
+    // Keep session user_id strictly locked to the verified active account
+    $_SESSION['user_id'] = $uid;
 
     try {
       $stmt = $db->prepare("SELECT id, artist as artist_name, email, COALESCE(bio, '') as bio, COALESCE(twitter, '') as twitter, COALESCE(website, '') as website, COALESCE(is_admin, 0) as is_admin, COALESCE(banned, 0) as is_banned, COALESCE(status, 'user') as status, COALESCE(created_at, 0) as created_at FROM users WHERE id = ?");
       $stmt->execute([$uid]);
       $user = $stmt->fetch();
       if (!$user || !empty($user['is_banned'])) {
+        unset($_SESSION['user_id'], $_SESSION['user_artist']);
         return null;
       }
       
@@ -18496,6 +18562,38 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     return hash('sha256', strtolower(trim($email)));
   }
   
+  function getArtworkThumbnailPath($fileName, $config) {
+    if (empty($fileName)) return '';
+    global $baseDir;
+    $osRel = str_replace('/', DIRECTORY_SEPARATOR, $fileName);
+    $candidates = [
+      $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel . '.jpg',
+      $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel,
+      $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fileName) . '.jpg',
+      $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($fileName),
+      ($baseDir ?? '') . '/uploads/artworks/thumbs/' . $osRel . '.jpg',
+      ($baseDir ?? '') . '/uploads/artworks/thumbs/thumb_' . basename($fileName) . '.jpg'
+    ];
+    foreach ($candidates as $cand) {
+      if (file_exists($cand) && is_file($cand)) return $cand;
+    }
+    // Generate thumbnail on-demand from raw image if missing
+    $rawPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $osRel;
+    if (!file_exists($rawPath) && !empty($baseDir)) {
+      $legacyRaw = $baseDir . '/uploads/artworks/' . $osRel;
+      if (file_exists($legacyRaw)) $rawPath = $legacyRaw;
+    }
+    if (file_exists($rawPath) && is_file($rawPath)) {
+      $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel . '.jpg';
+      if (!is_dir(dirname($targetThumb))) @mkdir(dirname($targetThumb), 0755, true);
+      if (createThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
+        return $targetThumb;
+      }
+      return $rawPath;
+    }
+    return '';
+  }
+
   function compute_phash($path) {
     if (!file_exists($path)) return '';
     $info = @getimagesize($path);
@@ -18511,29 +18609,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       case 'image/bmp':  $src = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($path) : null; break;
     }
     if (!$src) return '';
-    $small = imagecreatetruecolor(8, 8);
-    imagecopyresampled($small, $src, 0, 0, 0, 0, 8, 8, imagesx($src), imagesy($src));
+
+    // Difference Hash (dHash): 9x8 grayscale matrix tracking structural gradients
+    $small = imagecreatetruecolor(9, 8);
+    imagecopyresampled($small, $src, 0, 0, 0, 0, 9, 8, imagesx($src), imagesy($src));
     imagedestroy($src);
-    $grays = [];
-    $total = 0;
+
+    $hash = '';
     for ($y = 0; $y < 8; $y++) {
-      for ($x = 0; $x < 8; $x++) {
+      $rowGrays = [];
+      for ($x = 0; $x < 9; $x++) {
         $rgb = imagecolorat($small, $x, $y);
-        $gray = (int)((($rgb >> 16 & 0xFF) * 0.299) + (($rgb >> 8 & 0xFF) * 0.587) + (($rgb & 0xFF) * 0.114));
-        $grays[] = $gray;
-        $total += $gray;
+        $rowGrays[] = (int)((($rgb >> 16 & 0xFF) * 0.299) + (($rgb >> 8 & 0xFF) * 0.587) + (($rgb & 0xFF) * 0.114));
+      }
+      for ($x = 0; $x < 8; $x++) {
+        $hash .= ($rowGrays[$x + 1] > $rowGrays[$x]) ? '1' : '0';
       }
     }
     imagedestroy($small);
-    $avg = $total / 64;
-    $hash = '';
-    foreach ($grays as $g) {
-      $hash .= ($g >= $avg) ? '1' : '0';
-    }
-    return $hash;
+    return 'd:' . $hash;
   }
   
   function hamming_distance($h1, $h2) {
+    if (is_string($h1) && strpos($h1, 'd:') === 0) $h1 = substr($h1, 2);
+    if (is_string($h2) && strpos($h2, 'd:') === 0) $h2 = substr($h2, 2);
     if (strlen($h1) !== 64 || strlen($h2) !== 64) return 64;
     $dist = 0;
     for ($i = 0; $i < 64; $i++) {
@@ -18874,23 +18973,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         ];
       }
 
-      // Parodies with count
+      // Parodies with count (separated by comma only)
       $parodiesWithCounts = [];
       if (!empty($chapters[0]['parodies'])) {
-        foreach (preg_split('/[,、\s]+/u', $chapters[0]['parodies'], -1, PREG_SPLIT_NO_EMPTY) as $pName) {
+        foreach (preg_split('/[,，、]+/u', $chapters[0]['parodies'], -1, PREG_SPLIT_NO_EMPTY) as $pName) {
+          $pClean = trim($pName);
+          if ($pClean === '') continue;
           $stP = $db->prepare("SELECT COUNT(*) FROM artworks WHERE type = 'manga' AND parodies LIKE ?");
-          $stP->execute(['%' . trim($pName) . '%']);
-          $parodiesWithCounts[] = ['name' => trim($pName), 'count' => max(1, (int)$stP->fetchColumn())];
+          $stP->execute(['%' . $pClean . '%']);
+          $parodiesWithCounts[] = ['name' => $pClean, 'count' => max(1, (int)$stP->fetchColumn())];
         }
       }
 
-      // Characters with count
+      // Characters with count (separated by comma only)
       $charactersWithCounts = [];
       if (!empty($chapters[0]['characters'])) {
-        foreach (preg_split('/[,、\s]+/u', $chapters[0]['characters'], -1, PREG_SPLIT_NO_EMPTY) as $cName) {
+        foreach (preg_split('/[,，、]+/u', $chapters[0]['characters'], -1, PREG_SPLIT_NO_EMPTY) as $cName) {
+          $cClean = trim($cName);
+          if ($cClean === '') continue;
           $stC = $db->prepare("SELECT COUNT(*) FROM artworks WHERE type = 'manga' AND characters LIKE ?");
-          $stC->execute(['%' . trim($cName) . '%']);
-          $charactersWithCounts[] = ['name' => trim($cName), 'count' => max(1, (int)$stC->fetchColumn())];
+          $stC->execute(['%' . $cClean . '%']);
+          $charactersWithCounts[] = ['name' => $cClean, 'count' => max(1, (int)$stC->fetchColumn())];
         }
       }
 
@@ -19027,15 +19130,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     }
 
     if ($action === 'check_url') {
-      $url = trim($_GET['url'] ?? '');
-      if ($url === '' || filter_var($url, FILTER_VALIDATE_URL) === false) {
-        jsonResponse(['valid' => false, 'duplicate' => null]);
+      $rawUrls = trim($_GET['url'] ?? '');
+      $urls = preg_split('/[\r\n,\s]+/u', $rawUrls, -1, PREG_SPLIT_NO_EMPTY);
+      $dup = null;
+      $hasValid = false;
+
+      foreach ($urls as $u) {
+        if (filter_var($u, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $u)) {
+          $hasValid = true;
+          $stmt = $db->prepare("SELECT id, title FROM artworks WHERE source_url LIKE ? LIMIT 1");
+          $stmt->execute(['%' . $u . '%']);
+          $found = $stmt->fetch();
+          if ($found) {
+            $dup = $found;
+            break;
+          }
+        }
       }
-      $stmt = $db->prepare("SELECT id, title FROM artworks WHERE source_url = ? AND source_url != '' LIMIT 1");
-      $stmt->execute([$url]);
-      $dup = $stmt->fetch();
+
       jsonResponse([
-        'valid'     => true,
+        'valid'     => $hasValid,
         'duplicate' => $dup ?: null
       ]);
     }
@@ -19228,15 +19342,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $rating = in_array($_POST['rating'] ?? '', ['all', 'r18']) ? $_POST['rating'] : 'all';
       $isAi = !empty($_POST['is_ai']) ? 1 : 0;
       $isOriginal = isset($_POST['is_original']) ? (!empty($_POST['is_original']) ? 1 : 0) : 1;
-      $tools = trim($_POST['tools'] ?? '');
-      $parodies = trim($_POST['parodies'] ?? '');
-      $characters = trim($_POST['characters'] ?? '');
-      $sourceUrl = trim($_POST['source_url'] ?? '');
-      if ($sourceUrl !== '') {
-        if (!filter_var($sourceUrl, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $sourceUrl)) {
-          jsonResponse(['error' => 'Invalid source URL. Only HTTP and HTTPS URLs are permitted.'], 400);
+      // Separate tags, characters, parodies, and tools by comma only (never by space)
+      $cleanCommaList = function($str) {
+        $parts = preg_split('/[,，、]+/u', $str, -1, PREG_SPLIT_NO_EMPTY);
+        return implode(', ', array_unique(array_filter(array_map('trim', $parts))));
+      };
+
+      $tools = $cleanCommaList($_POST['tools'] ?? '');
+      $parodies = $cleanCommaList($_POST['parodies'] ?? '');
+      $characters = $cleanCommaList($_POST['characters'] ?? '');
+      $rawSourceUrls = trim($_POST['source_url'] ?? '');
+      $cleanSourceUrls = [];
+      if ($rawSourceUrls !== '') {
+        $urlCandidates = preg_split('/[\r\n,\s]+/u', $rawSourceUrls, -1, PREG_SPLIT_NO_EMPTY);
+        foreach ($urlCandidates as $u) {
+          $u = trim($u);
+          if ($u === '') continue;
+          if (!filter_var($u, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $u)) {
+            jsonResponse(['error' => "Invalid source URL '{$u}'. Only valid HTTP and HTTPS URLs are permitted."], 400);
+          }
+          $cleanSourceUrls[] = $u;
         }
       }
+      $sourceUrl = implode("\n", array_unique($cleanSourceUrls));
       $rawTags = trim($_POST['tags'] ?? '');
       $postMode = trim($_POST['post_mode'] ?? 'single');
       $imagesJson = $_POST['images'] ?? '[]';
@@ -19265,12 +19393,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         }
       }
   
-      // Rule 2: Maximum 10 images/day for separate individual posts
+      // Rule 2: Maximum 10 images/day for separate individual posts (Bypassed for Admins)
       $isSeparateIndividual = ($postMode === 'batch' && count($images) > 1) || count($images) === 1;
-      if ($artworkId === 0 && $isSeparateIndividual) {
-        $newIndividualCount = ($postMode === 'batch') ? count($images) : 1;
+      if (empty($user['is_admin']) && $artworkId === 0 && $isSeparateIndividual) {
         $since24h = time() - 86400;
-  
+
         $stmtDaily = $db->prepare("
           SELECT COUNT(*) FROM artworks a
           WHERE a.user_id = ? AND a.created_at >= ?
@@ -19278,11 +19405,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         ");
         $stmtDaily->execute([$user['id'], $since24h]);
         $dailyIndividualCount = (int)$stmtDaily->fetchColumn();
-  
-        if (($dailyIndividualCount + $newIndividualCount) > 10) {
-          $remaining = max(0, 10 - $dailyIndividualCount);
+
+        if ($dailyIndividualCount >= 10) {
           jsonResponse([
-            'error' => "Daily limit reached for separate individual posts (max 10 images/day). You have published {$dailyIndividualCount}/10 in the last 24 hours (remaining: {$remaining})."
+            'error' => "Daily limit reached for separate individual posts (10/10 published in the last 24 hours). Please wait for the daily reset or publish as a single multi-page post."
           ], 429);
         }
       }
@@ -19290,7 +19416,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $db->beginTransaction();
       try {
         $now = time();
-        $tagsArray = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,#、\s]+/u', $rawTags)))));
+        $tagsArray = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,，、]+/u', $rawTags)))));
         $cleanTagsStr = implode(', ', $tagsArray);
   
         if ($artworkId === 0 && $postMode === 'batch' && count($images) > 1) {
@@ -19673,55 +19799,138 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
     if ($action === 'similar_search') {
       $sourceId = intval($_GET['source_id'] ?? ($_POST['source_id'] ?? 0));
+      $imageId = intval($_GET['image_id'] ?? ($_POST['image_id'] ?? 0));
+      $sortOrder = isset($_GET['sort_order']) ? intval($_GET['sort_order']) : (isset($_GET['image_index']) ? intval($_GET['image_index']) : -1);
       $targetHash = '';
       $sourceArt = null;
-  
+      $targetImage = null;
+
       if ($sourceId > 0) {
-        $st = $db->prepare("SELECT a.*, (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file FROM artworks a WHERE a.id = ?");
+        $st = $db->prepare("SELECT a.* FROM artworks a WHERE a.id = ?");
         $st->execute([$sourceId]);
         $sourceArt = $st->fetch();
+
         if ($sourceArt) {
-          $targetHash = $sourceArt['phash'];
-          if (empty($targetHash) && !empty($sourceArt['cover_file'])) {
-            $tPath = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . $sourceArt['cover_file'] . '.jpg';
-            if (!file_exists($tPath)) $tPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $sourceArt['cover_file'];
+          $imgsSt = $db->prepare("
+            SELECT id, file_name, sort_order, mime_type, phash
+            FROM artwork_images
+            WHERE artwork_id = ?
+            ORDER BY sort_order ASC, id ASC
+          ");
+          $imgsSt->execute([$sourceId]);
+          $rawImgs = $imgsSt->fetchAll();
+          $imagePages = array_values(array_filter($rawImgs, function($im) {
+            return empty($im['mime_type']) || strpos($im['mime_type'], 'video/') !== 0;
+          }));
+
+          if (empty($imagePages)) {
+            jsonResponse(['error' => 'Visual similarity search is only available for images.'], 400);
+          }
+
+          if ($imageId > 0) {
+            foreach ($imagePages as $im) {
+              if ((int)$im['id'] === $imageId) { $targetImage = $im; break; }
+            }
+          } elseif ($sortOrder >= 0 && isset($imagePages[$sortOrder])) {
+            $targetImage = $imagePages[$sortOrder];
+          }
+
+          if (!$targetImage) {
+            $targetImage = $imagePages[0];
+          }
+
+          $sourceArt['cover_file'] = $targetImage['file_name'];
+          $sourceArt['selected_sort_order'] = (int)$targetImage['sort_order'];
+          $sourceArt['selected_image_id'] = (int)$targetImage['id'];
+          $sourceArt['all_images'] = $imagePages;
+
+          // Always resolve via thumbnail to guarantee accurate gradient dHash
+          $tPath = getArtworkThumbnailPath($targetImage['file_name'], $config);
+          if ($tPath) {
             $targetHash = compute_phash($tPath);
             if ($targetHash) {
-              $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?")->execute([$targetHash, $sourceId]);
+              $db->prepare("UPDATE artwork_images SET phash = ? WHERE id = ?")->execute([$targetHash, $targetImage['id']]);
+              if ((int)$targetImage['sort_order'] === 0) {
+                $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?")->execute([$targetHash, $sourceId]);
+              }
             }
           }
         }
       } elseif (isset($_FILES['similar_file']) && $_FILES['similar_file']['error'] === 0) {
-        $targetHash = compute_phash($_FILES['similar_file']['tmp_name']);
-      }
-  
-      if (empty($targetHash)) {
-        jsonResponse(['error' => 'Could not compute visual perceptual hash for target image.'], 400);
-      }
-  
-      $all = $db->query("
-        SELECT a.id, a.title, a.type, a.rating, a.phash,
-          (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file,
-          (SELECT COUNT(*) FROM artwork_images WHERE artwork_id = a.id) as page_count,
-          u.artist as artist_name
-        FROM artworks a
-        JOIN users u ON a.user_id = u.id
-        WHERE a.phash IS NOT NULL AND a.phash != ''
-      ")->fetchAll();
-  
-      $results = [];
-      foreach ($all as $item) {
-        if ($sourceArt && $item['id'] == $sourceArt['id']) continue;
-        $dist = hamming_distance($targetHash, $item['phash']);
-        if ($dist <= 18) {
-          $similarity = round((1 - ($dist / 64)) * 100, 1);
-          $item['distance'] = $dist;
-          $item['similarity'] = $similarity;
-          $results[] = $item;
+        $tmpUpload = $_FILES['similar_file']['tmp_name'];
+        $tempThumb = $config['chunk_dir'] . DIRECTORY_SEPARATOR . 'sim_tmp_' . bin2hex(random_bytes(6)) . '.jpg';
+        if (createThumbnail($tmpUpload, $tempThumb, $config['thumb_width'], $config['thumb_quality'])) {
+          $targetHash = compute_phash($tempThumb);
+          @unlink($tempThumb);
+        } else {
+          $targetHash = compute_phash($tmpUpload);
         }
       }
-  
+
+      if (empty($targetHash)) {
+        jsonResponse(['error' => 'Could not compute visual perceptual hash for target thumbnail.'], 400);
+      }
+
+      // Search across all artwork images while strictly excluding the current source post
+      $allImages = $db->query("
+        SELECT ai.id as image_id, ai.artwork_id, ai.file_name, ai.sort_order, ai.phash,
+               a.id as art_id, a.title, a.type, a.rating, u.artist as artist_name
+        FROM artwork_images ai
+        JOIN artworks a ON ai.artwork_id = a.id
+        JOIN users u ON a.user_id = u.id
+        WHERE a.type != 'video' AND (ai.mime_type IS NULL OR ai.mime_type NOT LIKE 'video/%')
+      ")->fetchAll();
+
+      $matchedPosts = [];
+      foreach ($allImages as $item) {
+        $artId = (int)($item['artwork_id'] ?? $item['art_id']);
+
+        // Strictly exclude the current artwork post from matching itself
+        if ($sourceId > 0 && $artId === $sourceId) continue;
+
+        $imgHash = $item['phash'] ?? '';
+
+        // Auto-upgrade legacy aHash to dHash if not yet prefixed with 'd:'
+        if (empty($imgHash) || strpos($imgHash, 'd:') !== 0 || strlen($imgHash) !== 66) {
+          $tPath = getArtworkThumbnailPath($item['file_name'], $config);
+          if ($tPath) {
+            $imgHash = compute_phash($tPath);
+            if ($imgHash) {
+              $db->prepare("UPDATE artwork_images SET phash = ? WHERE id = ?")->execute([$imgHash, $item['image_id']]);
+              if ((int)$item['sort_order'] === 0) {
+                $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?")->execute([$imgHash, $artId]);
+              }
+            }
+          }
+        }
+
+        if (empty($imgHash) || strpos($imgHash, 'd:') !== 0) continue;
+
+        $dist = hamming_distance($targetHash, $imgHash);
+
+        // Matching threshold: distance <= 14 out of 64 bits (>= 78.1% visual similarity)
+        // Identical/duplicate images have dist 0 to 2 (97% - 100% Match)
+        if ($dist <= 14) {
+          $similarity = round((1 - ($dist / 64)) * 100, 1);
+
+          if (!isset($matchedPosts[$artId]) || $dist < $matchedPosts[$artId]['distance']) {
+            $matchedPosts[$artId] = [
+              'id'          => $artId,
+              'title'       => $item['title'],
+              'type'        => $item['type'],
+              'rating'      => $item['rating'],
+              'cover_file'  => $item['file_name'],
+              'artist_name' => $item['artist_name'],
+              'distance'    => $dist,
+              'similarity'  => $similarity
+            ];
+          }
+        }
+      }
+
+      $results = array_values($matchedPosts);
       usort($results, fn($a, $b) => $a['distance'] <=> $b['distance']);
+
       jsonResponse([
         'target_hash' => $targetHash,
         'source_art'  => $sourceArt,
@@ -19866,15 +20075,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     }
   
     if ($action === 'artwork_export') {
+      $user = requireAuth($db);
       $artworkId = intval($_GET['id'] ?? 0);
       $stmt = $db->prepare("SELECT * FROM artworks WHERE id = ?");
       $stmt->execute([$artworkId]);
       $art = $stmt->fetch();
       if (!$art) jsonResponse(['error' => 'Artwork not found.'], 404);
 
+      // Security check: Only post owner or administrators can export full raw packages
+      if ((int)$art['user_id'] !== (int)$user['id'] && empty($user['is_admin'])) {
+        jsonResponse(['error' => 'Access denied: Only the author or an admin can export this package.'], 403);
+      }
+
       if (!class_exists('ZipArchive')) {
         jsonResponse(['error' => 'Server ZipArchive extension is required.'], 500);
       }
+
+      // Prevent server execution timeouts during large package compilation
+      @set_time_limit(0);
+      @ini_set('max_execution_time', '0');
+      if (function_exists('apache_setenv')) @apache_setenv('no-gzip', '1');
 
       $stmtImgs = $db->prepare("SELECT * FROM artwork_images WHERE artwork_id = ? ORDER BY sort_order ASC, id ASC");
       $stmtImgs->execute([$artworkId]);
@@ -20084,7 +20304,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?")->execute([$leadHash, $newArtId]);
         }
 
-        $tagsArray = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,#、\s]+/u', $rawTags)))));
+        $tagsArray = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,、_]+/u', $rawTags)))));
         $tagStmt = $db->prepare("INSERT INTO tags (artwork_id, tag_name) VALUES (?, ?)");
         foreach ($tagsArray as $tName) {
           if ($tName !== '') $tagStmt->execute([$newArtId, mb_substr($tName, 0, 40)]);
@@ -20350,64 +20570,331 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       }
     }
   
+    if ($action === 'encyclopedia_captcha') {
+      if (session_status() === PHP_SESSION_NONE) @session_start();
+      $num1 = mt_rand(4, 25);
+      $num2 = mt_rand(1, 15);
+      $ops = ['+', '-'];
+      $op = $ops[array_rand($ops)];
+      if ($op === '-' && $num2 > $num1) {
+        $t = $num1; $num1 = $num2; $num2 = $t;
+      }
+      $ans = ($op === '+') ? ($num1 + $num2) : ($num1 - $num2);
+      $_SESSION['enc_captcha'] = (string)$ans;
+
+      // Distorted background noise lines to deter simple OCR bots
+      $lines = '';
+      for ($i = 0; $i < 3; $i++) {
+        $x1 = mt_rand(0, 140); $y1 = mt_rand(0, 38);
+        $x2 = mt_rand(0, 140); $y2 = mt_rand(0, 38);
+        $lines .= "<line x1='{$x1}' y1='{$y1}' x2='{$x2}' y2='{$y2}' stroke='rgba(255,255,255,0.1)' stroke-width='1.5'/>";
+      }
+
+      $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="140" height="38" viewBox="0 0 140 38">
+        <rect width="100%" height="100%" fill="#14141a" rx="8"/>
+        ' . $lines . '
+        <text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-family="monospace" font-size="18" font-weight="800" fill="#f43f5e" letter-spacing="2">' . $num1 . ' ' . $op . ' ' . $num2 . ' = ?</text>
+      </svg>';
+
+      header('Content-Type: image/svg+xml');
+      header('Cache-Control: no-cache, no-store, must-revalidate');
+      echo $svg;
+      exit;
+    }
+
+    if ($action === 'encyclopedia_get') {
+      $category = trim($_GET['category'] ?? '');
+      $name = trim($_GET['name'] ?? '');
+      if (!in_array($category, ['tag', 'character', 'parody']) || $name === '') {
+        jsonResponse(['error' => 'Invalid category or name.'], 400);
+      }
+
+      $stmt = $db->prepare("
+        SELECT e.*, u.artist as editor_name,
+          (SELECT COUNT(*) FROM encyclopedia_revisions WHERE category = e.category AND name = e.name) as revision_count
+        FROM encyclopedias e
+        LEFT JOIN users u ON e.updated_by = u.id
+        WHERE e.category = ? AND e.name = ?
+      ");
+      $stmt->execute([$category, $name]);
+      $entry = $stmt->fetch();
+
+      if (!$entry) {
+        $entry = [
+          'id'             => 0,
+          'category'       => $category,
+          'name'           => $name,
+          'body'           => '',
+          'updated_at'     => 0,
+          'updated_by'     => 0,
+          'editor_name'    => '',
+          'revision_count' => 0
+        ];
+      } else {
+        $entry['revision_count'] = max(1, (int)$entry['revision_count']);
+      }
+
+      // Query the most-viewed artwork associated with this tag/character/parody (Like Pixiv Encyclopedia)
+      $topArt = null;
+      if ($category === 'tag') {
+        $stTop = $db->prepare("
+          SELECT a.id, a.title, a.view_count,
+            (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file
+          FROM artworks a
+          JOIN tags t ON t.artwork_id = a.id
+          WHERE t.tag_name = ? AND a.type != 'video'
+          ORDER BY a.view_count DESC, a.like_count DESC, a.created_at DESC
+          LIMIT 1
+        ");
+        $stTop->execute([$name]);
+        $topArt = $stTop->fetch();
+      } elseif ($category === 'character') {
+        $stTop = $db->prepare("
+          SELECT a.id, a.title, a.view_count,
+            (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file
+          FROM artworks a
+          WHERE a.characters LIKE ? AND a.type != 'video'
+          ORDER BY a.view_count DESC, a.like_count DESC, a.created_at DESC
+          LIMIT 1
+        ");
+        $stTop->execute(['%' . $name . '%']);
+        $topArt = $stTop->fetch();
+      } elseif ($category === 'parody') {
+        $stTop = $db->prepare("
+          SELECT a.id, a.title, a.view_count,
+            (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC, id ASC LIMIT 1) as cover_file
+          FROM artworks a
+          WHERE (a.parodies LIKE ? OR a.series_name LIKE ?) AND a.type != 'video'
+          ORDER BY a.view_count DESC, a.like_count DESC, a.created_at DESC
+          LIMIT 1
+        ");
+        $stTop->execute(['%' . $name . '%', '%' . $name . '%']);
+        $topArt = $stTop->fetch();
+      }
+
+      $entry['top_artwork_id'] = $topArt ? (int)$topArt['id'] : 0;
+      $entry['top_artwork_title'] = $topArt ? $topArt['title'] : '';
+      $entry['top_artwork_views'] = $topArt ? (int)$topArt['view_count'] : 0;
+      $entry['top_artwork_cover'] = $topArt ? $topArt['cover_file'] : '';
+
+      jsonResponse($entry);
+    }
+
+    if ($action === 'encyclopedia_save') {
+      verifyCsrfToken();
+      // Every registered user is authorized to edit, create, or update wiki articles
+      $user = requireAuth($db);
+
+      // Verify custom captcha to prevent automated spam
+      $captchaInput = trim($_POST['captcha'] ?? '');
+      $expectedCaptcha = $_SESSION['enc_captcha'] ?? '';
+      unset($_SESSION['enc_captcha']); // One-time use token
+
+      if ($expectedCaptcha === '' || $captchaInput !== $expectedCaptcha) {
+        jsonResponse(['error' => 'Incorrect security captcha. Please solve the calculation and try again.'], 400);
+      }
+
+      // Limit: 10 encyclopedia edits per 24 hours (Bypassed for Admins)
+      if (empty($user['is_admin'])) {
+        $since24h = time() - 86400;
+        $stmtEdits = $db->prepare("
+          SELECT COUNT(*) FROM encyclopedia_revisions
+          WHERE user_id = ? AND created_at >= ?
+        ");
+        $stmtEdits->execute([$user['id'], $since24h]);
+        $dailyEditCount = (int)$stmtEdits->fetchColumn();
+
+        if ($dailyEditCount >= 10) {
+          jsonResponse([
+            'error' => "Daily limit reached: You can edit the encyclopedia up to 10 times per 24 hours ({$dailyEditCount}/10 used). Please try again later."
+          ], 429);
+        }
+      }
+
+      $category = trim($_POST['category'] ?? '');
+      $name = trim($_POST['name'] ?? '');
+      $body = trim($_POST['body'] ?? '');
+      $summary = mb_substr(trim($_POST['edit_summary'] ?? ''), 0, 255);
+      if ($summary === '') $summary = 'Updated article content';
+
+      if (!in_array($category, ['tag', 'character', 'parody']) || $name === '') {
+        jsonResponse(['error' => 'Invalid category or name.'], 400);
+      }
+
+      $now = time();
+      $stmt = $db->prepare("
+        REPLACE INTO encyclopedias (category, name, body, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?)
+      ");
+      $stmt->execute([$category, $name, $body, $now, $user['id']]);
+
+      // Record revision entry in wiki edit log
+      $revStmt = $db->prepare("
+        INSERT INTO encyclopedia_revisions (category, name, body, edit_summary, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      ");
+      $revStmt->execute([$category, $name, $body, $summary, $user['id'], $now]);
+
+      logActivity($db, $user['id'], 'encyclopedia_edit', 0, "Edited {$category} encyclopedia: {$name} ({$summary})");
+      jsonResponse([
+        'success'     => true,
+        'category'    => $category,
+        'name'        => $name,
+        'body'        => $body,
+        'updated_at'  => $now,
+        'editor_name' => $user['artist_name']
+      ]);
+    }
+
+    if ($action === 'encyclopedia_history') {
+      $category = trim($_GET['category'] ?? '');
+      $name = trim($_GET['name'] ?? '');
+      if (!in_array($category, ['tag', 'character', 'parody']) || $name === '') {
+        jsonResponse(['error' => 'Invalid category or name.'], 400);
+      }
+
+      $stmt = $db->prepare("
+        SELECT r.id, r.edit_summary, r.created_at, u.id as user_id, u.artist as editor_name
+        FROM encyclopedia_revisions r
+        LEFT JOIN users u ON r.user_id = u.id
+        WHERE r.category = ? AND r.name = ?
+        ORDER BY r.created_at DESC
+        LIMIT 30
+      ");
+      $stmt->execute([$category, $name]);
+      $history = $stmt->fetchAll();
+
+      jsonResponse([
+        'category' => $category,
+        'name'     => $name,
+        'history'  => $history ?: []
+      ]);
+    }
+
     if ($action === 'popular_tags') {
       try {
-        $stmt = $db->query("
-          SELECT tag_name, COUNT(*) as tag_count
+        $tagStmt = $db->query("
+          SELECT tag_name, COUNT(DISTINCT artwork_id) as tag_count
           FROM tags
           GROUP BY tag_name
           ORDER BY tag_count DESC
-          LIMIT 25
+          LIMIT 10
         ");
-        $tags = $stmt ? $stmt->fetchAll() : [];
-        jsonResponse(['tags' => $tags ?: []]);
+        $tags = $tagStmt ? $tagStmt->fetchAll() : [];
+
+        // Top 10 Characters
+        $charRows = $db->query("SELECT characters FROM artworks WHERE characters != ''")->fetchAll(PDO::FETCH_COLUMN);
+        $charCounts = [];
+        foreach ($charRows as $r) {
+          foreach (preg_split('/[,、_]+/u', $r, -1, PREG_SPLIT_NO_EMPTY) as $c) {
+            $t = trim($c);
+            if ($t !== '') $charCounts[$t] = ($charCounts[$t] ?? 0) + 1;
+          }
+        }
+        arsort($charCounts);
+        $topChars = [];
+        foreach (array_slice($charCounts, 0, 10, true) as $name => $count) {
+          $topChars[] = ['name' => $name, 'count' => $count];
+        }
+
+        // Top 10 Parodies / Series
+        $seriesRows = $db->query("SELECT parodies FROM artworks WHERE parodies != ''")->fetchAll(PDO::FETCH_COLUMN);
+        $seriesCounts = [];
+        foreach ($seriesRows as $r) {
+          foreach (preg_split('/[,、_]+/u', $r, -1, PREG_SPLIT_NO_EMPTY) as $s) {
+            $t = trim($s);
+            if ($t !== '') $seriesCounts[$t] = ($seriesCounts[$t] ?? 0) + 1;
+          }
+        }
+        arsort($seriesCounts);
+        $topSeries = [];
+        foreach (array_slice($seriesCounts, 0, 10, true) as $name => $count) {
+          $topSeries[] = ['name' => $name, 'count' => $count];
+        }
+
+        jsonResponse([
+          'tags'       => $tags ?: [],
+          'characters' => $topChars,
+          'series'     => $topSeries
+        ]);
       } catch (Exception $e) {
-        jsonResponse(['tags' => []]);
+        jsonResponse(['tags' => [], 'characters' => [], 'series' => []]);
       }
     }
   
     if ($action === 'tags_all') {
       $stmt = $db->query("
-        SELECT tag_name, COUNT(*) as tag_count
-        FROM tags
-        GROUP BY tag_name
-        ORDER BY tag_name ASC
+        SELECT t.tag_name, COUNT(DISTINCT t.artwork_id) as tag_count,
+          (SELECT ai.file_name FROM artwork_images ai 
+           JOIN artworks a ON a.id = ai.artwork_id 
+           JOIN tags t2 ON t2.artwork_id = a.id 
+           WHERE t2.tag_name = t.tag_name 
+           ORDER BY a.created_at DESC, ai.sort_order ASC LIMIT 1) as cover_file
+        FROM tags t
+        GROUP BY t.tag_name
+        ORDER BY tag_count DESC, t.tag_name ASC
       ");
       jsonResponse(['tags' => $stmt->fetchAll()]);
     }
   
     if ($action === 'characters_all') {
-      $rows = $db->query("SELECT characters FROM artworks WHERE characters != ''")->fetchAll(PDO::FETCH_COLUMN);
+      $rows = $db->query("
+        SELECT a.id, a.characters, a.created_at,
+          (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC LIMIT 1) as cover_file
+        FROM artworks a
+        WHERE a.characters != ''
+        ORDER BY a.created_at DESC
+      ")->fetchAll();
+
       $counts = [];
+      $covers = [];
       foreach ($rows as $r) {
-        $items = preg_split('/[,、\s]+/u', $r, -1, PREG_SPLIT_NO_EMPTY);
+        $items = preg_split('/[,，、]+/u', $r['characters'], -1, PREG_SPLIT_NO_EMPTY);
         foreach ($items as $item) {
           $t = trim($item);
-          if ($t !== '') $counts[$t] = ($counts[$t] ?? 0) + 1;
+          if ($t !== '') {
+            $counts[$t] = ($counts[$t] ?? 0) + 1;
+            if (empty($covers[$t]) && !empty($r['cover_file'])) {
+              $covers[$t] = $r['cover_file'];
+            }
+          }
         }
       }
       arsort($counts);
       $list = [];
       foreach ($counts as $name => $count) {
-        $list[] = ['name' => $name, 'count' => $count];
+        $list[] = ['name' => $name, 'count' => $count, 'cover_file' => $covers[$name] ?? ''];
       }
       jsonResponse(['characters' => $list]);
     }
   
     if ($action === 'series_all') {
-      $rows = $db->query("SELECT parodies FROM artworks WHERE parodies != ''")->fetchAll(PDO::FETCH_COLUMN);
+      $rows = $db->query("
+        SELECT a.id, a.parodies, a.created_at,
+          (SELECT file_name FROM artwork_images WHERE artwork_id = a.id ORDER BY sort_order ASC LIMIT 1) as cover_file
+        FROM artworks a
+        WHERE a.parodies != ''
+        ORDER BY a.created_at DESC
+      ")->fetchAll();
+
       $counts = [];
+      $covers = [];
       foreach ($rows as $r) {
-        $items = preg_split('/[,、\s]+/u', $r, -1, PREG_SPLIT_NO_EMPTY);
+        $items = preg_split('/[,，、]+/u', $r['parodies'], -1, PREG_SPLIT_NO_EMPTY);
         foreach ($items as $item) {
           $t = trim($item);
-          if ($t !== '') $counts[$t] = ($counts[$t] ?? 0) + 1;
+          if ($t !== '') {
+            $counts[$t] = ($counts[$t] ?? 0) + 1;
+            if (empty($covers[$t]) && !empty($r['cover_file'])) {
+              $covers[$t] = $r['cover_file'];
+            }
+          }
         }
       }
       arsort($counts);
       $list = [];
       foreach ($counts as $name => $count) {
-        $list[] = ['name' => $name, 'count' => $count];
+        $list[] = ['name' => $name, 'count' => $count, 'cover_file' => $covers[$name] ?? ''];
       }
       jsonResponse(['series' => $list]);
     }
@@ -21623,6 +22110,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           touch-action: none;
           transition: transform 0.18s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.18s, opacity 0.15s;
         }
+        .upload-preview-item img {
+          pointer-events: none !important;
+          -webkit-user-drag: none !important;
+          user-select: none !important;
+        }
         .upload-preview-item:active {
           cursor: grabbing;
         }
@@ -21649,6 +22141,183 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           height: 100%;
           object-fit: cover;
           display: block;
+          pointer-events: none !important;
+        }
+
+        /* Encyclopedia Components */
+        .encyclopedia-card {
+          background: var(--bg-surface);
+          border: 1px solid var(--border-subtle);
+          border-radius: 14px;
+          padding: 1.2rem 1.4rem;
+          margin-bottom: 1.4rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.75rem;
+          box-shadow: var(--shadow-sm);
+        }
+        .encyclopedia-main-row {
+          display: flex;
+          gap: 1.2rem;
+          align-items: flex-start;
+        }
+        .encyclopedia-preview-thumb {
+          width: 120px;
+          height: 120px;
+          aspect-ratio: 1 / 1;
+          border-radius: 10px;
+          overflow: hidden;
+          background: #08080a;
+          border: 1px solid var(--border-subtle);
+          position: relative;
+          cursor: pointer;
+          flex-shrink: 0;
+          transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .encyclopedia-preview-thumb:hover {
+          transform: translateY(-2px);
+          border-color: var(--accent);
+          box-shadow: var(--shadow-md);
+        }
+        .encyclopedia-preview-thumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+          transition: transform 0.3s ease;
+        }
+        .encyclopedia-preview-thumb:hover img {
+          transform: scale(1.06);
+        }
+        .encyclopedia-preview-badge {
+          position: absolute;
+          bottom: 4px;
+          left: 4px;
+          right: 4px;
+          background: rgba(0, 0, 0, 0.75);
+          backdrop-filter: blur(4px);
+          color: #ffffff;
+          font-size: 0.64rem;
+          font-weight: 800;
+          padding: 2px 4px;
+          border-radius: 4px;
+          text-align: center;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        @media (max-width: 680px) {
+          .encyclopedia-main-row {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .encyclopedia-preview-thumb {
+            width: 100%;
+            max-width: 140px;
+            height: auto;
+            margin: 0 auto;
+          }
+        }
+        .encyclopedia-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          flex-wrap: wrap;
+          gap: 0.6rem;
+        }
+        .encyclopedia-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.35rem;
+          font-size: 0.72rem;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 0.2rem 0.6rem;
+          border-radius: 6px;
+        }
+        .encyclopedia-badge.tag { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .encyclopedia-badge.character { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
+        .encyclopedia-badge.parody { background: rgba(56, 189, 248, 0.15); color: #38bdf8; }
+        .encyclopedia-body {
+          font-size: 0.9rem;
+          line-height: 1.65;
+          color: var(--text-primary);
+        }
+        .encyclopedia-body p { margin-bottom: 0.6rem; }
+        .encyclopedia-body p:last-child { margin-bottom: 0; }
+        .encyclopedia-meta {
+          font-size: 0.75rem;
+          color: var(--text-muted);
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+        }
+
+        /* Directory Visual Cards with Background Art */
+        .directory-card-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+          gap: 1rem;
+        }
+        .dir-bg-card {
+          position: relative;
+          height: 110px;
+          border-radius: 12px;
+          overflow: hidden;
+          border: 1px solid var(--border-subtle);
+          background: var(--bg-surface-elevated);
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-end;
+          padding: 0.85rem;
+          transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .dir-bg-card:hover {
+          transform: translateY(-3px);
+          border-color: var(--accent);
+          box-shadow: var(--shadow-md);
+        }
+        .dir-bg-img {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          filter: brightness(0.45);
+          transition: transform 0.3s ease, filter 0.3s ease;
+        }
+        .dir-bg-card:hover .dir-bg-img {
+          transform: scale(1.06);
+          filter: brightness(0.6);
+        }
+        .dir-bg-overlay {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(180deg, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.85) 100%);
+          pointer-events: none;
+        }
+        .dir-bg-info {
+          position: relative;
+          z-index: 2;
+          display: flex;
+          flex-direction: column;
+          gap: 0.15rem;
+        }
+        .dir-bg-title {
+          font-weight: 800;
+          font-size: 0.95rem;
+          color: #ffffff;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+        }
+        .dir-bg-count {
+          font-size: 0.75rem;
+          color: rgba(255, 255, 255, 0.7);
+          font-weight: 600;
         }
         .upload-item-reorder {
           position: absolute;
@@ -22736,15 +23405,47 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             try {
               const res = await this.api('popular_tags');
               const box = document.getElementById('sidebar-popular-tags');
-              box.innerHTML = res.tags.map(t => `
-                <div class="nav-item" style="padding:0.4rem 0.9rem; font-size:0.82rem;" onclick="app.nav('#/explore?tag=' + encodeURIComponent('${this.escape(t.tag_name)}'))">
-                  <span style="display:flex; align-items:center; gap:0.35rem;">
-                    <svg viewBox="0 0 24 24" style="width:14px; height:14px;"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
-                    ${this.escape(t.tag_name)}
-                  </span>
-                  <span style="margin-left:auto; font-size:0.75rem; color:var(--text-muted);">${t.tag_count}</span>
-                </div>
-              `).join('');
+              let html = '';
+
+              if (res.tags && res.tags.length) {
+                html += res.tags.map(t => `
+                  <div class="nav-item" style="padding:0.35rem 0.85rem; font-size:0.82rem;" onclick="app.nav('#/explore?tag=' + encodeURIComponent('${this.escape(t.tag_name)}')); app.closeOffcanvas();">
+                    <span style="display:flex; align-items:center; gap:0.35rem; min-width:0; overflow:hidden; text-overflow:ellipsis;">
+                      <svg viewBox="0 0 24 24" style="width:13px; height:13px;"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
+                      <span style="overflow:hidden; text-overflow:ellipsis;">${this.escape(t.tag_name)}</span>
+                    </span>
+                    <span style="margin-left:auto; font-size:0.72rem; color:var(--text-muted); flex-shrink:0;">${t.tag_count}</span>
+                  </div>
+                `).join('');
+              }
+
+              if (res.characters && res.characters.length) {
+                html += `<div class="nav-heading" style="margin-top:0.6rem;">Top Characters</div>`;
+                html += res.characters.map(c => `
+                  <div class="nav-item" style="padding:0.35rem 0.85rem; font-size:0.82rem; color:#c084fc;" onclick="app.nav('#/explore?character=' + encodeURIComponent('${this.escape(c.name)}')); app.closeOffcanvas();">
+                    <span style="display:flex; align-items:center; gap:0.35rem; min-width:0; overflow:hidden; text-overflow:ellipsis;">
+                      <svg viewBox="0 0 24 24" style="width:13px; height:13px;"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                      <span style="overflow:hidden; text-overflow:ellipsis;">${this.escape(c.name)}</span>
+                    </span>
+                    <span style="margin-left:auto; font-size:0.72rem; color:var(--text-muted); flex-shrink:0;">${c.count}</span>
+                  </div>
+                `).join('');
+              }
+
+              if (res.series && res.series.length) {
+                html += `<div class="nav-heading" style="margin-top:0.6rem;">Top Series</div>`;
+                html += res.series.map(s => `
+                  <div class="nav-item" style="padding:0.35rem 0.85rem; font-size:0.82rem; color:#38bdf8;" onclick="app.nav('#/explore?parody=' + encodeURIComponent('${this.escape(s.name)}')); app.closeOffcanvas();">
+                    <span style="display:flex; align-items:center; gap:0.35rem; min-width:0; overflow:hidden; text-overflow:ellipsis;">
+                      <svg viewBox="0 0 24 24" style="width:13px; height:13px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                      <span style="overflow:hidden; text-overflow:ellipsis;">${this.escape(s.name)}</span>
+                    </span>
+                    <span style="margin-left:auto; font-size:0.72rem; color:var(--text-muted); flex-shrink:0;">${s.count}</span>
+                  </div>
+                `).join('');
+              }
+
+              box.innerHTML = html;
             } catch(e) {}
           }
     
@@ -22940,6 +23641,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 </div>
               `;
   
+              const encCategory = tag ? 'tag' : (character ? 'character' : (parody ? 'parody' : null));
+              const encName = tag || character || parody || null;
+
+              if (encCategory && encName) {
+                html += `<div id="feed-encyclopedia-slot" style="margin-bottom:1.4rem;"><div class="spinner" style="margin:1rem auto; width:26px; height:26px;"></div></div>`;
+                setTimeout(() => this.loadFeedEncyclopedia(encCategory, encName), 20);
+              }
+
               if (!res.artworks || !res.artworks.length) {
                 html += `<div class="center-msg">No illustrations or videos found for this criteria.</div>`;
               } else {
@@ -22954,7 +23663,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   const viewCount = Number(art.view_count || 0);
                   const likeCount = Number(art.like_count || 0);
   
-                  const rawTags = (art.tags || '').split(/[,#、\s]+/).filter(Boolean);
+                  const rawTags = (art.tags || '').split(/[,，、]+/).map(s => s.trim()).filter(Boolean);
                   const previewTags = rawTags.slice(0, 2);
   
                   // In non-Manga pages (Home, Explore, Rankings, etc.), thumbnails remain 1:1 ratio
@@ -23217,12 +23926,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
                         <span>Share</span>
                       </button>
-                      ${res.source_url ? `
-                        <a href="${this.safeUrl(res.source_url)}" target="_blank" rel="noopener noreferrer" class="btn-subtle" style="height: 38px; padding: 0 1rem; border-radius: 20px; font-size: 0.82rem; gap: 0.4rem;">
-                          <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
-                          <span>Source</span>
-                        </a>
-                      ` : ''}
+                      ${res.source_url ? (() => {
+                        const urls = res.source_url.split(/[\r\n,\s]+/).map(u => u.trim()).filter(Boolean);
+                        return urls.map((u, i) => `
+                          <a href="${this.safeUrl(u)}" target="_blank" rel="noopener noreferrer" class="btn-subtle" style="height: 38px; padding: 0 1rem; border-radius: 20px; font-size: 0.82rem; gap: 0.4rem;" title="${this.escape(u)}">
+                            <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+                            <span>Source${urls.length > 1 ? ` #${i + 1}` : ''}</span>
+                          </a>
+                        `).join('');
+                      })() : ''}
                     </div>
 
                     <!-- Chapters Track Listing -->
@@ -23765,6 +24477,274 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             }
           }
 
+          async loadFeedEncyclopedia(category, name) {
+            const slot = document.getElementById('feed-encyclopedia-slot');
+            if (!slot) return;
+            try {
+              const res = await this.api('encyclopedia_get', { category, name });
+              let parsedHtml = '';
+              if (res.body) {
+                try {
+                  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+                    parsedHtml = DOMPurify.sanitize(marked.parse(res.body));
+                  } else {
+                    parsedHtml = this.escape(res.body).replace(/\n/g, '<br>');
+                  }
+                } catch(e) {
+                  parsedHtml = this.escape(res.body).replace(/\n/g, '<br>');
+                }
+              }
+
+              const catLabels = { tag: 'Tag Encyclopedia', character: 'Character Lore', parody: 'Series Lore' };
+              const label = catLabels[category] || 'Encyclopedia';
+              const revCount = Number(res.revision_count || (res.body ? 1 : 0));
+
+              const topThumbUrl = res.top_artwork_cover ? `?access=artwork&action=thumb&f=${encodeURIComponent(res.top_artwork_cover)}` : '';
+
+              slot.innerHTML = `
+                <div class="encyclopedia-card">
+                  <div class="encyclopedia-header">
+                    <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
+                      <span class="encyclopedia-badge ${category}">${label}</span>
+                      <h2 style="font-size:1.15rem; font-weight:800; margin:0;">${this.escape(name)}</h2>
+                      <span style="font-size:0.75rem; color:var(--text-muted); background:var(--bg-surface-elevated); padding:0.15rem 0.5rem; border-radius:4px; font-weight:600;">
+                        Community Wiki
+                      </span>
+                    </div>
+                    <div style="display:flex; gap:0.4rem; align-items:center;">
+                      ${revCount > 0 ? `
+                        <button type="button" class="btn-subtle" style="height:30px; font-size:0.75rem; gap:0.3rem;" onclick="app.openEncyclopediaHistoryModal('${category}', '${this.escape(name)}')" title="View edit history">
+                          <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                          <span>History (${revCount})</span>
+                        </button>
+                      ` : ''}
+                      <button type="button" class="btn-primary" style="height:30px; font-size:0.75rem; gap:0.35rem;" onclick="app.openEncyclopediaEditModal('${category}', '${this.escape(name)}')">
+                        <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                        <span>${res.body ? 'Edit Article' : 'Write Article'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="encyclopedia-main-row">
+                    ${res.top_artwork_id > 0 && topThumbUrl ? `
+                      <div class="encyclopedia-preview-thumb" onclick="app.nav('#/artwork/${res.top_artwork_id}')" title="Most Viewed Post: ${this.escape(res.top_artwork_title)} (${res.top_artwork_views.toLocaleString()} views) - Click to view">
+                        <img src="${topThumbUrl}" alt="${this.escape(res.top_artwork_title)}" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(res.top_artwork_cover)}'">
+                        <div class="encyclopedia-preview-badge">&#9733; ${(res.top_artwork_views || 0).toLocaleString()} views</div>
+                      </div>
+                    ` : ''}
+
+                    <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.6rem;">
+                      ${res.body ? `
+                        <div class="encyclopedia-body">${parsedHtml}</div>
+                      ` : `
+                        <div style="font-size:0.84rem; color:var(--text-muted); line-height:1.5;">
+                          No wiki article has been written for "${this.escape(name)}" yet. Anyone with an account can write and edit lore freely!
+                        </div>
+                      `}
+                    </div>
+                  </div>
+
+                  <div class="encyclopedia-meta" style="justify-content:space-between; flex-wrap:wrap; gap:0.4rem; border-top:1px solid var(--border-subtle); padding-top:0.6rem; margin-top:0.2rem;">
+                    <div>
+                      ${res.editor_name ? `<span>Last edited by <strong>${this.escape(res.editor_name)}</strong></span> &bull; ` : ''}
+                      <span>${res.updated_at ? new Date(res.updated_at * 1000).toLocaleDateString() : 'Community Wiki'}</span>
+                    </div>
+                    <span style="font-size:0.72rem; color:var(--text-muted); font-style:italic;">
+                      Open for all registered members to edit &bull; Crowdsourced lore
+                    </span>
+                  </div>
+                </div>
+              `;
+            } catch(e) {
+              slot.innerHTML = '';
+            }
+          }
+
+          async openEncyclopediaModal(category, name) {
+            try {
+              const res = await this.api('encyclopedia_get', { category, name });
+              let parsedHtml = '';
+              if (res.body) {
+                try {
+                  parsedHtml = (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined')
+                    ? DOMPurify.sanitize(marked.parse(res.body))
+                    : this.escape(res.body).replace(/\n/g, '<br>');
+                } catch(e) {
+                  parsedHtml = this.escape(res.body).replace(/\n/g, '<br>');
+                }
+              }
+
+              const revCount = Number(res.revision_count || (res.body ? 1 : 0));
+              const topThumbUrl = res.top_artwork_cover ? `?access=artwork&action=thumb&f=${encodeURIComponent(res.top_artwork_cover)}` : '';
+
+              const html = `
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span class="encyclopedia-badge ${category}">${category}</span>
+                    <span>${this.escape(name)} Encyclopedia</span>
+                  </div>
+                  <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-body" style="gap:1rem;">
+                  <div class="encyclopedia-main-row">
+                    ${res.top_artwork_id > 0 && topThumbUrl ? `
+                      <div class="encyclopedia-preview-thumb" onclick="app.closeModal(); app.nav('#/artwork/${res.top_artwork_id}')" title="Most Viewed: ${this.escape(res.top_artwork_title)} (${res.top_artwork_views.toLocaleString()} views) - Click to open post">
+                        <img src="${topThumbUrl}" alt="${this.escape(res.top_artwork_title)}" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(res.top_artwork_cover)}'">
+                        <div class="encyclopedia-preview-badge">&#9733; ${(res.top_artwork_views || 0).toLocaleString()} views</div>
+                      </div>
+                    ` : ''}
+                    <div style="flex:1; min-width:0;">
+                      ${res.body ? `<div class="encyclopedia-body">${parsedHtml}</div>` : `<p style="font-size:0.88rem; color:var(--text-muted);">No article written yet. Registered members can write lore anytime!</p>`}
+                    </div>
+                  </div>
+
+                  <div style="font-size:0.75rem; color:var(--text-muted); border-top:1px solid var(--border-subtle); padding-top:0.6rem; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
+                    <span>${res.editor_name ? `Last editor: <strong>${this.escape(res.editor_name)}</strong>` : 'Community Encyclopedia'}</span>
+                    <span>All registered members can edit</span>
+                  </div>
+                </div>
+                <div class="modal-footer" style="justify-content:space-between;">
+                  <div>
+                    ${revCount > 0 ? `
+                      <button type="button" class="btn-subtle" onclick="app.openEncyclopediaHistoryModal('${category}', '${this.escape(name)}')">History (${revCount})</button>
+                    ` : ''}
+                  </div>
+                  <div style="display:flex; gap:0.5rem;">
+                    <button type="button" class="btn-subtle" onclick="app.closeModal()">Close</button>
+                    <button type="button" class="btn-primary" onclick="app.openEncyclopediaEditModal('${category}', '${this.escape(name)}')">
+                      ${res.body ? 'Edit Article' : 'Write Article'}
+                    </button>
+                  </div>
+                </div>
+              `;
+              this.showModal(html);
+            } catch(err) {
+              this.toast(err.message);
+            }
+          }
+
+          async openEncyclopediaEditModal(category, name) {
+            if (!this.user) {
+              this.toast('Please log in. All registered accounts can edit the encyclopedia!');
+              this.showAuthModal();
+              return;
+            }
+            try {
+              const res = await this.api('encyclopedia_get', { category, name });
+              const captchaUrl = `?access=artwork&action=encyclopedia_captcha&t=${Date.now()}`;
+
+              const html = `
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span class="encyclopedia-badge ${category}">${category}</span>
+                    <span>Edit Article: ${this.escape(name)}</span>
+                  </div>
+                  <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <form onsubmit="app.handleEncyclopediaSubmit(event)">
+                  <input type="hidden" name="category" value="${this.escape(category)}">
+                  <input type="hidden" name="name" value="${this.escape(name)}">
+                  <div class="modal-body" style="gap:0.9rem;">
+                    <div style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; padding:0.75rem 0.95rem; font-size:0.8rem; color:var(--text-secondary); line-height:1.5;">
+                      <strong style="color:var(--text-primary);">&#128214; Community Encyclopedia:</strong> Anyone with an account can freely contribute and improve this article (limit: 10 edits/day). Your pseudonym (<strong>${this.escape(this.user.artist_name)}</strong>) will be recorded in the revision history.
+                    </div>
+
+                    <div class="form-group">
+                      <label class="form-label">Article Lore &amp; Information (Markdown Enabled)</label>
+                      <textarea name="body" class="form-textarea" style="min-height:210px; font-size:0.88rem; line-height:1.5;" placeholder="Document character backstory, world lore, origin, personality, or tag explanation..." required>${this.escape(res.body || '')}</textarea>
+                    </div>
+
+                    <div class="form-group">
+                      <label class="form-label">Edit Summary (Optional)</label>
+                      <input type="text" name="edit_summary" class="form-input" placeholder="e.g., Added character background, fixed typo, expanded lore..." maxlength="200">
+                    </div>
+
+                    <div class="form-group">
+                      <label class="form-label">Security Verification (Anti-Spam Captcha) *</label>
+                      <div style="display:flex; align-items:center; gap:0.6rem;">
+                        <img id="enc-captcha-img" src="${captchaUrl}" style="height:38px; border-radius:8px; border:1px solid var(--border-subtle); cursor:pointer; background:#14141a;" onclick="this.src='?access=artwork&action=encyclopedia_captcha&t='+Date.now()" title="Click to refresh captcha">
+                        <input type="text" name="captcha" class="form-input" style="max-width:130px; text-align:center; font-family:'JetBrains Mono',monospace; font-weight:700; font-size:1rem;" placeholder="Answer" required autocomplete="off">
+                        <button type="button" class="btn-subtle" style="height:38px; padding:0 0.75rem; font-size:0.85rem;" onclick="document.getElementById('enc-captcha-img').src='?access=artwork&action=encyclopedia_captcha&t='+Date.now()" title="Refresh Captcha">&#x21bb;</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn-subtle" onclick="app.closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary" id="btn-save-encyclopedia">Publish to Encyclopedia</button>
+                  </div>
+                </form>
+              `;
+              this.showModal(html);
+            } catch(e) {
+              this.toast(e.message);
+            }
+          }
+
+          async handleEncyclopediaSubmit(e) {
+            e.preventDefault();
+            const btn = document.getElementById('btn-save-encyclopedia');
+            if (btn) { btn.disabled = true; btn.innerText = 'Publishing...'; }
+            const fd = new FormData(e.target);
+            try {
+              const res = await this.api('encyclopedia_save', fd, 'POST');
+              this.closeModal();
+              this.toast('Article published to community encyclopedia!');
+              this.loadFeedEncyclopedia(res.category, res.name);
+            } catch(err) {
+              this.toast(err.message);
+              // Automatically refresh captcha on validation or rate limit error
+              const captchaImg = document.getElementById('enc-captcha-img');
+              if (captchaImg) captchaImg.src = `?access=artwork&action=encyclopedia_captcha&t=${Date.now()}`;
+              const captchaInput = e.target.querySelector('input[name="captcha"]');
+              if (captchaInput) { captchaInput.value = ''; captchaInput.focus(); }
+              if (btn) { btn.disabled = false; btn.innerText = 'Publish to Encyclopedia'; }
+            }
+          }
+
+          async openEncyclopediaHistoryModal(category, name) {
+            try {
+              const res = await this.api('encyclopedia_history', { category, name });
+              const history = res.history || [];
+              const html = `
+                <div class="modal-header">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span class="encyclopedia-badge ${category}">${category}</span>
+                    <span>${this.escape(name)} &ndash; Revision History</span>
+                  </div>
+                  <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+                </div>
+                <div class="modal-body" style="gap:0.75rem; max-height:60vh; overflow-y:auto;">
+                  ${!history.length ? `<p style="font-size:0.85rem; color:var(--text-muted);">No recorded past revisions yet.</p>` : `
+                    <div style="display:flex; flex-direction:column; gap:0.55rem;">
+                      ${history.map(item => `
+                        <div style="background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; padding:0.7rem 0.9rem; display:flex; justify-content:space-between; align-items:center; gap:0.75rem;">
+                          <div style="min-width:0;">
+                            <div style="font-weight:700; font-size:0.85rem; color:var(--text-primary); margin-bottom:0.15rem;">
+                              ${this.escape(item.editor_name || 'Anonymous Artist')}
+                            </div>
+                            <div style="font-size:0.78rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                              ${this.escape(item.edit_summary || 'Updated article content')}
+                            </div>
+                          </div>
+                          <span style="font-size:0.72rem; color:var(--text-muted); flex-shrink:0;">
+                            ${new Date(item.created_at * 1000).toLocaleString()}
+                          </span>
+                        </div>
+                      `).join('')}
+                    </div>
+                  `}
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn-subtle" onclick="app.openEncyclopediaModal('${category}', '${this.escape(name)}')">&laquo; Back to Article</button>
+                  <button type="button" class="btn-primary" onclick="app.openEncyclopediaEditModal('${category}', '${this.escape(name)}')">Contribute Edit</button>
+                </div>
+              `;
+              this.showModal(html);
+            } catch(e) {
+              this.toast(e.message);
+            }
+          }
+
           toggleAdvSearch() {
             const el = document.getElementById('adv-search-panel');
             if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
@@ -23897,15 +24877,44 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               `;
     
               if (sourceId > 0) {
-                const res = await this.api('similar_search', { source_id: sourceId });
+                const imgIndex = parseInt(params.get('image_index') || params.get('sort_order') || '0', 10);
+                const res = await this.api('similar_search', { source_id: sourceId, image_index: imgIndex });
                 if (res.source_art) {
+                  const currentSort = res.source_art.selected_sort_order || 0;
+                  const allImgs = res.source_art.all_images || [];
+
                   html += `
-                    <div style="display:flex; align-items:center; gap:1rem; background:var(--bg-surface-elevated); padding:0.9rem 1.2rem; border-radius:12px; border:1px solid var(--border-subtle); margin-bottom:1.4rem;">
-                      <img src="?access=artwork&action=thumb&f=${encodeURIComponent(res.source_art.cover_file)}" style="width:60px; height:60px; border-radius:8px; object-fit:cover;" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(res.source_art.cover_file)}'">
-                      <div>
-                        <span style="font-size:0.8rem; color:var(--text-muted); text-transform:uppercase; font-weight:700;">Matching Against:</span>
-                        <h3 style="font-size:1.05rem; font-weight:700;">${this.escape(res.source_art.title)}</h3>
+                    <div style="background:var(--bg-surface-elevated); padding:1rem 1.25rem; border-radius:14px; border:1px solid var(--border-subtle); margin-bottom:1.4rem; display:flex; flex-direction:column; gap:0.85rem;">
+                      <div style="display:flex; align-items:center; gap:1rem; justify-content:space-between; flex-wrap:wrap;">
+                        <div style="display:flex; align-items:center; gap:1rem;">
+                          <img src="?access=artwork&action=thumb&f=${encodeURIComponent(res.source_art.cover_file)}" style="width:64px; height:64px; border-radius:8px; object-fit:cover; border:2px solid var(--accent); background:#000;" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(res.source_art.cover_file)}'">
+                          <div>
+                            <span style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; font-weight:800; letter-spacing:0.5px;">Matching Thumbnail:</span>
+                            <h3 style="font-size:1.1rem; font-weight:800; margin-top:0.15rem;">${this.escape(res.source_art.title)}</h3>
+                            <span style="font-size:0.8rem; color:var(--accent); font-weight:700;">Page #${currentSort + 1}${allImgs.length > 1 ? ` of ${allImgs.length}` : ''}</span>
+                          </div>
+                        </div>
+                        <button type="button" class="btn-subtle" style="height:32px; font-size:0.78rem;" onclick="app.nav('#/artwork/${res.source_art.id}')">View Full Post</button>
                       </div>
+
+                      ${allImgs.length > 1 ? `
+                        <div style="border-top:1px solid var(--border-subtle); padding-top:0.75rem; display:flex; flex-direction:column; gap:0.45rem;">
+                          <span style="font-size:0.75rem; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.4px;">
+                            Switch Image Page to Match:
+                          </span>
+                          <div style="display:flex; gap:0.6rem; overflow-x:auto; padding-bottom:0.3rem; scroll-behavior:smooth;">
+                            ${allImgs.map((im, idx) => {
+                              const isSelected = (idx === currentSort);
+                              return `
+                                <div class="thumb-reel-item ${isSelected ? 'active' : ''}" style="width:56px; height:56px; border-radius:8px; flex-shrink:0; cursor:pointer; position:relative; border:2px solid ${isSelected ? 'var(--accent)' : 'var(--border-subtle)'}; background:#000;" onclick="app.updateParam('image_index', ${idx})" title="Match Page #${idx + 1}">
+                                  <img src="?access=artwork&action=thumb&f=${encodeURIComponent(im.file_name)}" style="width:100%; height:100%; object-fit:cover; border-radius:6px;" alt="">
+                                  <span style="position:absolute; bottom:2px; right:2px; font-size:0.62rem; font-weight:800; background:rgba(0,0,0,0.8); color:#fff; padding:1px 4px; border-radius:3px;">#${idx + 1}</span>
+                                </div>
+                              `;
+                            }).join('')}
+                          </div>
+                        </div>
+                      ` : ''}
                     </div>
                   `;
                 }
@@ -23993,7 +25002,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             try {
               const res = await this.api('tags_all');
               let html = `
-                <div style="max-width:1100px; margin:0 auto; width:100%;">
+                <div style="max-width:1300px; margin:0 auto; width:100%;">
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
                     <div>
                       <h1 style="font-size:1.4rem; font-weight:800;">Tags Directory</h1>
@@ -24002,21 +25011,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
                       <input type="text" class="form-input" style="max-width:220px;" placeholder="Filter tags..." oninput="app.filterDirectory(this.value, '.tag-dir-item')">
                       <select class="form-select" style="height:36px; font-size:0.82rem;" onchange="app.sortDirectory('#tags-dir-container', '.tag-dir-item', this.value)">
-                        <option value="name_asc" selected>Name (A-Z)</option>
-                        <option value="name_desc">Name (Z-A)</option>
-                        <option value="count_desc">Most Used</option>
+                        <option value="count_desc" selected>Most Used</option>
                         <option value="count_asc">Least Used</option>
+                        <option value="name_asc">Name (A-Z)</option>
+                        <option value="name_desc">Name (Z-A)</option>
                       </select>
                     </div>
                   </div>
   
-                  <div id="tags-dir-container" style="display:flex; flex-wrap:wrap; gap:0.6rem; background:var(--bg-surface); padding:1.4rem; border:1px solid var(--border-subtle); border-radius:14px;">
-                    ${res.tags.map(t => `
-                      <div class="tag-dir-item tag-pill" data-label="${this.escape(t.tag_name).toLowerCase()}" data-name="${this.escape(t.tag_name).toLowerCase()}" data-count="${t.tag_count}" onclick="app.nav('#/explore?tag=' + encodeURIComponent('${this.escape(t.tag_name)}'))">
-                        <span>${this.escape(t.tag_name)}</span>
-                        <span style="opacity:0.6; font-size:0.75rem;">(${t.tag_count})</span>
-                      </div>
-                    `).join('')}
+                  <div id="tags-dir-container" class="directory-card-grid">
+                    ${res.tags.map(t => {
+                      const coverUrl = t.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(t.cover_file)}` : '';
+                      return `
+                        <div class="tag-dir-item dir-bg-card" data-label="${this.escape(t.tag_name).toLowerCase()}" data-name="${this.escape(t.tag_name).toLowerCase()}" data-count="${t.tag_count}" onclick="app.nav('#/explore?tag=' + encodeURIComponent('${this.escape(t.tag_name)}'))">
+                          ${coverUrl ? `<img src="${coverUrl}" class="dir-bg-img" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(t.cover_file)}'">` : ''}
+                          <div class="dir-bg-overlay"></div>
+                          <div class="dir-bg-info">
+                            <span class="dir-bg-title">#${this.escape(t.tag_name)}</span>
+                            <span class="dir-bg-count">${t.tag_count} creations</span>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
                   </div>
                 </div>
               `;
@@ -24516,10 +25532,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const isOwner = this.user && (this.user.id == art.user_id || this.user.is_admin);
               const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
     
-              const tagsArr = (art.tag_list && art.tag_list.length) ? art.tag_list : (art.tags ? art.tags.split(/[,#、\s]+/).filter(Boolean) : []);
-              const charArr = art.characters ? art.characters.split(/[,、\s]+/).filter(Boolean) : [];
-              const parodyArr = art.parodies ? art.parodies.split(/[,、\s]+/).filter(Boolean) : [];
-              const toolsArr = art.tools ? art.tools.split(/[,、\s]+/).filter(Boolean) : [];
+              const tagsArr = (art.tag_list && art.tag_list.length) ? art.tag_list : (art.tags ? art.tags.split(/[,，、]+/).map(s => s.trim()).filter(Boolean) : []);
+              const charArr = art.characters ? art.characters.split(/[,，、]+/).map(s => s.trim()).filter(Boolean) : [];
+              const parodyArr = art.parodies ? art.parodies.split(/[,，、]+/).map(s => s.trim()).filter(Boolean) : [];
+              const toolsArr = art.tools ? art.tools.split(/[,，、]+/).map(s => s.trim()).filter(Boolean) : [];
     
               const images = art.images || [];
               const leadImg = images[0] || {};
@@ -24712,50 +25728,78 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         </div>
                         ${isOwner ? `
                           <div class="artwork-owner-actions">
+                            <button type="button" class="btn-subtle" style="gap:0.35rem;" onclick="app.exportArtworkPost(${art.id})" title="Export Post Package (.zip) with live progress">
+                              <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                              <span>Export Post (.zip)</span>
+                            </button>
                             <button class="btn-subtle" onclick="app.nav('#/edit/${art.id}')">Edit Post</button>
                             <button class="btn-subtle" style="color:var(--r18);" onclick="app.deleteArtwork(${art.id})">Delete</button>
                           </div>
                       ` : ''}
                       </div>
   
-                      ${art.source_url ? `
-                        <div style="font-size:0.85rem; color:var(--text-muted);">
-                          <strong>Original Source:</strong> <a href="${this.safeUrl(art.source_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">${this.escape(art.source_url)}</a>
-                        </div>
-                      ` : ''}
+                      ${art.source_url ? (() => {
+                        const urls = art.source_url.split(/[\r\n,\s]+/).map(u => u.trim()).filter(Boolean);
+                        if (!urls.length) return '';
+                        return `
+                          <div style="font-size:0.85rem; color:var(--text-muted); display:flex; flex-wrap:wrap; gap:0.55rem; align-items:center;">
+                            <strong>Original Source${urls.length > 1 ? 's' : ''}:</strong>
+                            ${urls.map((u, i) => {
+                              let domain = '';
+                              try { domain = new URL(u).hostname.replace(/^www\./, ''); } catch(e) { domain = `Link #${i + 1}`; }
+                              return `
+                                <a href="${this.safeUrl(u)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline; display:inline-flex; align-items:center; gap:0.25rem;" title="${this.escape(u)}">
+                                  <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+                                  <span>${urls.length > 1 ? `${domain} (#${i + 1})` : this.escape(u)}</span>
+                                </a>
+                              `;
+                            }).join('')}
+                          </div>
+                        `;
+                      })() : ''}
   
                       ${renderedDescription ? `<div style="font-size:0.92rem; line-height:1.6; color:var(--text-primary);">${renderedDescription}</div>` : ''}
   
                       <div class="tag-cloud">
-                        ${parodyArr.map(p => `<span class="tag-pill special-parody" onclick="app.nav('#/explore?parody=${encodeURIComponent(p)}')"><svg viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg> <span>Series: ${this.escape(p)}</span></span>`).join('')}
-                        ${charArr.map(c => `<span class="tag-pill special-character" onclick="app.nav('#/explore?character=${encodeURIComponent(c)}')"><svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg> <span>Character: ${this.escape(c)}</span></span>`).join('')}
-                        ${tagsArr.map(t => `<span class="tag-pill" onclick="app.nav('#/explore?tag=${encodeURIComponent(t)}')"><svg viewBox="0 0 24 24"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg> <span>#${this.escape(t)}</span></span>`).join('')}
+                        ${parodyArr.map(p => `
+                          <span class="tag-pill special-parody" onclick="app.nav('#/explore?parody=${encodeURIComponent(p)}')">
+                            <svg viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
+                            <span>Series: ${this.escape(p)}</span>
+                            <span style="opacity:0.6; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('parody', '${this.escape(p)}')" title="View Encyclopedia">&#128214;</span>
+                          </span>
+                        `).join('')}
+                        ${charArr.map(c => `
+                          <span class="tag-pill special-character" onclick="app.nav('#/explore?character=${encodeURIComponent(c)}')">
+                            <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                            <span>Character: ${this.escape(c)}</span>
+                            <span style="opacity:0.6; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('character', '${this.escape(c)}')" title="View Encyclopedia">&#128214;</span>
+                          </span>
+                        `).join('')}
+                        ${tagsArr.map(t => `
+                          <span class="tag-pill" onclick="app.nav('#/explore?tag=${encodeURIComponent(t)}')">
+                            <svg viewBox="0 0 24 24"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
+                            <span>#${this.escape(t)}</span>
+                            <span style="opacity:0.6; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('tag', '${this.escape(t)}')" title="View Encyclopedia">&#128214;</span>
+                          </span>
+                        `).join('')}
                         ${toolsArr.map(tl => `<span class="tag-pill special-tool"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> <span>Tool: ${this.escape(tl)}</span></span>`).join('')}
                       </div>
   
                       <div style="display:flex; gap:0.6rem; margin-top:0.4rem; flex-wrap:wrap;">
-                        ${art.type === 'manga' ? `
-                          <a href="${readMangaUrl}" class="btn-primary" style="gap:0.4rem; text-decoration:none;">
-                            <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
-                            <span>Read as Manga</span>
-                          </a>
-                          <a href="${seriesViewUrl}" class="btn-subtle" style="gap:0.4rem; text-decoration:none;">
-                            <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
-                            <span>View Manga Series</span>
-                          </a>
-                        ` : ''}
                         <button class="btn-subtle ${art.user_liked ? 'active like' : ''}" style="gap:0.4rem;" onclick="app.toggleLike(${art.id}, this)">
                           <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                           <span>Like (${art.like_count || 0})</span>
                         </button>
+                        ${!isLeadVid && art.type !== 'video' ? `
+                          <button type="button" class="btn-subtle" style="gap:0.4rem;" onclick="app.nav('#/similar?source_id=${art.id}&image_index=' + app.currentLeadIndex)" title="Find visually similar artworks using this image">
+                            <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                            <span>Find Similar</span>
+                          </button>
+                        ` : ''}
                         <button class="btn-subtle" style="gap:0.4rem;" data-id="${art.id}" data-title="${this.escape(art.title)}" data-artist="${this.escape(art.artist_name)}" onclick="app.showShareModal(this.dataset.id, this.dataset.title, this.dataset.artist)">
                           <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
                           <span>Share</span>
                         </button>
-                        <a href="?access=artwork&action=artwork_export&id=${art.id}" class="btn-subtle" style="gap:0.4rem;" download>
-                          <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                          <span>Export Post (.zip)</span>
-                        </a>
                         ${images.length > 1 ? `
                           <button type="button" class="btn-subtle" style="gap:0.4rem;" onclick="app.downloadArtworkZip(${art.id})">
                             <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
@@ -24924,6 +25968,119 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             };
           }
   
+          async exportArtworkPost(artworkId) {
+            const modalHtml = `
+              <div class="modal-header">
+                <span>Exporting Post Package (.zip)</span>
+                <button class="btn-icon" onclick="app.closeModal()"><svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+              </div>
+              <div class="modal-body" style="gap:1rem;">
+                <div style="display:flex; align-items:center; gap:0.75rem;">
+                  <div class="spinner" id="export-spinner" style="margin:0; width:26px; height:26px; flex-shrink:0;"></div>
+                  <div style="min-width:0; flex:1;">
+                    <div id="export-status-title" style="font-weight:700; font-size:0.95rem;">Preparing Export Package...</div>
+                    <div id="export-status-subtitle" style="font-size:0.8rem; color:var(--text-muted); margin-top:0.2rem;">Compiling post metadata and media items on server...</div>
+                  </div>
+                </div>
+
+                <div style="width:100%; background:var(--bg-base); height:10px; border-radius:5px; overflow:hidden; border:1px solid var(--border-subtle);">
+                  <div id="export-progress-fill" style="width:0%; height:100%; background:var(--accent); border-radius:5px; transition:width 0.15s ease;"></div>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
+                  <span id="export-bytes-text">0 MB / 0 MB</span>
+                  <span id="export-percent-text" style="font-weight:700; color:var(--accent);">0%</span>
+                </div>
+              </div>
+            `;
+            this.showModal(modalHtml);
+
+            try {
+              const res = await fetch(`?access=artwork&action=artwork_export&id=${artworkId}`);
+              if (!res.ok) {
+                let errMsg = 'Failed to export post package.';
+                try {
+                  const errJson = await res.json();
+                  if (errJson.error) errMsg = errJson.error;
+                } catch(e) {}
+                throw new Error(errMsg);
+              }
+
+              const contentLength = res.headers.get('content-length');
+              const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+              const reader = res.body.getReader();
+              const chunks = [];
+              let receivedBytes = 0;
+
+              const statusTitle = document.getElementById('export-status-title');
+              const statusSubtitle = document.getElementById('export-status-subtitle');
+              const progressFill = document.getElementById('export-progress-fill');
+              const bytesText = document.getElementById('export-bytes-text');
+              const percentText = document.getElementById('export-percent-text');
+
+              if (statusTitle) statusTitle.innerText = 'Transferring export package...';
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                receivedBytes += value.length;
+
+                if (totalBytes > 0) {
+                  const pct = Math.min(100, Math.round((receivedBytes / totalBytes) * 100));
+                  if (progressFill) progressFill.style.width = `${pct}%`;
+                  if (percentText) percentText.innerText = `${pct}%`;
+                  const recMB = (receivedBytes / (1024 * 1024)).toFixed(1);
+                  const totMB = (totalBytes / (1024 * 1024)).toFixed(1);
+                  if (bytesText) bytesText.innerText = `${recMB} MB / ${totMB} MB`;
+                  if (statusSubtitle) statusSubtitle.innerText = `${pct}% downloaded (${recMB} MB of ${totMB} MB)`;
+                } else {
+                  const recMB = (receivedBytes / (1024 * 1024)).toFixed(1);
+                  if (bytesText) bytesText.innerText = `${recMB} MB transferred`;
+                  if (progressFill) progressFill.style.width = '100%';
+                  if (statusSubtitle) statusSubtitle.innerText = `${recMB} MB received`;
+                }
+              }
+
+              if (statusTitle) statusTitle.innerText = 'Finalizing package...';
+              const blob = new Blob(chunks, { type: 'application/zip' });
+
+              let downloadName = `artwork_${artworkId}_export.zip`;
+              const dispo = res.headers.get('content-disposition');
+              if (dispo) {
+                const match = dispo.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+                if (match && match[1]) downloadName = decodeURIComponent(match[1]);
+              }
+
+              const blobUrl = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = blobUrl;
+              link.download = downloadName;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+
+              if (statusTitle) statusTitle.innerText = 'Export Completed!';
+              if (statusSubtitle) statusSubtitle.innerText = 'Package downloaded successfully.';
+              const spinner = document.getElementById('export-spinner');
+              if (spinner) spinner.style.display = 'none';
+
+              setTimeout(() => this.closeModal(), 1200);
+            } catch(err) {
+              const statusTitle = document.getElementById('export-status-title');
+              const statusSubtitle = document.getElementById('export-status-subtitle');
+              const progressFill = document.getElementById('export-progress-fill');
+              if (statusTitle) {
+                statusTitle.innerText = 'Export Failed';
+                statusTitle.style.color = 'var(--r18)';
+              }
+              if (statusSubtitle) statusSubtitle.innerText = err.message;
+              if (progressFill) progressFill.style.background = 'var(--r18)';
+              this.toast(err.message);
+            }
+          }
+
           async downloadArtworkZip(artworkId) {
             const modalHtml = `
               <div class="modal-header">
@@ -25636,12 +26793,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               <div class="studio-card">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem; flex-wrap:wrap; gap:0.6rem;">
                   <h2 style="font-size:1.4rem; font-weight:800; margin:0;">${editId ? 'Edit Artwork Studio' : 'Publish Artwork or Video'}</h2>
-                  ${!editId ? `
-                    <button type="button" class="btn-primary" onclick="app.showImportModal()">
-                      <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
-                      <span>Import Post</span>
-                    </button>
-                  ` : ''}
+                  <div style="display:flex; gap:0.5rem; align-items:center;">
+                    ${editId ? `
+                      <button type="button" class="btn-subtle" style="gap:0.4rem;" onclick="app.exportArtworkPost(${editId})" title="Export Post Package (.zip) with live progress">
+                        <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                        <span>Export Post (.zip)</span>
+                      </button>
+                    ` : ''}
+                    ${!editId ? `
+                      <button type="button" class="btn-primary" onclick="app.showImportModal()">
+                        <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+                        <span>Import Post</span>
+                      </button>
+                    ` : ''}
+                  </div>
                 </div>
     
                 <form onsubmit="app.handleArtworkSubmit(event)">
@@ -25699,8 +26864,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
     
                   <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Original Source URL (Optional)</label>
-                    <input type="url" name="source_url" id="studio-source-url" class="form-input" placeholder="https://..." value="${this.escape(artData.source_url || '')}" oninput="app.checkDuplicateUrl(this.value)">
+                    <label class="form-label">Original Source URLs (Optional - multiple URLs allowed, one per line or separated by space)</label>
+                    <textarea name="source_url" id="studio-source-url" class="form-textarea" style="min-height:56px; font-family:'JetBrains Mono',monospace; font-size:0.82rem;" placeholder="https://x.com/...&#10;https://pixiv.net/..." oninput="app.checkDuplicateUrl(this.value)">${this.escape(artData.source_url || '')}</textarea>
                     <div id="source-check-status" style="font-size:0.78rem; margin-top:0.25rem;"></div>
                   </div>
     
@@ -25734,24 +26899,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
   
                   <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Tags (comma, hashtag, or space separated)</label>
-                    <input type="text" name="tags" class="form-input" placeholder="original, anime, landscape, fantasy, vocaloid" value="${this.escape(artData.tags)}">
+                    <label class="form-label">Tags (comma separated &bull; spaces allowed inside names)</label>
+                    <input type="text" name="tags" class="form-input" placeholder="Wuthering Waves, Anime, Fantasy Landscape" value="${this.escape(artData.tags)}">
                   </div>
   
                   <div class="form-grid-2" style="margin-top:1.2rem;">
                     <div class="form-group">
-                      <label class="form-label">Characters Depicted</label>
-                      <input type="text" name="characters" class="form-input" placeholder="Hatsune Miku, Frieren" value="${this.escape(artData.characters)}">
+                      <label class="form-label">Characters Depicted (comma separated &bull; spaces allowed)</label>
+                      <input type="text" name="characters" class="form-input" placeholder="Hatsune Miku, Rover, Yangyang" value="${this.escape(artData.characters)}">
                     </div>
                     <div class="form-group">
-                      <label class="form-label">Series / Parody</label>
-                      <input type="text" name="parodies" class="form-input" placeholder="Vocaloid, Hololive, Genshin Impact" value="${this.escape(artData.parodies)}">
+                      <label class="form-label">Series / Parody (comma separated &bull; spaces allowed)</label>
+                      <input type="text" name="parodies" class="form-input" placeholder="Wuthering Waves, Genshin Impact" value="${this.escape(artData.parodies)}">
                     </div>
                   </div>
   
                   <div class="form-grid-2" style="margin-top:1.2rem; align-items:flex-end;">
                     <div class="form-group">
-                      <label class="form-label">Tools Used</label>
+                      <label class="form-label">Tools Used (comma separated)</label>
                       <input type="text" name="tools" class="form-input" placeholder="Clip Studio Paint, Photoshop, Blender" value="${this.escape(artData.tools)}">
                     </div>
                     <div class="form-group" style="min-height:38px; justify-content:center;">
@@ -25855,6 +27020,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           handleFreeDragStart(e, idx) {
             if (e.target.closest('.upload-item-del') || e.target.closest('.reorder-btn')) return;
             if (e.button !== undefined && e.button !== 0) return;
+
+            e.preventDefault();
 
             const itemEl = e.currentTarget;
             const rect = itemEl.getBoundingClientRect();
@@ -26481,7 +27648,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             try {
               const res = await this.api('characters_all');
               let html = `
-                <div style="max-width:1100px; margin:0 auto; width:100%;">
+                <div style="max-width:1300px; margin:0 auto; width:100%;">
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
                     <div>
                       <h1 style="font-size:1.4rem; font-weight:800;">Characters Directory</h1>
@@ -26497,13 +27664,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       </select>
                     </div>
                   </div>
-                  <div id="chars-dir-container" style="display:flex; flex-wrap:wrap; gap:0.6rem; background:var(--bg-surface); padding:1.4rem; border:1px solid var(--border-subtle); border-radius:14px;">
-                    ${res.characters.map(c => `
-                      <div class="char-dir-item tag-pill special-character" data-label="${this.escape(c.name).toLowerCase()}" data-name="${this.escape(c.name).toLowerCase()}" data-count="${c.count}" onclick="app.nav('#/explore?character=' + encodeURIComponent('${this.escape(c.name)}'))">
-                        <span>${this.escape(c.name)}</span>
-                        <span style="opacity:0.6; font-size:0.75rem;">(${c.count})</span>
-                      </div>
-                    `).join('')}
+                  <div id="chars-dir-container" class="directory-card-grid">
+                    ${res.characters.map(c => {
+                      const coverUrl = c.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(c.cover_file)}` : '';
+                      return `
+                        <div class="char-dir-item dir-bg-card" data-label="${this.escape(c.name).toLowerCase()}" data-name="${this.escape(c.name).toLowerCase()}" data-count="${c.count}" onclick="app.nav('#/explore?character=' + encodeURIComponent('${this.escape(c.name)}'))">
+                          ${coverUrl ? `<img src="${coverUrl}" class="dir-bg-img" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(c.cover_file)}'">` : ''}
+                          <div class="dir-bg-overlay"></div>
+                          <div class="dir-bg-info">
+                            <span class="dir-bg-title">${this.escape(c.name)}</span>
+                            <span class="dir-bg-count">${c.count} creations</span>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
                   </div>
                 </div>
               `;
@@ -26520,7 +27694,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             try {
               const res = await this.api('series_all');
               let html = `
-                <div style="max-width:1100px; margin:0 auto; width:100%;">
+                <div style="max-width:1300px; margin:0 auto; width:100%;">
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
                     <div>
                       <h1 style="font-size:1.4rem; font-weight:800;">Series &amp; Parodies Directory</h1>
@@ -26536,13 +27710,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       </select>
                     </div>
                   </div>
-                  <div id="series-dir-container" style="display:flex; flex-wrap:wrap; gap:0.6rem; background:var(--bg-surface); padding:1.4rem; border:1px solid var(--border-subtle); border-radius:14px;">
-                    ${res.series.map(s => `
-                      <div class="series-dir-item tag-pill special-parody" data-label="${this.escape(s.name).toLowerCase()}" data-name="${this.escape(s.name).toLowerCase()}" data-count="${s.count}" onclick="app.nav('#/explore?parody=' + encodeURIComponent('${this.escape(s.name)}'))">
-                        <span>${this.escape(s.name)}</span>
-                        <span style="opacity:0.6; font-size:0.75rem;">(${s.count})</span>
-                      </div>
-                    `).join('')}
+                  <div id="series-dir-container" class="directory-card-grid">
+                    ${res.series.map(s => {
+                      const coverUrl = s.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(s.cover_file)}` : '';
+                      return `
+                        <div class="series-dir-item dir-bg-card" data-label="${this.escape(s.name).toLowerCase()}" data-name="${this.escape(s.name).toLowerCase()}" data-count="${s.count}" onclick="app.nav('#/explore?parody=' + encodeURIComponent('${this.escape(s.name)}'))">
+                          ${coverUrl ? `<img src="${coverUrl}" class="dir-bg-img" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(s.cover_file)}'">` : ''}
+                          <div class="dir-bg-overlay"></div>
+                          <div class="dir-bg-info">
+                            <span class="dir-bg-title">${this.escape(s.name)}</span>
+                            <span class="dir-bg-count">${s.count} creations</span>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
                   </div>
                 </div>
               `;
@@ -38661,7 +39842,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.6';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.7';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
