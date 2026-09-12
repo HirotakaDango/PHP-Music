@@ -1602,10 +1602,21 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.7');
+define('APP_VERSION', '11.8');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
-define('DAILY_UPLOAD_LIMIT', 10);
+
+// Dynamically fetch songs daily upload limit from database
+$daily_upload_limit_val = 10;
+try {
+  $db_limit_chk = get_db();
+  $fetched_limit = $db_limit_chk->query("SELECT value FROM site_settings WHERE key = 'songs_daily_limit'")->fetchColumn();
+  if ($fetched_limit !== false) {
+    $daily_upload_limit_val = (int)$fetched_limit;
+  }
+} catch (Exception $e) {}
+define('DAILY_UPLOAD_LIMIT', $daily_upload_limit_val);
+
 $auto_scan = true; // Auto scan songs during empty or new files
 
 // Track visitor footprint on non-media requests (Runs safely AFTER DB_FILE is defined)
@@ -18795,6 +18806,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
   try {
     $db = getArtworkDB($config);
+    $config['max_images_per_post'] = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_max_images_per_post'")->fetchColumn() ?: 500);
+    $config['daily_limit'] = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_daily_limit'")->fetchColumn() ?: 10);
+    $config['r18_policy'] = $db->query("SELECT value FROM site_settings WHERE key = 'art_r18_policy'")->fetchColumn() ?: 'allow';
+    
+    $allow_video_val = $db->query("SELECT value FROM site_settings WHERE key = 'art_allow_video'")->fetchColumn();
+    $config['allow_video'] = $allow_video_val !== false ? (bool)$allow_video_val : true;
+    if (!$config['allow_video']) {
+      $config['allowed_exts'] = array_values(array_diff($config['allowed_exts'], ['mp4', 'webm', 'mov', 'mkv', 'ogg']));
+    }
+    
     $currentUser = getCurrentUser($db);
     $isInitialSetup = false;
   } catch (Exception $e) {
@@ -19377,9 +19398,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         jsonResponse(['error' => 'At least one media file is required.'], 400);
       }
   
-      // Rule 1: Maximum 500 images per post
-      if (count($images) > 500) {
-        jsonResponse(['error' => 'Maximum upload limit is 500 images per post.'], 400);
+      // Rule 1: Dynamic maximum images per post
+      $maxImagesLimit = (int)($config['max_images_per_post'] ?? 500);
+      if (count($images) > $maxImagesLimit) {
+        jsonResponse(['error' => "Maximum upload limit is {$maxImagesLimit} images per post."], 400);
+      }
+
+      if ($type === 'video' && empty($config['allow_video'])) {
+        jsonResponse(['error' => 'Video uploads are currently disabled by the administrator.'], 400);
       }
 
       // Rule 1b: Disallow video files in Manga series
@@ -19393,7 +19419,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         }
       }
   
-      // Rule 2: Maximum 10 images/day for separate individual posts (Bypassed for Admins)
+      // Rule 2: Dynamic maximum daily post quota (Bypassed for Admins)
+      $artDailyLimit = (int)($config['daily_limit'] ?? 10);
       $isSeparateIndividual = ($postMode === 'batch' && count($images) > 1) || count($images) === 1;
       if (empty($user['is_admin']) && $artworkId === 0 && $isSeparateIndividual) {
         $since24h = time() - 86400;
@@ -19406,9 +19433,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $stmtDaily->execute([$user['id'], $since24h]);
         $dailyIndividualCount = (int)$stmtDaily->fetchColumn();
 
-        if ($dailyIndividualCount >= 10) {
+        if ($dailyIndividualCount >= $artDailyLimit) {
           jsonResponse([
-            'error' => "Daily limit reached for separate individual posts (10/10 published in the last 24 hours). Please wait for the daily reset or publish as a single multi-page post."
+            'error' => "Daily limit reached for separate individual posts ({$artDailyLimit}/{$artDailyLimit} published in the last 24 hours). Please wait for the daily reset or publish as a single multi-page post."
           ], 429);
         }
       }
@@ -20448,6 +20475,79 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       }
       jsonResponse(['success' => true, 'following' => $isFollowing]);
     }
+
+    if ($action === 'user_follows_list') {
+      $targetId = intval($_GET['user_id'] ?? 0);
+      $type = ($_GET['type'] ?? 'followers') === 'following' ? 'following' : 'followers';
+      $curUserId = $currentUser ? (int)$currentUser['id'] : 0;
+
+      if ($targetId <= 0) {
+        jsonResponse(['error' => 'Invalid user identifier.'], 400);
+      }
+
+      $stmtUser = $db->prepare("SELECT id, artist as artist_name, email FROM users WHERE id = ?");
+      $stmtUser->execute([$targetId]);
+      $targetUser = $stmtUser->fetch();
+      if (!$targetUser) {
+        jsonResponse(['error' => 'Artist not found.'], 404);
+      }
+
+      $db->exec("
+        CREATE TABLE IF NOT EXISTS follows (
+          follower_id INTEGER NOT NULL,
+          following_id INTEGER NOT NULL,
+          PRIMARY KEY (follower_id, following_id)
+        );
+      ");
+
+      $followSub = $curUserId > 0 ? "(SELECT COUNT(*) FROM follows WHERE follower_id = {$curUserId} AND following_id = u.id)" : "0";
+
+      if ($type === 'followers') {
+        $stmt = $db->prepare("
+          SELECT u.id, u.artist as artist_name, u.email, COALESCE(u.bio, '') as bio,
+            (SELECT COUNT(*) FROM artworks WHERE user_id = u.id) as artwork_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as follower_count,
+            {$followSub} as is_following
+          FROM follows f
+          JOIN users u ON f.follower_id = u.id
+          WHERE f.following_id = ? AND u.banned = 0 AND u.email NOT LIKE 'deleted_%'
+          ORDER BY u.id DESC
+        ");
+        $stmt->execute([$targetId]);
+      } else {
+        $stmt = $db->prepare("
+          SELECT u.id, u.artist as artist_name, u.email, COALESCE(u.bio, '') as bio,
+            (SELECT COUNT(*) FROM artworks WHERE user_id = u.id) as artwork_count,
+            (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as follower_count,
+            {$followSub} as is_following
+          FROM follows f
+          JOIN users u ON f.following_id = u.id
+          WHERE f.follower_id = ? AND u.banned = 0 AND u.email NOT LIKE 'deleted_%'
+          ORDER BY u.id DESC
+        ");
+        $stmt->execute([$targetId]);
+      }
+
+      $list = $stmt->fetchAll();
+      foreach ($list as &$u) {
+        $u['avatar'] = '?action=get_profile_picture&id=' . $u['id'];
+        $u['is_following'] = !empty($u['is_following']);
+        $u['artwork_count'] = (int)($u['artwork_count'] ?? 0);
+        $u['follower_count'] = (int)($u['follower_count'] ?? 0);
+      }
+      unset($u);
+
+      $totalFollowers = (int)$db->query("SELECT COUNT(*) FROM follows WHERE following_id = {$targetId}")->fetchColumn();
+      $totalFollowing = (int)$db->query("SELECT COUNT(*) FROM follows WHERE follower_id = {$targetId}")->fetchColumn();
+
+      jsonResponse([
+        'type' => $type,
+        'target_user' => $targetUser,
+        'follower_count' => $totalFollowers,
+        'following_count' => $totalFollowing,
+        'users' => $list
+      ]);
+    }
   
     if ($action === 'comment_add') {
       verifyCsrfToken();
@@ -21251,7 +21351,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             display: flex !important;
           }
         }
-    
+
         .sidebar-mobile-header {
           display: none;
           align-items: center;
@@ -21260,7 +21360,94 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           border-bottom: 1px solid var(--border-subtle);
           margin-bottom: 0.4rem;
         }
-    
+
+        /* R-18 Sidebar Toggle Row & Switch */
+        .r18-toggle-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.45rem 0.8rem;
+          margin: 0.2rem 0.25rem;
+          border-radius: 10px;
+          background: var(--bg-surface-elevated);
+          border: 1px solid var(--border-subtle);
+          font-size: 0.82rem;
+          font-weight: 600;
+          color: var(--text-secondary);
+        }
+        .r18-switch {
+          position: relative;
+          display: inline-block;
+          width: 36px;
+          height: 20px;
+          flex-shrink: 0;
+        }
+        .r18-switch input {
+          opacity: 0;
+          width: 0;
+          height: 0;
+        }
+        .r18-slider {
+          position: absolute;
+          cursor: pointer;
+          inset: 0;
+          background-color: var(--border-strong);
+          transition: background-color 0.2s ease;
+          border-radius: 20px;
+        }
+        .r18-slider::before {
+          position: absolute;
+          content: "";
+          height: 14px;
+          width: 14px;
+          left: 3px;
+          bottom: 3px;
+          background-color: #ffffff;
+          transition: transform 0.2s ease;
+          border-radius: 50%;
+        }
+        .r18-switch input:checked+.r18-slider {
+          background-color: var(--r18);
+        }
+        .r18-switch input:checked+.r18-slider::before {
+          transform: translateX(16px);
+        }
+
+        /* Safe Blur Sensitive Content Filters */
+        .safe-blur-target {
+          filter: blur(28px) brightness(0.65) !important;
+          transition: filter 0.3s cubic-bezier(0.2, 0, 0, 1) !important;
+        }
+        .safe-blur-revealed .safe-blur-target {
+          filter: none !important;
+        }
+        .safe-blur-overlay {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: rgba(8, 8, 12, 0.65);
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          z-index: 6;
+          cursor: pointer;
+          padding: 0.75rem;
+          text-align: center;
+          color: #ffffff;
+          gap: 6px;
+          transition: background 0.2s, opacity 0.25s ease;
+        }
+        .safe-blur-overlay:hover {
+          background: rgba(8, 8, 12, 0.45);
+        }
+        .safe-blur-revealed .safe-blur-overlay {
+          opacity: 0 !important;
+          pointer-events: none !important;
+          display: none !important;
+        }
+
         .nav-item {
           display: flex;
           align-items: center;
@@ -22977,7 +23164,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           <div class="nav-item active" data-nav="/"><svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Home Feed</div>
           <div class="nav-item" data-nav="/manga"><svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg> Manga</div>
           <div class="nav-item" data-nav="/rankings"><svg viewBox="0 0 24 24"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg> Rankings</div>
-          <div class="nav-item" data-nav="/r18"><svg viewBox="0 0 24 24" style="color:var(--r18);"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg> R-18 Mature</div>
+          <div class="r18-toggle-row">
+            <span style="display:flex; align-items:center; gap:0.45rem;">
+              <svg viewBox="0 0 24 24" style="width:16px; height:16px; color:var(--r18);"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+              <span>Allow R-18</span>
+            </span>
+            <label class="r18-switch" title="Turn on/off R-18 mature works">
+              <input type="checkbox" id="sidebar-r18-toggle" onchange="app.toggleR18(this.checked)">
+              <span class="r18-slider"></span>
+            </label>
+          </div>
+          <div class="r18-toggle-row" id="sidebar-safeblur-row">
+            <span style="display:flex; align-items:center; gap:0.45rem;">
+              <svg viewBox="0 0 24 24" style="width:16px; height:16px; color:#38bdf8;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+              <span>Safe Blur R-18</span>
+            </span>
+            <label class="r18-switch" title="Blur sensitive R-18 content until clicked">
+              <input type="checkbox" id="sidebar-safeblur-toggle" onchange="app.toggleSafeBlur(this.checked)">
+              <span class="r18-slider"></span>
+            </label>
+          </div>
+          <div class="nav-item" id="nav-item-r18" data-nav="/r18"><svg viewBox="0 0 24 24" style="color:var(--r18);"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg> R-18 Mature</div>
           <div class="nav-item" data-nav="/similar"><svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg> Similar Search</div>
     
           <div class="nav-divider"></div>
@@ -23016,7 +23223,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.needsSetup = <?= $isInitialSetup ? 'true' : 'false' ?>;
             this.csrfToken = <?= json_encode($_SESSION['csrf_token'] ?? '') ?>;
             this.theme = localStorage.getItem('hd_theme') || 'dark';
+            this.r18Enabled = localStorage.getItem('r18_enabled') !== '0';
+            this.safeBlurEnabled = localStorage.getItem('safeblur_enabled') !== '0';
+            this.r18Policy = <?= json_encode($config['r18_policy'] ?? 'allow') ?>;
+            this.allowVideo = <?= json_encode((bool)($config['allow_video'] ?? true)) ?>;
             this.chunkSize = <?= (int)$config['max_chunk_size'] ?>;
+            this.maxImagesPerPost = <?= (int)($config['max_images_per_post'] ?? 500) ?>;
+            this.dailyUploadLimit = <?= (int)($config['daily_limit'] ?? 10) ?>;
             this.uploadQueue = [];
             this.freeDrag = null;
             this.onFreeDragMove = this.handleFreeDragMove.bind(this);
@@ -23024,6 +23237,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.currentLeadIndex = 0;
             this.adminState = { tab: 'users', page: 1, q: '', sort: 'id_asc' };
             this.initTheme();
+            this.initR18Toggle();
             this.bindEvents();
             this.renderUserSlot();
             if (!this.needsSetup) {
@@ -23038,7 +23252,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             document.title = pageTitle ? `${pageTitle} \u2013 ${this.appName}` : `${this.appName} \u2013 Creative Studio`;
           }
   
-          initTheme() {
+                    initTheme() {
             document.documentElement.setAttribute('data-theme', this.theme);
             const updateLabel = () => {
               const lbl = document.getElementById('theme-toggle-label');
@@ -23054,6 +23268,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 updateLabel();
               };
             }
+          }
+
+          initR18Toggle() {
+            const toggle = document.getElementById('sidebar-r18-toggle');
+            if (toggle) toggle.checked = this.r18Enabled;
+            const r18Nav = document.getElementById('nav-item-r18');
+            if (r18Nav) r18Nav.style.display = this.r18Enabled ? 'flex' : 'none';
+            const blurRow = document.getElementById('sidebar-safeblur-row');
+            if (blurRow) blurRow.style.display = this.r18Enabled ? 'flex' : 'none';
+            const blurToggle = document.getElementById('sidebar-safeblur-toggle');
+            if (blurToggle) blurToggle.checked = this.safeBlurEnabled;
+          }
+
+          toggleR18(enabled) {
+            this.r18Enabled = !!enabled;
+            localStorage.setItem('r18_enabled', this.r18Enabled ? '1' : '0');
+            this.initR18Toggle();
+            this.toast(this.r18Enabled ? 'R-18 content turned ON' : 'R-18 content turned OFF');
+            const currentRoute = (window.location.hash || '').replace(/^#/, '').split('?')[0];
+            if (!this.r18Enabled && currentRoute === '/r18') {
+              this.nav('#/');
+            } else {
+              this.handleRoute();
+            }
+          }
+
+          toggleSafeBlur(enabled) {
+            this.safeBlurEnabled = !!enabled;
+            localStorage.setItem('safeblur_enabled', this.safeBlurEnabled ? '1' : '0');
+            this.toast(this.safeBlurEnabled ? 'Safe Blur turned ON' : 'Safe Blur turned OFF');
+            this.handleRoute();
           }
     
           toggleSidebar() {
@@ -23178,8 +23423,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                     <span>Favorites</span>
                   </div>
+                  <div class="nav-item" data-nav="/followers" onclick="app.nav('#/followers'); app.closeOffcanvas();">
+                    <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                    <span>Followers</span>
+                  </div>
                   <div class="nav-item" data-nav="/following" onclick="app.nav('#/following'); app.closeOffcanvas();">
-                    <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                    <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.41 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
                     <span>Following Artists</span>
                   </div>
                   <div class="nav-item" data-nav="/activity" onclick="app.nav('#/activity'); app.closeOffcanvas();">
@@ -23227,6 +23476,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
             if (this.needsSetup) {
               await this.renderSetupPage();
+              return;
+            }
+
+            if (routePath === '/r18' && !this.r18Enabled) {
+              this.toast('R-18 content is currently turned off.');
+              this.nav('#/');
               return;
             }
     
@@ -23297,8 +23552,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const id = routePath.split('/')[2];
               await this.renderArtworkView(id);
             } else if (routePath.startsWith('/user/')) {
-              const id = routePath.split('/')[2];
-              await this.renderUserProfile(id);
+              const parts = routePath.split('/');
+              const id = parts[2];
+              const sub = parts[3];
+              if (sub === 'followers' || sub === 'following') {
+                await this.renderUserFollowsList(id, sub);
+              } else {
+                await this.renderUserProfile(id);
+              }
+            } else if (routePath === '/followers') {
+              if (!this.user) {
+                this.showAuthModal();
+                this.nav('#/');
+              } else {
+                await this.renderUserFollowsList(this.user.id, 'followers');
+              }
             } else if (routePath === '/admin') {
               await this.renderAdminPanel();
             } else if (routePath === '/submit') {
@@ -23554,7 +23822,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const character = params.get('character') || '';
             const parody = params.get('parody') || '';
             const sourceUrl = params.get('source_url') || '';
-            const rating = feedType === 'r18' ? 'r18' : (params.get('rating') || 'all');
+            let rating = feedType === 'r18' ? 'r18' : (params.get('rating') || (this.r18Enabled ? 'all' : 'safe'));
+            if (!this.r18Enabled) rating = 'safe';
             const type = params.get('type') || 'all';
             const sort = feedType === 'rankings' ? 'popular' : (params.get('sort') || 'newest');
             const period = params.get('period') || 'daily';
@@ -23616,13 +23885,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <option value="views" ${sort === 'views' ? 'selected' : ''}>Most Views</option>
                       <option value="oldest" ${sort === 'oldest' ? 'selected' : ''}>Oldest</option>
                     </select>
-                    ${feedType !== 'r18' ? `
-                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
-                        <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
-                        <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages Only</option>
-                        <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
-                      </select>
-                    ` : ''}
+                    ${(feedType !== 'r18' && this.r18Enabled) ? `
+                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                      <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                      <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages Only</option>
+                      <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                    </select>
+                  ` : ''}
                   </div>
                 </div>
   
@@ -23666,11 +23935,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   const rawTags = (art.tags || '').split(/[,，、]+/).map(s => s.trim()).filter(Boolean);
                   const previewTags = rawTags.slice(0, 2);
   
-                  // In non-Manga pages (Home, Explore, Rankings, etc.), thumbnails remain 1:1 ratio
+                  const isSafeBlurCard = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
                   html += `
                     <div class="art-card" onclick="app.nav('#/artwork/${art.id}')">
-                      <div class="art-thumb-wrap">
-                        ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
+                      <div class="art-thumb-wrap position-relative">
+                        ${isSafeBlurCard ? `
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                            <span style="font-size:0.68rem; font-weight:800; letter-spacing:0.5px;">R-18 CONTENT</span>
+                          </div>
+                        ` : ''}
+                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurCard ? 'safe-blur-target' : ''}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
                         ${pageCount > 1 ? `<div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</div>` : ''}
                         ${isVid ? `<div class="badge-flag video">VIDEO</div>` : ''}
                         ${isManga ? `<div class="badge-flag manga">MANGA</div>` : ''}
@@ -23756,7 +24031,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             container.innerHTML = '<div class="spinner"></div>';
 
             const query = params.get('q') || '';
-            const rating = params.get('rating') || 'all';
+            const rating = this.r18Enabled ? (params.get('rating') || 'all') : 'safe';
             const sort = params.get('sort') || 'updated';
             const page = Math.max(1, parseInt(params.get('page') || '1', 10));
 
@@ -23788,10 +24063,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 res.series.forEach(item => {
                   const coverUrl = item.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}` : '';
                   const seriesUrl = `#/manga/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
+                  const isSafeBlurManga = (item.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
                   html += `
                     <div class="art-card manga-card ratio-9-16" onclick="app.nav('${seriesUrl}')">
-                      <div class="art-thumb-wrap" style="aspect-ratio: 9 / 16 !important;">
-                        ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">No Cover</div>'}
+                      <div class="art-thumb-wrap position-relative" style="aspect-ratio: 9 / 16 !important;">
+                        ${isSafeBlurManga ? `
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
+                          </div>
+                        ` : ''}
+                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurManga ? 'safe-blur-target' : ''}" alt="" loading="lazy">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">No Cover</div>'}
                         <div class="badge-page-count"><i class="bi bi-journal-text me-1"></i>${item.total_chapters} Ch.</div>
                         ${item.rating === 'r18' ? '<div class="badge-flag">R-18</div>' : ''}
                       </div>
@@ -23828,6 +24110,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const limit = 25;
 
               const res = await this.api('manga_series_get', { series: seriesTitle, uid: authorId });
+              if (res.rating === 'r18' && !this.r18Enabled) {
+                container.innerHTML = `
+                  <div class="center-msg" style="max-width:480px; margin:4rem auto; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:2rem;">
+                    <h2 style="font-size:1.25rem; font-weight:800; color:var(--r18); margin-bottom:0.6rem;">R-18 Manga Series</h2>
+                    <p style="color:var(--text-muted); font-size:0.85rem; line-height:1.5; margin-bottom:1.4rem;">This manga series is rated R-18. Enable R-18 in the sidebar to view.</p>
+                    <button type="button" class="btn-primary" onclick="app.toggleR18(true)">Enable R-18 Content</button>
+                  </div>
+                `;
+                return;
+              }
               const coverUrl = res.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(res.cover_file)}` : '';
               const firstChapterNum = (res.chapters && res.chapters[0]) ? (res.chapters[0].chapter_number || 1) : 1;
               const firstChapterUrl = `#/manga/series/${encodeURIComponent(res.series_title)}/userid/${res.author.id}/read/chapter/${firstChapterNum}/page/1`;
@@ -23857,8 +24149,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <div class="manga-hero-backdrop" style="background-image: url('${coverUrl}');"></div>
                       <div class="manga-hero-content">
                         <!-- Cover Photo -->
-                        <div class="manga-cover-card">
-                          <img src="${coverUrl}" alt="${this.escape(res.series_title)}" onerror="this.src='?action=get_app_icon'">
+                        <div class="manga-cover-card position-relative ${(res.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? 'safe-blur-box' : ''}">
+                          ${(res.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? `
+                            <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 Mature Cover &bull; Click to reveal">
+                              <svg viewBox="0 0 24 24" style="width:24px;height:24px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                              <span style="font-size:0.75rem; font-weight:800;">REVEAL COVER</span>
+                            </div>
+                          ` : ''}
+                          <img src="${coverUrl}" class="${(res.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? 'safe-blur-target' : ''}" alt="${this.escape(res.series_title)}" onerror="this.src='?action=get_app_icon'">
                           ${res.rating === 'r18' ? `<div class="badge-flag" style="font-size:0.75rem; padding:0.25rem 0.6rem;">R-18</div>` : ''}
                         </div>
 
@@ -25526,6 +25824,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
             try {
               const art = await this.api('artwork_get', { id });
+              if (art.rating === 'r18' && !this.r18Enabled) {
+                container.innerHTML = `
+                  <div class="center-msg" style="max-width:480px; margin:4rem auto; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:2rem;">
+                    <h2 style="font-size:1.25rem; font-weight:800; color:var(--r18); margin-bottom:0.6rem;">R-18 Mature Content</h2>
+                    <p style="color:var(--text-muted); font-size:0.85rem; line-height:1.5; margin-bottom:1.4rem;">This creation contains mature content. Enable R-18 in the sidebar to view.</p>
+                    <button type="button" class="btn-primary" onclick="app.toggleR18(true)">Enable R-18 Content</button>
+                  </div>
+                `;
+                return;
+              }
               this.setTitle(`${art.title} by ${art.artist_name}`);
               this.currentArt = art;
               this.currentLeadIndex = 0;
@@ -25568,13 +25876,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
                     <div id="single-page-preview-box" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
                       <div id="preview-media-inner" style="display:flex; justify-content:center; position:relative; align-items:center; width:100%; background:#08080a; ${firstIsVid ? '' : 'cursor:pointer;'}" data-file="${this.escape(leadImg.file_name || '')}" ${firstIsVid ? '' : 'onclick="app.toggleHdOriginal(this)"'}>
+                        ${(art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? `
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                            <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                            <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
+                            <span style="font-size:0.75rem; opacity:0.8;">Click this card to unblur and view</span>
+                          </div>
+                        ` : ''}
                         ${firstIsVid ? `
-                          <video controls autoplay loop playsinline style="width:100%; height:auto; display:block; background:#000;">
+                          <video controls autoplay loop playsinline class="${(art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? 'safe-blur-target' : ''}" style="width:100%; height:auto; display:block; background:#000;">
                             <source src="?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name)}" type="${leadImg.mime_type || 'video/mp4'}">
                           </video>
                         ` : `
                           <div class="spinner" id="preview-loading-spinner" style="position:absolute; margin:auto; display:none;"></div>
-                          <img id="main-artwork-display" src="?access=artwork&action=thumb&f=${encodeURIComponent(leadImg.file_name || '')}"
+                          <img id="main-artwork-display" class="${(art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? 'safe-blur-target' : ''}" src="?access=artwork&action=thumb&f=${encodeURIComponent(leadImg.file_name || '')}"
                                data-raw="?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}"
                                data-loaded="0"
                                onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}';"
@@ -25727,14 +26042,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           </div>
                         </div>
                         ${isOwner ? `
-                          <div class="artwork-owner-actions">
-                            <button type="button" class="btn-subtle" style="gap:0.35rem;" onclick="app.exportArtworkPost(${art.id})" title="Export Post Package (.zip) with live progress">
-                              <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                              <span>Export Post (.zip)</span>
-                            </button>
-                            <button class="btn-subtle" onclick="app.nav('#/edit/${art.id}')">Edit Post</button>
-                            <button class="btn-subtle" style="color:var(--r18);" onclick="app.deleteArtwork(${art.id})">Delete</button>
-                          </div>
+                        <div class="artwork-owner-actions">
+                          <button class="btn-subtle" onclick="app.nav('#/edit/${art.id}')">Edit Post</button>
+                          <button class="btn-subtle" style="color:var(--r18);" onclick="app.deleteArtwork(${art.id})">Delete</button>
+                        </div>
                       ` : ''}
                       </div>
   
@@ -26440,11 +26751,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const avatarUrl = `?action=get_profile_picture&id=${prof.id}`;
               const bannerStyle = `background-image: url('?action=get_profile_background&id=${prof.id}'); background-size: cover; background-position: center;`;
 
-              const profRating = profParams.get('rating') || 'all';
+              let profRating = this.r18Enabled ? (profParams.get('rating') || 'all') : 'safe';
               const reqData = { limit: 24, page: profPage };
               if (profQ) reqData.q = profQ;
               if (profSort) reqData.sort = profSort;
-              if (profRating && profRating !== 'all') reqData.rating = profRating;
+              reqData.rating = profRating;
               if (profTag) reqData.tag = profTag;
               if (profChar) reqData.character = profChar;
               if (profParody) reqData.parody = profParody;
@@ -26487,8 +26798,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     ${prof.bio ? `<p style="font-size:0.9rem; color:var(--text-secondary); max-width:650px; margin-top:0.6rem; line-height:1.5;">${this.escape(prof.bio)}</p>` : ''}
                     <div style="display:flex; gap:1.4rem; font-size:0.85rem; color:var(--text-muted); margin-top:0.6rem;">
                       <span><strong>${prof.artwork_count}</strong> Total Creations</span>
-                      <span><strong>${prof.follower_count}</strong> Followers</span>
-                      <span><strong>${prof.following_count}</strong> Following</span>
+                      <a href="#/user/${prof.id}/followers" style="color:inherit; text-decoration:none; cursor:pointer;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='inherit'"><strong>${prof.follower_count}</strong> Followers</a>
+                      <a href="#/user/${prof.id}/following" style="color:inherit; text-decoration:none; cursor:pointer;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='inherit'"><strong>${prof.following_count}</strong> Following</a>
                     </div>
                   </div>
                   <div style="display:flex; gap:0.6rem;">
@@ -26559,6 +26870,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <option value="views" ${profSort === 'views' ? 'selected' : ''}>Most Views</option>
                       <option value="oldest" ${profSort === 'oldest' ? 'selected' : ''}>Oldest</option>
                     </select>
+                    ${this.r18Enabled ? `
+                      <select class="form-select custom-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                        <option value="all" ${profRating === 'all' ? 'selected' : ''}>All Ratings</option>
+                        <option value="safe" ${profRating === 'safe' ? 'selected' : ''}>All Ages Only</option>
+                        <option value="r18" ${profRating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                      </select>
+                    ` : ''}
                   </div>
                 </div>
 
@@ -26601,10 +26919,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   // 9:16 aspect ratio only in Manga tab; 1:1 in non-Manga tabs
                   const ratioClass = isMangaTab ? 'manga-card ratio-9-16' : '';
 
+                  const isSafeBlurProf = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
                   html += `
                     <div class="art-card ${ratioClass}" onclick="app.nav('${cardTarget}')">
-                      <div class="art-thumb-wrap">
-                        ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
+                      <div class="art-thumb-wrap position-relative">
+                        ${isSafeBlurProf ? `
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
+                          </div>
+                        ` : ''}
+                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurProf ? 'safe-blur-target' : ''}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
                         
                         <!-- Badges -->
                         <div style="position:absolute; top:8px; right:8px; display:flex; flex-direction:column; gap:4px; align-items:flex-end; z-index:3;">
@@ -26677,6 +27002,113 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             } catch(err) {
               container.innerHTML = `<div class="center-msg">${err.message}</div>`;
             }
+          }
+
+          async renderUserFollowsList(userId, type = 'followers') {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+            const isFollowers = type === 'followers';
+            this.setTitle(isFollowers ? 'Followers' : 'Following');
+
+            try {
+              const res = await this.api('user_follows_list', { user_id: userId, type: type });
+              const targetUser = res.target_user || {};
+              const titleText = isFollowers ? `Followers of ${this.escape(targetUser.artist_name)}` : `Artists Followed by ${this.escape(targetUser.artist_name)}`;
+              this.setTitle(titleText);
+
+              let html = `
+                <div style="width: 100%;">
+                  <div style="margin-bottom: 1.2rem; width: 100%;">
+                    <a href="#/user/${userId}" class="btn-subtle" style="height: 32px; font-size: 0.78rem; padding: 0 0.85rem; gap: 0.35rem; margin-bottom: 0.6rem; border-radius: 8px;">
+                      &larr; Back to Profile
+                    </a>
+                    <h1 style="font-size: 1.6rem; font-weight: 800; letter-spacing: -0.5px; margin: 0;">${titleText}</h1>
+                    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.25rem;">${res.users.length} user(s)</p>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; width: 100%; margin-bottom: 1rem;">
+                    <button type="button" class="btn-subtle ${isFollowers ? 'btn-primary' : ''}" style="width: 100%; height: 38px; font-size: 0.85rem; padding: 0; border-radius: 10px; font-weight: 700; justify-content: center;" onclick="app.nav('#/user/${userId}/followers')">
+                      Followers (${res.follower_count})
+                    </button>
+                    <button type="button" class="btn-subtle ${!isFollowers ? 'btn-primary' : ''}" style="width: 100%; height: 38px; font-size: 0.85rem; padding: 0; border-radius: 10px; font-weight: 700; justify-content: center;" onclick="app.nav('#/user/${userId}/following')">
+                      Following (${res.following_count})
+                    </button>
+                  </div>
+
+                  <div style="display: flex; flex-direction: column; gap: 0.6rem; width: 100%; margin-bottom: 1.4rem;">
+                    <div class="search-bar" style="height: 38px; width: 100%;">
+                      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                      <input type="text" placeholder="Search in list..." oninput="app.filterDirectory(this.value, '.user-follow-card')">
+                    </div>
+                    <select class="form-select custom-select" style="width: 100%; font-size: 0.82rem; height: 38px;" onchange="app.sortFollowsList(this.value)">
+                      <option value="default">Sort by: Default Order</option>
+                      <option value="works_desc">Sort by: Most Creations</option>
+                      <option value="followers_desc">Sort by: Most Followers</option>
+                      <option value="name_asc">Sort by: Name (A-Z)</option>
+                      <option value="name_desc">Sort by: Name (Z-A)</option>
+                    </select>
+                  </div>
+              `;
+
+              if (!res.users || !res.users.length) {
+                html += `<div class="center-msg">${isFollowers ? 'No followers yet.' : 'Not following anyone yet.'}</div>`;
+              } else {
+                html += `<div id="user-follows-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; width: 100%;">`;
+                res.users.forEach(u => {
+                  const avatarUrl = this.getAvatar(u.avatar, u.artist_name, u.email_hash);
+                  const isSelf = this.user && this.user.id == u.id;
+                  html += `
+                    <div class="user-follow-card" data-label="${this.escape(u.artist_name).toLowerCase()}" data-name="${this.escape(u.artist_name).toLowerCase()}" data-works="${u.artwork_count}" data-followers="${u.follower_count}" style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 1.1rem; display: flex; flex-direction: column; justify-content: space-between; gap: 0.8rem; width: 100%;">
+                      <div style="display: flex; align-items: center; gap: 0.85rem; cursor: pointer;" onclick="app.nav('#/user/${u.id}')">
+                        <img src="${avatarUrl}" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent); background: var(--bg-surface-elevated); flex-shrink: 0;" alt="" onerror="app.handleAvatarError(this, '${this.escape(u.artist_name)}')">
+                        <div style="min-width: 0; flex: 1;">
+                          <div style="font-weight: 700; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary);">${this.escape(u.artist_name)}</div>
+                          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.15rem;">${u.artwork_count} creations &bull; ${u.follower_count} followers</div>
+                        </div>
+                      </div>
+
+                      ${u.bio ? `<div style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4; max-height: 40px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">${this.escape(u.bio)}</div>` : ''}
+
+                      <div style="display: flex; justify-content: flex-end; gap: 0.4rem; padding-top: 0.4rem;">
+                        ${!isSelf ? `
+                          <button type="button" class="btn-primary" style="height: 32px; font-size: 0.75rem; padding: 0 0.9rem; background: ${u.is_following ? 'var(--bg-surface-hover)' : 'var(--accent)'}; color: ${u.is_following ? 'var(--text-primary)' : '#fff'};" onclick="app.toggleFollow(${u.id}, this)">
+                            ${u.is_following ? '<svg viewBox="0 0 24 24" style="width:14px;height:14px;margin-right:3px;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg> Following' : '<svg viewBox="0 0 24 24" style="width:14px;height:14px;margin-right:3px;"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> Follow'}
+                          </button>
+                        ` : '<span style="font-size: 0.78rem; color: var(--text-muted); padding: 0.3rem 0;">You</span>'}
+                        <button type="button" class="btn-subtle" style="height: 32px; font-size: 0.75rem; padding: 0 0.8rem;" onclick="app.nav('#/user/${u.id}')">Profile</button>
+                      </div>
+                    </div>
+                  `;
+                });
+                html += `</div>`;
+              }
+
+              html += `</div>`;
+              container.innerHTML = html;
+            } catch (err) {
+              container.innerHTML = `<div class="center-msg">${this.escape(err.message)}</div>`;
+            }
+          }
+
+          sortFollowsList(sortBy) {
+            const grid = document.getElementById('user-follows-grid');
+            if (!grid) return;
+            const items = Array.from(grid.querySelectorAll('.user-follow-card'));
+            items.sort((a, b) => {
+              const worksA = parseInt(a.dataset.works || '0', 10);
+              const worksB = parseInt(b.dataset.works || '0', 10);
+              const followersA = parseInt(a.dataset.followers || '0', 10);
+              const followersB = parseInt(b.dataset.followers || '0', 10);
+              const nameA = (a.dataset.name || '').toLowerCase();
+              const nameB = (b.dataset.name || '').toLowerCase();
+
+              if (sortBy === 'works_desc') return worksB - worksA || nameA.localeCompare(nameB);
+              if (sortBy === 'followers_desc') return followersB - followersA || nameA.localeCompare(nameB);
+              if (sortBy === 'name_asc') return nameA.localeCompare(nameB);
+              if (sortBy === 'name_desc') return nameB.localeCompare(nameA);
+              return 0;
+            });
+            items.forEach(el => grid.appendChild(el));
           }
     
           async renderActivityPage() {
@@ -26792,10 +27224,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const html = `
               <div class="studio-card">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem; flex-wrap:wrap; gap:0.6rem;">
-                  <h2 style="font-size:1.4rem; font-weight:800; margin:0;">${editId ? 'Edit Artwork Studio' : 'Publish Artwork or Video'}</h2>
+                  <h2 style="font-size:1.4rem; font-weight:800; margin:0;">${editId ? 'Edit Artwork Studio' : 'Publish Artwork'}</h2>
                   <div style="display:flex; gap:0.5rem; align-items:center;">
                     ${editId ? `
-                      <button type="button" class="btn-subtle" style="gap:0.4rem;" onclick="app.exportArtworkPost(${editId})" title="Export Post Package (.zip) with live progress">
+                      <button type="button" class="btn-primary" style="gap:0.4rem;" onclick="app.exportArtworkPost(${editId})" title="Export Post Package (.zip) with live progress">
                         <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                         <span>Export Post (.zip)</span>
                       </button>
@@ -26842,13 +27274,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   ` : ''}
     
                   <div class="form-group">
-                    <label class="form-label">Upload Files (Chunked multi-file &amp; video support)</label>
+                    <label class="form-label">Upload Media</label>
                     <div class="upload-zone" id="studio-dropzone" onclick="document.getElementById('studio-file-input').click()">
                       <svg viewBox="0 0 24 24" style="width:40px; height:40px; color:var(--accent);"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
                       <span style="font-weight:700; font-size:0.95rem;">Drop multiple files here or click to browse</span>
-                      <span style="font-size:0.75rem; color:var(--text-muted);">Max 500 images per post &bull; 10 images/day for separate individual posts</span>
+                      <span style="font-size:0.75rem; color:var(--text-muted);">Max <?= (int)($config['max_images_per_post'] ?? 500) ?> images per post &bull; <?= (int)($config['daily_limit'] ?? 10) ?> images/day for separate individual posts</span>
                     </div>
-                    <input type="file" id="studio-file-input" multiple style="display:none;" accept="image/*,video/*" onchange="app.handleStudioFiles(this.files)">
+                    <input type="file" id="studio-file-input" multiple style="display:none;" accept="${this.allowVideo ? 'image/*,video/*' : 'image/*'}" onchange="app.handleStudioFiles(this.files)">
   
                     <div id="studio-upload-progress" style="display:none; margin-top:0.85rem; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:12px; padding:0.85rem 1rem;">
                       <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.82rem; font-weight:600; margin-bottom:0.45rem;">
@@ -26882,10 +27314,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <div class="form-grid-2" style="margin-top:1.2rem;">
                     <div class="form-group">
                       <label class="form-label">Category</label>
-                      <select name="type" class="form-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
+                      <select name="type" class="form-select custom-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
                         <option value="illust" ${artData.type === 'illust' ? 'selected' : ''}>Illustration / Picture</option>
                         <option value="manga" ${artData.type === 'manga' ? 'selected' : ''}>Manga / Comic Series</option>
-                        <option value="video" ${artData.type === 'video' ? 'selected' : ''}>Animation / Video Clip</option>
+                        ${this.allowVideo ? `<option value="video" ${artData.type === 'video' ? 'selected' : ''}>Animation / Video Clip</option>` : ''}
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label class="form-label">Age Rating</label>
+                      <select name="rating" class="form-select custom-select" id="studio-rating-select">
+                        <option value="all" ${artData.rating !== 'r18' ? 'selected' : ''}>All Ages (General)</option>
+                        <option value="r18" ${artData.rating === 'r18' ? 'selected' : ''}>R-18 (Mature / NSFW)</option>
                       </select>
                     </div>
                     <div class="form-group" id="manga-series-input-group" style="${artData.type === 'manga' ? 'display:flex;' : 'display:none;'}">
@@ -27130,8 +27569,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               }
             }
   
-            if (this.uploadQueue.length + files.length > 500) {
-              this.toast(`Upload limit exceeded: A post can have at most 500 images (current: ${this.uploadQueue.length}, added: ${files.length}).`);
+            if (this.uploadQueue.length + files.length > this.maxImagesPerPost) {
+              this.toast(`Upload limit exceeded: A post can have at most ${this.maxImagesPerPost} images (current: ${this.uploadQueue.length}, added: ${files.length}).`);
               return;
             }
   
@@ -30822,13 +31261,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     // SAVE SONG & AUDIO LIBRARY SETTINGS
     if (isset($_POST['save_songs_settings'])) {
       $db = get_db();
-      $max_size = max(10, min(500, (int)($_POST['songs_max_size_mb'] ?? 50)));
+      $max_size = max(10, min(1000, (int)($_POST['songs_max_size_mb'] ?? 50)));
+      $daily_limit = max(1, min(500, (int)($_POST['songs_daily_limit'] ?? 10)));
       $auto_replaygain = !empty($_POST['songs_auto_replaygain']) ? '1' : '0';
       $default_privacy = !empty($_POST['songs_default_private']) ? '1' : '0';
       $allow_collab = !empty($_POST['songs_default_collab']) ? '1' : '0';
 
       $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
       $stmt->execute(['songs_max_size_mb', (string)$max_size]);
+      $stmt->execute(['songs_daily_limit', (string)$daily_limit]);
       $stmt->execute(['songs_auto_replaygain', $auto_replaygain]);
       $stmt->execute(['songs_default_private', $default_privacy]);
       $stmt->execute(['songs_default_collab', $allow_collab]);
@@ -30865,12 +31306,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $quality = max(50, min(100, (int)($_POST['art_webp_quality'] ?? 80)));
       $r18_policy = in_array($_POST['r18_policy'] ?? '', ['allow', 'login_only', 'block']) ? $_POST['r18_policy'] : 'allow';
       $allow_video = !empty($_POST['art_allow_video']) ? '1' : '0';
+      $max_images = max(1, min(2000, (int)($_POST['art_max_images_per_post'] ?? 500)));
+      $daily_limit = max(1, min(500, (int)($_POST['art_daily_limit'] ?? 10)));
 
       $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
       $stmt->execute(['art_max_dim', (string)$max_dim]);
       $stmt->execute(['art_webp_quality', (string)$quality]);
       $stmt->execute(['art_r18_policy', $r18_policy]);
       $stmt->execute(['art_allow_video', $allow_video]);
+      $stmt->execute(['art_max_images_per_post', (string)$max_images]);
+      $stmt->execute(['art_daily_limit', (string)$daily_limit]);
 
       log_admin_activity($db, $_SESSION['admin_email'], 'Saved Artwork & Media Engine Settings', 0);
       $_SESSION['admin_flash_msg'] = "Artwork engine settings saved.";
@@ -36855,6 +37300,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($active_song_tab === 'settings'): ?>
               <?php
                 $s_max_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
+                $s_daily_limit = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_daily_limit'")->fetchColumn() ?: 10);
                 $s_rg = $db->query("SELECT value FROM site_settings WHERE key = 'songs_auto_replaygain'")->fetchColumn() !== '0';
                 $s_priv = $db->query("SELECT value FROM site_settings WHERE key = 'songs_default_private'")->fetchColumn() === '1';
                 $s_collab = $db->query("SELECT value FROM site_settings WHERE key = 'songs_default_collab'")->fetchColumn() !== '0';
@@ -36865,7 +37311,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
                       <i class="bi bi-sliders text-danger"></i> Audio Library &amp; Upload Settings
                     </h5>
-                    <div class="small text-secondary mt-1">Configure audio upload limits, normalization policies, and privacy defaults.</div>
+                    <div class="small text-secondary mt-1">Configure audio upload limits, daily quotas, normalization policies, and privacy defaults.</div>
                   </div>
                   <span class="admin-badge admin-badge-primary">Library Policy</span>
                 </div>
@@ -36875,11 +37321,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <input type="hidden" name="save_songs_settings" value="1">
 
                   <div class="row g-3">
-                    <div class="col-12 col-md-6">
-                      <label class="form-label text-secondary small fw-bold mb-1">MAXIMUM FILE UPLOAD LIMIT (MB)</label>
-                      <input type="number" name="songs_max_size_mb" class="admin-pill-input w-100 font-monospace" min="10" max="500" value="<?php echo $s_max_mb; ?>" required>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX SONG FILE SIZE (MB)</label>
+                      <input type="number" name="songs_max_size_mb" class="admin-pill-input w-100 font-monospace" min="10" max="1000" value="<?php echo $s_max_mb; ?>" required>
                     </div>
-                    <div class="col-12 col-md-6">
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">SONGS DAILY UPLOAD QUOTA</label>
+                      <input type="number" name="songs_daily_limit" class="admin-pill-input w-100 font-monospace" min="1" max="500" value="<?php echo $s_daily_limit; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
                       <label class="form-label text-secondary small fw-bold mb-1">SUPPORTED FORMATS</label>
                       <input type="text" class="admin-pill-input w-100 font-monospace" value="MP3, FLAC, M4A, OGG, WAV" readonly disabled style="opacity: 0.6;">
                     </div>
@@ -37820,6 +38270,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $a_qual = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_webp_quality'")->fetchColumn() ?: 80);
                 $a_r18 = $db->query("SELECT value FROM site_settings WHERE key = 'art_r18_policy'")->fetchColumn() ?: 'allow';
                 $a_vid = $db->query("SELECT value FROM site_settings WHERE key = 'art_allow_video'")->fetchColumn() !== '0';
+                $a_max_images = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_max_images_per_post'")->fetchColumn() ?: 500);
+                $a_daily_limit = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_daily_limit'")->fetchColumn() ?: 10);
               ?>
               <div class="admin-card p-4 mb-4 w-100">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -37827,7 +38279,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
                       <i class="bi bi-sliders text-danger"></i> PHPMusicPost Media Engine Settings
                     </h5>
-                    <div class="small text-secondary mt-1">Configure artwork resolution boundaries, WebP compression, and age rating policies.</div>
+                    <div class="small text-secondary mt-1">Configure artwork limits, multi-file post ceilings, daily post quotas, and age policies.</div>
                   </div>
                   <span class="admin-badge admin-badge-primary">Media Policy</span>
                 </div>
@@ -37838,12 +38290,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                   <div class="row g-3">
                     <div class="col-12 col-md-4">
-                      <label class="form-label text-secondary small fw-bold mb-1">MAX IMAGE RESOLUTION (PX)</label>
-                      <input type="number" name="art_max_dim" class="admin-pill-input w-100 font-monospace" min="1000" max="8192" value="<?php echo $a_dim; ?>" required>
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX IMAGES PER POST</label>
+                      <input type="number" name="art_max_images_per_post" class="admin-pill-input w-100 font-monospace" min="1" max="2000" value="<?php echo $a_max_images; ?>" required>
                     </div>
                     <div class="col-12 col-md-4">
-                      <label class="form-label text-secondary small fw-bold mb-1">WEBP THUMB QUALITY (%)</label>
-                      <input type="number" name="art_webp_quality" class="admin-pill-input w-100 font-monospace" min="50" max="100" value="<?php echo $a_qual; ?>" required>
+                      <label class="form-label text-secondary small fw-bold mb-1">DAILY ARTWORK POST LIMIT</label>
+                      <input type="number" name="art_daily_limit" class="admin-pill-input w-100 font-monospace" min="1" max="500" value="<?php echo $a_daily_limit; ?>" required>
                     </div>
                     <div class="col-12 col-md-4">
                       <label class="form-label text-secondary small fw-bold mb-1">R-18 MATURE CONTENT POLICY</label>
@@ -37852,6 +38304,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         <option value="login_only" <?php echo $a_r18 === 'login_only' ? 'selected' : ''; ?>>Require Login Only</option>
                         <option value="block" <?php echo $a_r18 === 'block' ? 'selected' : ''; ?>>Strictly Prohibited</option>
                       </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX IMAGE RESOLUTION (PX)</label>
+                      <input type="number" name="art_max_dim" class="admin-pill-input w-100 font-monospace" min="1000" max="8192" value="<?php echo $a_dim; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">WEBP THUMB QUALITY (%)</label>
+                      <input type="number" name="art_webp_quality" class="admin-pill-input w-100 font-monospace" min="50" max="100" value="<?php echo $a_qual; ?>" required>
                     </div>
                   </div>
 
@@ -39842,7 +40302,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.7';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.8';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
@@ -63947,9 +64407,9 @@ function sanitize_for_path($string) {
 }
 
 function get_upload_limit() {
-  $max_upload = ini_get('upload_max_filesize');
-  $max_post = ini_get('post_max_size');
-  return "Max file size: " . min($max_upload, $max_post);
+  $db = get_db();
+  $max_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
+  return "Max file size: " . $max_mb . " MB";
 }
 
 function process_image_to_webp($imageData, $target_width = 640, $quality = 78, $crop = true) {
@@ -65051,7 +65511,8 @@ if (isset($_GET['action'])) {
           if ($user['last_upload_date'] === $today) {
             $uploads_today = (int)$user['daily_upload_count'];
           }
-          $user['uploads_remaining'] = max(0, DAILY_UPLOAD_LIMIT - $uploads_today);
+          $daily_quota = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_daily_limit'")->fetchColumn() ?: DAILY_UPLOAD_LIMIT);
+          $user['uploads_remaining'] = max(0, $daily_quota - $uploads_today);
           $user['profile_picture_url'] = "?action=get_profile_picture&id=" . $user['id'] . "&v=" . time();
           send_json([
             'status' => 'loggedin',
@@ -65682,6 +66143,14 @@ if (isset($_GET['action'])) {
         send_json(['status' => 'error', 'message' => 'Invalid chunk metadata.']);
       }
 
+      $max_size_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
+      $max_allowed_bytes = $max_size_mb * 1048576;
+      // Pre-flight check: If total expected payload exceeds maximum size limit by more than 2MB
+      if (($total_chunks * 2 * 1024 * 1024) > ($max_allowed_bytes + 2097152)) {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => "Estimated file size exceeds the maximum limit of {$max_size_mb} MB."]);
+      }
+
       $tmp_base = MUSIC_DIR . '/.tmp_uploads';
       if (!is_dir($tmp_base)) {
         @mkdir($tmp_base, 0755, true);
@@ -65767,9 +66236,10 @@ if (isset($_GET['action'])) {
         $daily_upload_count = (int)$user_data['daily_upload_count'];
       }
 
-      if ($daily_upload_count >= DAILY_UPLOAD_LIMIT) {
+      $daily_upload_quota = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_daily_limit'")->fetchColumn() ?: DAILY_UPLOAD_LIMIT);
+      if ($daily_upload_count >= $daily_upload_quota) {
         http_response_code(429);
-        send_json(['status' => 'error', 'message' => 'Daily upload limit of ' . DAILY_UPLOAD_LIMIT . ' songs reached.']);
+        send_json(['status' => 'error', 'message' => "Daily upload limit of {$daily_upload_quota} songs reached."]);
       }
 
       if (!class_exists('getID3')) {
@@ -65801,6 +66271,15 @@ if (isset($_GET['action'])) {
           if ($is_chunked) @unlink($temp_file_path);
           http_response_code(400);
           send_json(['status' => 'error', 'message' => 'Security Error: Invalid file format. Only MP3, FLAC, M4A, OGG, and WAV are allowed.']);
+        }
+
+        // Strict Enforcement: Audio file size vs admin configured maximum limit
+        $max_allowed_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
+        $file_bytes = file_exists($file_source) ? filesize($file_source) : 0;
+        if ($file_bytes > ($max_allowed_mb * 1048576)) {
+          if ($is_chunked) @unlink($temp_file_path);
+          http_response_code(400);
+          send_json(['status' => 'error', 'message' => "File size exceeds the maximum limit of {$max_allowed_mb} MB."]);
         }
         
         $getID3 = new getID3;
