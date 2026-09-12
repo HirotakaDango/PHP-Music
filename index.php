@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.8');
+define('APP_VERSION', '11.9');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -29392,7 +29392,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $postWriteActions = [
         'upload_chunk', 'create', 'rename', 'batch_rename', 'delete', 'save_text',
         'trash', 'trash_restore', 'trash_delete', 'trash_empty', 'version_restore',
-        'star_toggle', 'clipboard_paste', 'fetch_url', 'encrypt_file',
+        'star_toggle', 'clipboard_paste', 'copy_items', 'move_items', 'fetch_url', 'encrypt_file',
         'decrypt_file', 'zip', 'unzip', 'save_image'
       ];
 
@@ -30487,14 +30487,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         ]);
       }
 
-      if ($driveAction === 'clipboard_paste') {
+      if ($driveAction === 'clipboard_paste' || $driveAction === 'copy_items' || $driveAction === 'move_items') {
         @ini_set('memory_limit', '512M');
         if (function_exists('set_time_limit')) @set_time_limit(0);
 
-        $targetDir = driveSafePath($driveConfig['root_dir'], $_POST['target_dir'] ?? '');
-        $op = $_POST['operation'] ?? 'copy';
-        $items = $_POST['items'] ?? [];
-        if (!$targetDir || !is_dir($targetDir) || !is_array($items)) driveJsonResponse(['error' => 'Invalid parameters'], 400);
+        $targetRaw = $_POST['target_dir'] ?? ($_POST['target'] ?? ($_POST['dir'] ?? ''));
+        $targetDir = driveSafePath($driveConfig['root_dir'], $targetRaw);
+        if ($targetDir && is_file($targetDir)) {
+          $targetDir = dirname($targetDir);
+        }
+        $op = $_POST['operation'] ?? ($driveAction === 'move_items' ? 'cut' : 'copy');
+        $items = $_POST['items'] ?? ($_POST['item'] ? [$_POST['item']] : []);
+        if (!$targetDir || !is_dir($targetDir) || !is_array($items)) driveJsonResponse(['error' => 'Invalid destination directory or items'], 400);
 
         $processed = 0;
         foreach ($items as $rel) {
@@ -31280,21 +31284,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
-    // SAVE USER DIRECTORY POLICIES & QUOTAS
+    // SAVE USER DIRECTORY POLICIES & ESSENTIAL SETTINGS
     if (isset($_POST['save_users_policies'])) {
       $db = get_db();
       $reg_mode = in_array($_POST['reg_mode'] ?? '', ['open', 'approval', 'closed']) ? $_POST['reg_mode'] : 'open';
-      $daily_limit = max(1, min(100, (int)($_POST['daily_upload_limit'] ?? 10)));
-      $default_quota_gb = max(0.5, (float)($_POST['default_drive_quota_gb'] ?? 2));
-      $default_quota_bytes = (int)round($default_quota_gb * 1073741824);
+      $min_pwd = max(6, min(32, (int)($_POST['min_password_len'] ?? 6)));
+      $max_login_attempts = max(3, min(20, (int)($_POST['max_login_attempts'] ?? 5)));
+      $auto_verify = !empty($_POST['auto_verify']) ? '1' : '0';
+      $allow_name_change = !empty($_POST['allow_name_change']) ? '1' : '0';
+      $allow_dms = !empty($_POST['allow_dms']) ? '1' : '0';
+      $allow_self_delete = !empty($_POST['allow_self_delete']) ? '1' : '0';
 
       $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
       $stmt->execute(['users_reg_mode', $reg_mode]);
-      $stmt->execute(['users_daily_upload_limit', (string)$daily_limit]);
-      $stmt->execute(['users_default_drive_quota', (string)$default_quota_bytes]);
+      $stmt->execute(['users_min_password_len', (string)$min_pwd]);
+      $stmt->execute(['users_max_login_attempts', (string)$max_login_attempts]);
+      $stmt->execute(['users_auto_verify', $auto_verify]);
+      $stmt->execute(['users_allow_name_change', $allow_name_change]);
+      $stmt->execute(['users_allow_dms', $allow_dms]);
+      $stmt->execute(['users_allow_self_delete', $allow_self_delete]);
 
-      log_admin_activity($db, $_SESSION['admin_email'], 'Saved User Policy & Default Quota Settings', 0);
-      $_SESSION['admin_flash_msg'] = "User policies and defaults updated.";
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved User Policies & Essential Settings', 0);
+      $_SESSION['admin_flash_msg'] = "User policies and settings updated.";
       header('Location: ?access=admin&page=users&tab=settings');
       exit;
     }
@@ -32653,31 +32664,42 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       @set_time_limit(180);
 
       $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
+      $repo = 'HirotakaDango/PHP-Music';
+      try {
+        $cfg_repo = get_db()->query("SELECT value FROM site_settings WHERE key = 'update_custom_repo'")->fetchColumn();
+        if ($cfg_repo && trim($cfg_repo) !== '') $repo = trim($cfg_repo);
+      } catch (\Throwable $e) {}
+
+      // Prioritize raw GitHub file directly; use CDN as resilient secondary fallback
       $endpoints = [
-        "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$branch}/index.php",
-        "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php",
-        "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php"
+        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php",
+        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php",
+        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php"
       ];
       $remote_code = false;
 
       foreach ($endpoints as $remote_url) {
         if (function_exists('curl_version')) {
           $ch = curl_init();
-          curl_setopt_array($ch, [
+          $curl_opts = [
             CURLOPT_URL => $remote_url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_SSL_VERIFYHOST => false,
-            CURLOPT_CONNECTTIMEOUT => 6,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-Updater',
-            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
-          ]);
+            CURLOPT_CONNECTTIMEOUT => 20,
+            CURLOPT_TIMEOUT => 180, // Generous 3-minute limit for low-speed connections
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawUpdater',
+            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
+          ];
+          if (defined('CURL_IPRESOLVE_V4')) {
+            $curl_opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4; // Prevent localhost IPv6 DNS stalls
+          }
+          curl_setopt_array($ch, $curl_opts);
           $res = curl_exec($ch);
           $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
           curl_close($ch);
-          if ($http_code === 200 && $res && strlen($res) > 10000) {
+          if ($http_code === 200 && $res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
             $remote_code = $res;
             break;
           }
@@ -32686,14 +32708,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if (!$remote_code) {
           $ctx = stream_context_create([
             'http' => [
-              'timeout' => 20,
+              'timeout' => 120,
               'follow_location' => true,
-              'header' => "User-Agent: Mozilla/5.0 PHP-Music-Updater\r\nAccept: text/plain, */*\r\n"
+              'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawUpdater\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
             ],
             'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
           ]);
           $res = @file_get_contents($remote_url, false, $ctx);
-          if ($res && strlen($res) > 10000) {
+          if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
             $remote_code = $res;
             break;
           }
@@ -32760,6 +32782,52 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
     }
 
+    // QUICK SWITCH REPOSITORY OR COMMUNITY FORK
+    if (isset($_POST['switch_custom_repo'])) {
+      $db = get_db();
+      $new_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', trim($_POST['custom_repo'] ?? ''));
+      if (empty($new_repo) || strpos($new_repo, '/') === false) {
+        $new_repo = 'HirotakaDango/PHP-Music';
+      }
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES ('update_custom_repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute([$new_repo]);
+
+      // Flush probe and payload caches so the new repository is queried immediately
+      $probe_caches = glob(MUSIC_DIR . '/.gallery_cache/gh_*');
+      if ($probe_caches) {
+        foreach ($probe_caches as $pc) @unlink($pc);
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Switched update repository to '{$new_repo}'", 0);
+      $_SESSION['admin_flash_msg'] = "Target repository set to '{$new_repo}'.";
+      header('Location: ?access=admin&page=update');
+      exit;
+    }
+
+    // QUICK SWITCH REPOSITORY OR COMMUNITY FORK
+    if (isset($_POST['switch_custom_repo'])) {
+      $db = get_db();
+      $new_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', trim($_POST['custom_repo'] ?? ''));
+      if (empty($new_repo) || strpos($new_repo, '/') === false) {
+        $new_repo = 'HirotakaDango/PHP-Music';
+      }
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES ('update_custom_repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute([$new_repo]);
+
+      // Flush probe and payload caches so the new repository is queried immediately
+      $probe_caches = glob(MUSIC_DIR . '/.gallery_cache/gh_*');
+      if ($probe_caches) {
+        foreach ($probe_caches as $pc) @unlink($pc);
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Switched update repository to '{$new_repo}'", 0);
+      $_SESSION['admin_flash_msg'] = "Target repository set to '{$new_repo}'.";
+      header('Location: ?access=admin&page=update');
+      exit;
+    }
+
     // SAVE SYSTEM UPDATE PREFERENCES & CUSTOM REPO
     if (isset($_POST['save_update_preferences'])) {
       $db = get_db();
@@ -32820,32 +32888,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
     // SYSTEM UPDATE SUITE CONTROLLER
     if (isset($_POST['apply_system_update'])) {
+      @ini_set('memory_limit', '512M');
+      @set_time_limit(240);
+
       $branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_POST['target_branch'] ?? 'main');
+      $repo = 'HirotakaDango/PHP-Music';
+      try {
+        $cfg_repo = get_db()->query("SELECT value FROM site_settings WHERE key = 'update_custom_repo'")->fetchColumn();
+        if ($cfg_repo && trim($cfg_repo) !== '') $repo = trim($cfg_repo);
+      } catch (\Throwable $e) {}
+
       $endpoints = [
-        "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$branch}/index.php",
-        "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php",
-        "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$branch}/index.php"
+        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php",
+        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php",
+        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php"
       ];
       $remote_code = false;
 
       foreach ($endpoints as $remote_url) {
         if (function_exists('curl_version')) {
           $ch = curl_init();
-          curl_setopt_array($ch, [
+          $curl_opts = [
             CURLOPT_URL => $remote_url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_SSL_VERIFYHOST => false,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_TIMEOUT => 25,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
-          ]);
+            CURLOPT_CONNECTTIMEOUT => 20,
+            CURLOPT_TIMEOUT => 180,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawUpdater',
+            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
+          ];
+          if (defined('CURL_IPRESOLVE_V4')) {
+            $curl_opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+          }
+          curl_setopt_array($ch, $curl_opts);
           $res = curl_exec($ch);
           $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
           curl_close($ch);
-          if ($http_code === 200 && $res && strlen($res) > 10000) {
+          if ($http_code === 200 && $res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
             $remote_code = $res;
             break;
           }
@@ -32854,14 +32935,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if (!$remote_code) {
           $ctx = stream_context_create([
             'http' => [
-              'timeout' => 15,
+              'timeout' => 120,
               'follow_location' => true,
-              'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nAccept: text/plain, */*\r\n"
+              'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawUpdater\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
             ],
             'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
           ]);
           $res = @file_get_contents($remote_url, false, $ctx);
-          if ($res && strlen($res) > 10000) {
+          if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
             $remote_code = $res;
             break;
           }
@@ -40296,13 +40377,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </script>
         <?php elseif (($_GET['page'] ?? '') === 'update'): ?>
           <?php
+            $db = get_db();
             $target_branch = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $_GET['branch'] ?? 'main');
             $active_tab = $_GET['tab'] ?? 'dashboard';
             $force_refresh = isset($_GET['force_refresh']) && $_GET['force_refresh'] === '1';
 
+            // Resolve target repository: custom fork or official upstream
+            $active_repo = 'HirotakaDango/PHP-Music';
+            try {
+              $cfg_repo = $db->query("SELECT value FROM site_settings WHERE key = 'update_custom_repo'")->fetchColumn();
+              if ($cfg_repo && trim($cfg_repo) !== '') $active_repo = trim($cfg_repo);
+            } catch (\Throwable $e) {}
+            $active_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', $active_repo) ?: 'HirotakaDango/PHP-Music';
+            $is_custom_fork = ($active_repo !== 'HirotakaDango/PHP-Music');
+
             // 1. Memory-Efficient Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.8';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.9';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @md5_file(__FILE__) ?: '';
             $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
@@ -40319,8 +40410,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             // 2. High-Speed Cached Multi-CDN Probe & Payload Storage
             $probe_cache_dir = MUSIC_DIR . '/.gallery_cache';
             if (!is_dir($probe_cache_dir)) @mkdir($probe_cache_dir, 0777, true);
-            $probe_cache_file = $probe_cache_dir . '/gh_probe_' . md5($target_branch) . '.json';
-            $payload_cache_file = $probe_cache_dir . '/gh_payload_' . md5($target_branch) . '.php.tmp';
+            $probe_cache_file = $probe_cache_dir . '/gh_probe_' . md5($active_repo . '_' . $target_branch) . '.json';
+            $payload_cache_file = $probe_cache_dir . '/gh_payload_' . md5($active_repo . '_' . $target_branch) . '.php.tmp';
             $cached_probe = null;
 
             if (!$force_refresh && file_exists($probe_cache_file) && (time() - filemtime($probe_cache_file)) < 120) {
@@ -40344,9 +40435,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $ping_latency_ms = (float)($cached_probe['ping_latency_ms'] ?? 0);
             } else {
               $endpoints = [
-                "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/{$target_branch}/index.php",
-                "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$target_branch}/index.php",
-                "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@{$target_branch}/index.php"
+                "https://raw.githubusercontent.com/{$active_repo}/{$target_branch}/index.php",
+                "https://cdn.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php",
+                "https://fastly.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php"
               ];
 
               $remote_code = false;
@@ -40356,21 +40447,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               foreach ($endpoints as $remote_url) {
                 if (function_exists('curl_version')) {
                   $ch = curl_init();
-                  curl_setopt_array($ch, [
+                  $curl_opts = [
                     CURLOPT_URL => $remote_url,
                     CURLOPT_RETURNTRANSFER => true,
                     CURLOPT_FOLLOWLOCATION => true,
                     CURLOPT_SSL_VERIFYPEER => false,
                     CURLOPT_SSL_VERIFYHOST => false,
-                    CURLOPT_CONNECTTIMEOUT => 4,
-                    CURLOPT_TIMEOUT => 8,
-                    CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    CURLOPT_HTTPHEADER => ['Accept: text/plain, */*']
-                  ]);
+                    CURLOPT_CONNECTTIMEOUT => 15,
+                    CURLOPT_TIMEOUT => 60, // Accommodates slow/localhost networks
+                    CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawProbe',
+                    CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
+                  ];
+                  if (defined('CURL_IPRESOLVE_V4')) {
+                    $curl_opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+                  }
+                  curl_setopt_array($ch, $curl_opts);
                   $res = curl_exec($ch);
                   $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                   curl_close($ch);
-                  if ($http_code === 200 && $res && strlen($res) > 10000) {
+                  if ($http_code === 200 && $res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
                     $remote_code = $res;
                     $remote_available = true;
                     break;
@@ -40380,14 +40475,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!$remote_available) {
                   $ctx = stream_context_create([
                     'http' => [
-                      'timeout' => 6,
+                      'timeout' => 45,
                       'follow_location' => true,
-                      'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nAccept: text/plain, */*\r\n"
+                      'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawProbe\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
                     ],
                     'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
                   ]);
                   $res = @file_get_contents($remote_url, false, $ctx);
-                  if ($res && strlen($res) > 10000) {
+                  if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
                     $remote_code = $res;
                     $remote_available = true;
                     break;
@@ -40571,13 +40666,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .diag-row:last-child { border-bottom: none; }
           </style>
 
-          <!-- Top Toolbar & Branch Selector -->
+          <!-- Top Toolbar & Branch / Repository Selector -->
           <div class="page-header admin-toolbar-wrap d-flex justify-content-between align-items-center flex-wrap gap-3">
             <div class="d-flex flex-column text-start">
               <h1 class="content-title m-0 fw-bold text-white">System &amp; Codebase Smart Update Suite</h1>
-              <div class="small text-secondary mt-1">Audit, compare checksums, and update single-file architecture with zero background auto-updates.</div>
+              <div class="small text-secondary mt-1">Audit, compare checksums, and update single-file architecture from any GitHub fork.</div>
             </div>
             <div class="d-flex align-items-center gap-2 flex-wrap">
+              <button type="button" class="admin-btn-pill" data-bs-toggle="modal" data-bs-target="#changeRepoModal" title="Click to change GitHub repository or fork">
+                <i class="bi bi-diagram-2 text-warning me-1"></i>
+                <span class="font-monospace text-truncate" style="max-width: 170px;"><?php echo htmlspecialchars($active_repo); ?></span>
+                <?php if ($is_custom_fork): ?>
+                  <span class="badge bg-warning text-dark px-1 py-0 ms-1" style="font-size:0.65rem;">Fork</span>
+                <?php endif; ?>
+              </button>
+
               <form method="GET" action="" class="d-flex align-items-center gap-2 m-0">
                 <input type="hidden" name="access" value="admin">
                 <input type="hidden" name="page" value="update">
@@ -41963,6 +42066,50 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             </div>
           </div>
 
+          <!-- Change Repository / Community Fork Modal -->
+          <div class="modal fade" id="changeRepoModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-diagram-2-fill text-warning me-2"></i> Configure Repository / Fork</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=update">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="switch_custom_repo" value="1">
+                  <div class="modal-body p-4 text-start">
+                    <p class="text-secondary small mb-3">
+                      If <code class="text-white">HirotakaDango/PHP-Music</code> is ever deleted or archived, enter any community fork or your own repository (<code class="text-info">owner/repo</code>) to pull updates from it.
+                    </p>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">GITHUB REPOSITORY (OWNER/REPO)</label>
+                      <input type="text" name="custom_repo" id="custom_repo_input" class="admin-pill-input w-100 font-monospace" value="<?php echo htmlspecialchars($active_repo); ?>" placeholder="e.g. YourName/PHP-Music" required>
+                      <small class="text-secondary d-block mt-1">Raw URL will be: <code class="text-white" id="repo_preview_url">raw.githubusercontent.com/<?php echo htmlspecialchars($active_repo); ?>/main/index.php</code></small>
+                    </div>
+
+                    <div class="d-flex gap-2 mb-2">
+                      <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill small" onclick="document.getElementById('custom_repo_input').value='HirotakaDango/PHP-Music'; document.getElementById('repo_preview_url').textContent='raw.githubusercontent.com/HirotakaDango/PHP-Music/main/index.php';">
+                        Reset to Official (HirotakaDango)
+                      </button>
+                    </div>
+
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2 mt-2">
+                      <i class="bi bi-check2-circle me-1"></i> Switch Target Repository
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+          <script>
+            document.getElementById('custom_repo_input')?.addEventListener('input', function(e) {
+              const val = e.target.value.trim() || 'HirotakaDango/PHP-Music';
+              const preview = document.getElementById('repo_preview_url');
+              if (preview) preview.textContent = `raw.githubusercontent.com/${val}/main/index.php`;
+            });
+          </script>
+
           <!-- Interactive Diff & GitHub Commit Scripts -->
           <script>
             // SMOOTH LIVE UPDATE ENGINE (No Hard Reload, Animated Progress Bar)
@@ -42150,10 +42297,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               consoleBox.textContent = `[STAGE 1/4] Probing multi-CDN GitHub endpoints (branch: <?php echo htmlspecialchars($target_branch); ?>)...\n`;
 
               try {
+                const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
                 const endpoints = [
-                  "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/<?php echo htmlspecialchars($target_branch); ?>/index.php",
-                  "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php",
-                  "https://fastly.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php"
+                  `https://raw.githubusercontent.com/${activeRepo}/<?php echo htmlspecialchars($target_branch); ?>/index.php`,
+                  `https://cdn.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`,
+                  `https://fastly.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`
                 ];
 
                 let code = null;
@@ -42224,7 +42372,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                             <span class="text-secondary small font-monospace">${author} &bull; ${dateStr}</span>
                           </div>
                         </div>
-                        <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
+                        <a href="https://github.com/${activeRepo}/commit/${c.sha}" target="_blank" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
                           ${sha}
                         </a>
                       </div>
@@ -42257,9 +42405,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (!remoteCode || remoteCode.length < 10000) {
                 diffBox.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching remote code via CDN fallback...</div>';
                 try {
+                  const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
                   const cdnUrls = [
-                    "https://cdn.jsdelivr.net/gh/HirotakaDango/PHP-Music@<?php echo htmlspecialchars($target_branch); ?>/index.php",
-                    "https://raw.githubusercontent.com/HirotakaDango/PHP-Music/<?php echo htmlspecialchars($target_branch); ?>/index.php"
+                    `https://cdn.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`,
+                    `https://raw.githubusercontent.com/${activeRepo}/<?php echo htmlspecialchars($target_branch); ?>/index.php`
                   ];
                   for (const url of cdnUrls) {
                     const res = await fetch(url, { cache: 'no-store' });
@@ -42330,7 +42479,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const stream = document.getElementById('github-commit-stream');
               if (!stream) return;
 
-              const cacheKey = 'gh_commits_<?php echo htmlspecialchars($target_branch); ?>';
+              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
+              const cacheKey = 'gh_commits_' + activeRepo.replace('/', '_') + '_<?php echo htmlspecialchars($target_branch); ?>';
               
               if (!forceRefresh) {
                 const cached = sessionStorage.getItem(cacheKey);
@@ -42347,8 +42497,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               stream.innerHTML = '<div class="text-center py-3 text-secondary small"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching recent commits from GitHub...</div>';
 
+              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
               try {
-                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=8", { cache: "no-store" });
+                const res = await fetch(`https://api.github.com/repos/${activeRepo}/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=8`, { cache: "no-store" });
                 if (!res.ok) throw new Error("GitHub API rate limit reached or network error");
                 const commits = await res.json();
 
@@ -42384,7 +42535,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           <div class="text-secondary small font-monospace" style="font-size: 0.72rem;">${author} &bull; ${dateStr}</div>
                         </div>
                       </div>
-                      <a href="https://github.com/HirotakaDango/PHP-Music/commit/${c.sha}" target="_blank" rel="noopener noreferrer" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
+                      <a href="https://github.com/${activeRepo}/commit/${c.sha}" target="_blank" rel="noopener noreferrer" class="admin-badge admin-badge-info text-decoration-none font-monospace flex-shrink-0" style="font-size: 0.72rem;">
                         ${sha}
                       </a>
                     </div>
@@ -42393,12 +42544,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
             };
 
-            // GitHub Releases & Changelog Feed Loader
+            // GitHub Releases & Changelog Feed Loader (With Raw GitHub Fallback for Localhost)
             window.fetchGitHubReleases = async function(forceRefresh = false) {
               const stream = document.getElementById('github-releases-stream');
               if (!stream) return;
 
-              const cacheKey = 'gh_official_releases_cache';
+              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
+              const targetBranch = '<?php echo htmlspecialchars($target_branch); ?>';
+              const cacheKey = 'gh_official_releases_' + activeRepo.replace('/', '_');
               if (!forceRefresh) {
                 const cached = sessionStorage.getItem(cacheKey);
                 if (cached) {
@@ -42414,19 +42567,45 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               stream.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching official releases from GitHub...</div>';
 
+              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
               try {
-                const res = await fetch("https://api.github.com/repos/HirotakaDango/PHP-Music/releases?per_page=12", { cache: "no-store" });
-                if (!res.ok) throw new Error("GitHub API rate limit or network error");
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 8000);
+                const res = await fetch(`https://api.github.com/repos/${activeRepo}/releases?per_page=12`, {
+                  cache: "no-store",
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                if (!res.ok) throw new Error("GitHub API rate-limited on localhost or network timeout");
                 const releases = await res.json();
 
-                if (Array.isArray(releases)) {
+                if (Array.isArray(releases) && releases.length > 0) {
                   sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), releases: releases }));
                   renderReleaseList(releases);
+                  return;
                 } else {
-                  throw new Error("Invalid release data received.");
+                  throw new Error("No releases returned from API");
                 }
               } catch (err) {
-                stream.innerHTML = `<div class="text-center py-4 text-secondary small"><i class="bi bi-exclamation-circle text-warning me-1"></i> Unable to load official releases (${err.message}).</div>`;
+                // Localhost & Low-Internet Fallback: Bypass GitHub API and install directly via Raw GitHub file
+                stream.innerHTML = `
+                  <div class="p-4 rounded-4 bg-dark bg-opacity-50 border border-secondary border-opacity-25 text-start mb-3">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 pb-2 border-bottom border-secondary border-opacity-25">
+                      <div class="d-flex align-items-center gap-2">
+                        <span class="badge bg-danger font-monospace px-3 py-2 fs-6 fw-bold">Raw GitHub File</span>
+                        <strong class="text-white fs-6">Direct Raw Mode Active (Localhost / Offline Safe)</strong>
+                        <span class="admin-badge admin-badge-success"><i class="bi bi-shield-check me-1"></i> Rate-Limit Free</span>
+                      </div>
+                      <button type="button" onclick="triggerSmoothUpdate('${targetBranch}')" class="admin-btn-pill admin-btn-primary" style="height: 34px; padding: 0 1rem;">
+                        <i class="bi bi-cloud-arrow-down-fill me-1"></i> Update from Raw (${targetBranch})
+                      </button>
+                    </div>
+                    <p class="text-secondary small mb-0">
+                      GitHub REST API was bypassed (${err.message}). The update installer pulls directly from <code class="text-white">raw.githubusercontent.com</code>, which requires no API keys and is unaffected by IP rate limits.
+                    </p>
+                  </div>
+                `;
               }
 
               function renderReleaseList(releases) {
@@ -48641,19 +48820,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               };
   
               const doIdePaste = async (targetPath) => {
-                if (window.ideClipboard && window.ideClipboard.items.length > 0) {
-                  const action = window.ideClipboard.action;
-                  termLog(`Pasting ${window.ideClipboard.items.length} item(s) into ${targetPath || 'root'}...`);
-  
-                  let res = await driveFetch(action, { action: action, items: window.ideClipboard.items, target: targetPath }, targetPath);
-  
-                  if (res.success) {
+                if (window.ideClipboard && window.ideClipboard.items && window.ideClipboard.items.length > 0) {
+                  const isCut = (window.ideClipboard.action === 'move_items' || window.ideClipboard.operation === 'cut' || window.ideClipboard.action === 'cut');
+                  const op = isCut ? 'cut' : 'copy';
+                  const items = window.ideClipboard.items;
+                  termLog(`Pasting ${items.length} item(s) (${op}) into ${targetPath || 'root'}...`);
+
+                  let res = await driveFetch('clipboard_paste', {
+                    action: 'clipboard_paste',
+                    operation: op,
+                    target_dir: targetPath || '',
+                    items: items
+                  }, targetPath || '');
+
+                  if (res && res.success) {
                     window.ideClipboard = null; 
                     window.updateIdeClipboardUI();
-                    loadTree(targetPath);
+                    loadTree(targetPath || '');
                     termLog('Paste successful.');
-                  } else if (res.error) {
-                    alert(res.error);
+                  } else {
+                    const errMsg = (res && res.error) ? res.error : 'Paste failed';
+                    termLog(`Paste error: ${errMsg}`, true);
+                    alert(errMsg);
                   }
                 }
               };
@@ -48702,9 +48890,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               };
   
               document.getElementById('ide-btn-paste').onclick = () => {
-                const targetPath = document.getElementById('ide-ctx-path').value;
+                const path = document.getElementById('ide-ctx-path').value || '';
+                const isFolder = document.getElementById('ide-ctx-is-folder').value === '1';
+                const parentPath = isFolder ? path : (path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '');
                 document.getElementById('ide-ctx-modal').style.display = 'none';
-                doIdePaste(targetPath);
+                doIdePaste(parentPath);
               };
   
               document.getElementById('ide-btn-rename').onclick = () => {
@@ -62411,19 +62601,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php if ($active_user_tab === 'settings'): ?>
               <?php
                 $u_reg_mode = $db->query("SELECT value FROM site_settings WHERE key = 'users_reg_mode'")->fetchColumn() ?: 'open';
-                $u_daily = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_daily_upload_limit'")->fetchColumn() ?: 10);
-                $u_quota_bytes = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_default_drive_quota'")->fetchColumn() ?: 2147483648);
-                $u_quota_gb = round($u_quota_bytes / 1073741824, 1);
+                $u_min_pwd = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_min_password_len'")->fetchColumn() ?: 6);
+                $u_max_attempts = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_max_login_attempts'")->fetchColumn() ?: 5);
+                $u_auto_verify = $db->query("SELECT value FROM site_settings WHERE key = 'users_auto_verify'")->fetchColumn() === '1';
+                $u_name_change = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_name_change'")->fetchColumn() !== '0';
+                $u_allow_dms = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_dms'")->fetchColumn() !== '0';
+                $u_self_delete = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_self_delete'")->fetchColumn() !== '0';
               ?>
               <div class="admin-card p-4 mb-4 w-100">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                   <div>
                     <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
-                      <i class="bi bi-sliders text-danger"></i> Registration &amp; Account Policies
+                      <i class="bi bi-sliders text-danger"></i> User Authentication &amp; Profile Policies
                     </h5>
-                    <div class="small text-secondary mt-1">Configure user signup rules, default storage quotas, and rate limits.</div>
+                    <div class="small text-secondary mt-1">Configure account access, profile modifications, security gates, and communication rules.</div>
                   </div>
-                  <span class="admin-badge admin-badge-primary">Global User Policy</span>
+                  <span class="admin-badge admin-badge-primary">User Governance</span>
                 </div>
 
                 <form method="POST" action="?access=admin&page=users" class="d-flex flex-column gap-3 w-100">
@@ -62435,22 +62628,62 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       <label class="form-label text-secondary small fw-bold mb-1">REGISTRATION GATE</label>
                       <select name="reg_mode" class="admin-pill-select w-100">
                         <option value="open" <?php echo $u_reg_mode === 'open' ? 'selected' : ''; ?>>Open (Public Registration)</option>
-                        <option value="approval" <?php echo $u_reg_mode === 'approval' ? 'selected' : ''; ?>>Approval Required</option>
-                        <option value="closed" <?php echo $u_reg_mode === 'closed' ? 'selected' : ''; ?>>Closed (Disabled)</option>
+                        <option value="approval" <?php echo $u_reg_mode === 'approval' ? 'selected' : ''; ?>>Approval Required (Pending)</option>
+                        <option value="closed" <?php echo $u_reg_mode === 'closed' ? 'selected' : ''; ?>>Closed (Registration Disabled)</option>
                       </select>
                     </div>
                     <div class="col-12 col-md-4">
-                      <label class="form-label text-secondary small fw-bold mb-1">DAILY UPLOAD LIMIT (SONGS/DAY)</label>
-                      <input type="number" name="daily_upload_limit" class="admin-pill-input w-100 font-monospace" min="1" max="100" value="<?php echo $u_daily; ?>" required>
+                      <label class="form-label text-secondary small fw-bold mb-1">MINIMUM PASSWORD LENGTH</label>
+                      <input type="number" name="min_password_len" class="admin-pill-input w-100 font-monospace" min="6" max="32" value="<?php echo $u_min_pwd; ?>" required>
                     </div>
                     <div class="col-12 col-md-4">
-                      <label class="form-label text-secondary small fw-bold mb-1">DEFAULT DRIVE QUOTA (GB)</label>
-                      <input type="number" step="0.5" name="default_drive_quota_gb" class="admin-pill-input w-100 font-monospace" min="0.5" max="100" value="<?php echo $u_quota_gb; ?>" required>
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX LOGIN ATTEMPTS BEFORE LOCKOUT</label>
+                      <input type="number" name="max_login_attempts" class="admin-pill-input w-100 font-monospace" min="3" max="20" value="<?php echo $u_max_attempts; ?>" required>
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Auto-Verify New Registrations</strong>
+                      <span class="text-secondary small">Automatically grant upload verification to new accounts without requiring manual admin approval.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="auto_verify" value="1" <?php echo $u_auto_verify ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Allow Display / Artist Name Changes</strong>
+                      <span class="text-secondary small">Permits members to update their public pseudonym from their personal profile.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="allow_name_change" value="1" <?php echo $u_name_change ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enable Direct Messaging (DMs)</strong>
+                      <span class="text-secondary small">Allows registered accounts to start private one-on-one message threads.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="allow_dms" value="1" <?php echo $u_allow_dms ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Allow Account Self-Deletion</strong>
+                      <span class="text-secondary small">Permits members to voluntarily delete or anonymize their accounts from settings.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="allow_self_delete" value="1" <?php echo $u_self_delete ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
                     </div>
                   </div>
 
                   <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
-                    <i class="bi bi-save me-1"></i> Save Policy Settings
+                    <i class="bi bi-save me-1"></i> Save User Policies
                   </button>
                 </form>
               </div>
@@ -65610,14 +65843,21 @@ if (isset($_GET['action'])) {
       break;
 
     case 'register':
-      $data = json_decode(file_get_contents('php://input'), true);
-      $email = filter_var($data['email'], FILTER_VALIDATE_EMAIL);
-      $artist = trim(htmlspecialchars($data['artist'], ENT_QUOTES, 'UTF-8'));
-      $password = $data['password'];
+      $reg_mode = $db->query("SELECT value FROM site_settings WHERE key = 'users_reg_mode'")->fetchColumn() ?: 'open';
+      if ($reg_mode === 'closed') {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'Registration is currently disabled by the administrator.']);
+      }
+      $min_pwd = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_min_password_len'")->fetchColumn() ?: 6);
 
-      if (!$email || empty($artist) || strlen($password) < 6) {
+      $data = json_decode(file_get_contents('php://input'), true);
+      $email = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
+      $artist = trim(htmlspecialchars($data['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $password = $data['password'] ?? '';
+
+      if (!$email || empty($artist) || strlen($password) < $min_pwd) {
         http_response_code(400);
-        send_json(['status' => 'error', 'message' => 'Invalid data. Password needs 6+ characters.']);
+        send_json(['status' => 'error', 'message' => "Invalid data. Password must be at least {$min_pwd} characters."]);
       }
       $stmt = $db->prepare("SELECT id FROM users WHERE email = ? OR artist = ?");
       $stmt->execute([$email, $artist]);
@@ -65627,33 +65867,63 @@ if (isset($_GET['action'])) {
       }
 
       $hash = password_hash($password, PASSWORD_DEFAULT);
-      
+
       $initial = mb_strtoupper(mb_substr($artist, 0, 1, 'UTF-8'));
       $colors = ['#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
       $bg_color = $colors[array_rand($colors)];
       $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
-      
-      $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, 'image/svg+xml')");
-      $stmt->execute([$email, $artist, $hash, $svg]);
-      
+
+      $auto_verify = $db->query("SELECT value FROM site_settings WHERE key = 'users_auto_verify'")->fetchColumn() === '1';
+      $init_verified = ($reg_mode === 'approval') ? 'pending' : ($auto_verify ? 'yes' : 'no');
+
+      $stmt = $db->prepare("INSERT INTO users (email, artist, password_hash, verified, profile_picture, profile_picture_type) VALUES (?, ?, ?, ?, ?, 'image/svg+xml')");
+      $stmt->execute([$email, $artist, $hash, $init_verified, $svg]);
+
       $new_user_id = $db->lastInsertId();
       $_SESSION['user_id'] = $new_user_id;
       $_SESSION['user_artist'] = $artist;
       try { $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$new_user_id]); } catch(Exception $e) {}
       record_activity_log("User registered: '{$artist}'", $email, $new_user_id);
-      
-      send_json(['status' => 'success', 'message' => 'Registration successful. You are now logged in!']);
+
+      $msg = ($init_verified === 'pending')
+        ? 'Registration successful! Your account is pending admin approval for upload verification.'
+        : 'Registration successful. You are now logged in!';
+      send_json(['status' => 'success', 'message' => $msg]);
       break;
 
     case 'login':
       $data = json_decode(file_get_contents('php://input'), true);
-      $email = filter_var($data['email'], FILTER_VALIDATE_EMAIL);
-      $password = $data['password'];
+      $email = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
+      $password = $data['password'] ?? '';
 
       if (!$email || empty($password)) {
         http_response_code(400);
         send_json(['status' => 'error', 'message' => 'Email and password are required.']);
       }
+
+      $client_ip = $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+      if (strpos($client_ip, ',') !== false) $client_ip = trim(explode(',', $client_ip)[0]);
+      $max_attempts = (int)($db->query("SELECT value FROM site_settings WHERE key = 'users_max_login_attempts'")->fetchColumn() ?: 5);
+
+      // Check Rate Limit / Lockout State
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS login_attempts (ip_address TEXT, email TEXT, attempts INTEGER DEFAULT 1, last_attempt INTEGER, PRIMARY KEY (ip_address, email))");
+        $stmt_attempt = $db->prepare("SELECT attempts, last_attempt FROM login_attempts WHERE ip_address = ? AND email = ?");
+        $stmt_attempt->execute([$client_ip, $email]);
+        $attempt_row = $stmt_attempt->fetch();
+
+        if ($attempt_row) {
+          $lockout_seconds = 900; // 15-minute temporary lockout
+          if ((int)$attempt_row['attempts'] >= $max_attempts && (time() - (int)$attempt_row['last_attempt']) < $lockout_seconds) {
+            $mins_left = max(1, ceil(($lockout_seconds - (time() - (int)$attempt_row['last_attempt'])) / 60));
+            http_response_code(429);
+            send_json(['status' => 'error', 'message' => "Too many failed attempts. Account temporarily locked. Please try again in {$mins_left} minute(s)."]);
+          } elseif ((time() - (int)$attempt_row['last_attempt']) >= $lockout_seconds) {
+            $db->prepare("DELETE FROM login_attempts WHERE ip_address = ? AND email = ?")->execute([$client_ip, $email]);
+          }
+        }
+      } catch (\Throwable $e) {}
+
       $stmt = $db->prepare("SELECT * FROM users WHERE email = ? AND email IS NOT NULL");
       $stmt->execute([$email]);
       $user = $stmt->fetch();
@@ -65662,9 +65932,14 @@ if (isset($_GET['action'])) {
         http_response_code(403);
         send_json(['status' => 'error', 'message' => 'This account has been banned.']);
       } elseif ($user && $user['password_hash'] !== null && password_verify($password, $user['password_hash'])) {
+        // Clear failed attempts on successful authentication
+        try {
+          $db->prepare("DELETE FROM login_attempts WHERE ip_address = ? AND email = ?")->execute([$client_ip, $email]);
+        } catch (\Throwable $e) {}
+
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['user_artist'] = $user['artist'];
-        
+
         try {
           $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'logged in', '')")->execute([$user['id']]);
         } catch(Exception $e) {}
@@ -65675,6 +65950,12 @@ if (isset($_GET['action'])) {
         $user['profile_picture_url'] = "?action=get_profile_picture&id=" . $user['id'] . "&v=" . time();
         send_json(['status' => 'success', 'user' => $user, 'upload_limit' => get_upload_limit()]);
       } else {
+        // Record failed attempt
+        try {
+          $db->prepare("INSERT INTO login_attempts (ip_address, email, attempts, last_attempt) VALUES (?, ?, 1, ?) ON CONFLICT(ip_address, email) DO UPDATE SET attempts = attempts + 1, last_attempt = excluded.last_attempt")
+             ->execute([$client_ip, $email, time()]);
+        } catch (\Throwable $e) {}
+
         record_activity_log("Failed login attempt (bad password)", $email, 0);
         http_response_code(401);
         send_json(['status' => 'error', 'message' => 'Invalid credentials.']);
@@ -65703,6 +65984,11 @@ if (isset($_GET['action'])) {
 
     case 'change_name':
       if (!$user_id) { http_response_code(403); exit; }
+      $allow_name_change = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_name_change'")->fetchColumn() !== '0';
+      if (!$allow_name_change && empty($is_admin) && empty($is_super_admin)) {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'Display name modifications are currently disabled by the administrator.']);
+      }
       $data = json_decode(file_get_contents('php://input'), true);
       $new_name = trim(htmlspecialchars($data['new_name'] ?? '', ENT_QUOTES, 'UTF-8'));
       if (empty($new_name)) {
@@ -65886,6 +66172,11 @@ if (isset($_GET['action'])) {
 
     case 'delete_account_all':
       if (!$user_id) { http_response_code(403); exit; }
+      $allow_self_delete = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_self_delete'")->fetchColumn() !== '0';
+      if (!$allow_self_delete && empty($is_admin) && empty($is_super_admin)) {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'Account self-deletion is disabled by the administrator.']);
+      }
 
       // 0. Delete PHPMusicPost Artworks & Files from Disk & Database
       try {
@@ -65982,6 +66273,11 @@ if (isset($_GET['action'])) {
 
     case 'delete_account_keep_data':
       if (!$user_id) { http_response_code(403); exit; }
+      $allow_self_delete = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_self_delete'")->fetchColumn() !== '0';
+      if (!$allow_self_delete && empty($is_admin) && empty($is_super_admin)) {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'Account self-deletion is disabled by the administrator.']);
+      }
       $raw_str = bin2hex(random_bytes(16));
       $hash = password_hash($raw_str, PASSWORD_DEFAULT);
       $final_key = $user_id . '-' . $raw_str;
@@ -69186,6 +69482,13 @@ if (isset($_GET['action'])) {
       $chat_type = $_POST['chat_type'] ?? 'dm';
       $reply_to_id = !empty($_POST['reply_to_id']) ? intval($_POST['reply_to_id']) : null;
       $raw_content = trim($_POST['content'] ?? '');
+
+      if ($chat_type === 'dm') {
+        $allow_dms = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_dms'")->fetchColumn() !== '0';
+        if (!$allow_dms && empty($is_admin) && empty($is_super_admin)) {
+          send_json(['status' => 'error', 'message' => 'Direct messaging is currently disabled by the administrator.']);
+        }
+      }
 
       if ($target_id <= 0) {
         send_json(['status' => 'error', 'message' => 'Invalid recipient or group selected.']);
