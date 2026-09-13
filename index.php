@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '11.9');
+define('APP_VERSION', '12.0');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -31262,6 +31262,89 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
+    // SAVE GENERAL SYSTEM SETTINGS & BRANDING
+    if (isset($_POST['save_general_settings'])) {
+      $db = get_db();
+      $site_name = trim(htmlspecialchars($_POST['site_name'] ?? 'PHP Music', ENT_QUOTES, 'UTF-8'));
+      $site_tagline = trim(htmlspecialchars($_POST['site_tagline'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $announcement = trim(htmlspecialchars($_POST['site_announcement'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $announcement_type = in_array($_POST['site_announcement_type'] ?? '', ['info', 'success', 'warning', 'danger']) ? $_POST['site_announcement_type'] : 'info';
+      $announcement_active = !empty($_POST['site_announcement_active']) ? '1' : '0';
+
+      // Feature Module Toggles
+      $feat_rhythm = !empty($_POST['feature_rhythm_game']) ? '1' : '0';
+      $feat_boards = !empty($_POST['feature_phpboard']) ? '1' : '0';
+      $feat_blogs = !empty($_POST['feature_blogs']) ? '1' : '0';
+      $feat_community = !empty($_POST['feature_community']) ? '1' : '0';
+      $feat_dms = !empty($_POST['feature_direct_messages']) ? '1' : '0';
+      $feat_artworks = !empty($_POST['feature_artworks']) ? '1' : '0';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['site_name', $site_name]);
+      $stmt->execute(['site_tagline', $site_tagline]);
+      $stmt->execute(['site_announcement', $announcement]);
+      $stmt->execute(['site_announcement_type', $announcement_type]);
+      $stmt->execute(['site_announcement_active', $announcement_active]);
+      $stmt->execute(['feature_rhythm_game', $feat_rhythm]);
+      $stmt->execute(['feature_phpboard', $feat_boards]);
+      $stmt->execute(['feature_blogs', $feat_blogs]);
+      $stmt->execute(['feature_community', $feat_community]);
+      $stmt->execute(['feature_direct_messages', $feat_dms]);
+      $stmt->execute(['feature_artworks', $feat_artworks]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved General System Settings & Module Toggles', 0);
+      $_SESSION['admin_flash_msg'] = "System branding and feature settings saved successfully.";
+      header('Location: ?access=admin&page=settings');
+      exit;
+    }
+
+    // SAVE SECURITY, ACCESS CONTROL & FIREWALL SETTINGS
+    if (isset($_POST['save_security_settings'])) {
+      $db = get_db();
+      $ip_blacklist = trim($_POST['security_ip_blacklist'] ?? '');
+      $ip_whitelist = trim($_POST['security_ip_whitelist'] ?? '');
+      $rate_limit_hits = max(30, min(1000, (int)($_POST['security_rate_limit'] ?? 150)));
+      $enforce_ssl = !empty($_POST['security_enforce_ssl']) ? '1' : '0';
+      $block_unknown_bots = !empty($_POST['security_block_unknown_bots']) ? '1' : '0';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['security_ip_blacklist', $ip_blacklist]);
+      $stmt->execute(['security_ip_whitelist', $ip_whitelist]);
+      $stmt->execute(['security_rate_limit', (string)$rate_limit_hits]);
+      $stmt->execute(['security_enforce_ssl', $enforce_ssl]);
+      $stmt->execute(['security_block_unknown_bots', $block_unknown_bots]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Updated Security, IP Firewall & Threat Policies', 0);
+      $_SESSION['admin_flash_msg'] = "Security firewall policies updated.";
+      header('Location: ?access=admin&page=security&tab=firewall');
+      exit;
+    }
+
+    // UNLOCK LOGIN ATTEMPTS FOR IP OR TARGET EMAIL
+    if (isset($_POST['clear_login_lockout'])) {
+      $db = get_db();
+      $target_ip = trim($_POST['lockout_ip'] ?? '');
+      $target_email = trim($_POST['lockout_email'] ?? '');
+      if ($target_ip || $target_email) {
+        $stmt = $db->prepare("DELETE FROM login_attempts WHERE ip_address = ? OR email = ?");
+        $stmt->execute([$target_ip, $target_email]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Cleared brute-force lockout for IP: {$target_ip} / Email: {$target_email}", 0);
+        $_SESSION['admin_flash_msg'] = "Lockout cleared for {$target_ip} / {$target_email}.";
+      }
+      header('Location: ?access=admin&page=security&tab=lockouts');
+      exit;
+    }
+
+    // FLUSH ALL LOGIN LOCKOUTS
+    if (isset($_POST['clear_all_lockouts'])) {
+      $db = get_db();
+      $db->exec("DELETE FROM login_attempts");
+      log_admin_activity($db, $_SESSION['admin_email'], "Flushed all active brute-force login lockouts", 0);
+      $_SESSION['admin_flash_msg'] = "All active IP login lockouts have been released.";
+      header('Location: ?access=admin&page=security&tab=lockouts');
+      exit;
+    }
+
     // SAVE SONG & AUDIO LIBRARY SETTINGS
     if (isset($_POST['save_songs_settings'])) {
       $db = get_db();
@@ -32805,29 +32888,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
-    // QUICK SWITCH REPOSITORY OR COMMUNITY FORK
-    if (isset($_POST['switch_custom_repo'])) {
-      $db = get_db();
-      $new_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', trim($_POST['custom_repo'] ?? ''));
-      if (empty($new_repo) || strpos($new_repo, '/') === false) {
-        $new_repo = 'HirotakaDango/PHP-Music';
-      }
-
-      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES ('update_custom_repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-      $stmt->execute([$new_repo]);
-
-      // Flush probe and payload caches so the new repository is queried immediately
-      $probe_caches = glob(MUSIC_DIR . '/.gallery_cache/gh_*');
-      if ($probe_caches) {
-        foreach ($probe_caches as $pc) @unlink($pc);
-      }
-
-      log_admin_activity($db, $_SESSION['admin_email'], "Switched update repository to '{$new_repo}'", 0);
-      $_SESSION['admin_flash_msg'] = "Target repository set to '{$new_repo}'.";
-      header('Location: ?access=admin&page=update');
-      exit;
-    }
-
     // SAVE SYSTEM UPDATE PREFERENCES & CUSTOM REPO
     if (isset($_POST['save_update_preferences'])) {
       $db = get_db();
@@ -33258,7 +33318,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['settings', 'security', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -33315,7 +33375,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'ide' => 'PHPEditor (IDE)',
     'api' => 'API Keys & Analytics',
     'playground' => 'Interactive API Playground',
-    'update' => 'System & Codebase Update'
+    'update' => 'System & Codebase Update',
+    'settings' => 'General System Settings & Branding',
+    'security' => 'Security, IP Firewall & Threat Defense'
   ];
   $active_page_key = $_GET['page'] ?? 'users';
   $admin_page_title = isset($page_titles[$active_page_key]) ? $page_titles[$active_page_key] . " - Admin Panel" : "Admin Panel";
@@ -33411,15 +33473,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
       .sidebar {
         width: 260px;
-        background-color: var(--ytm-surface);
-        border-right: 1px solid var(--ytm-surface-2);
+        background: #09090d;
+        border-right: 1px solid rgba(255, 255, 255, 0.07);
         display: flex;
         flex-direction: column;
         flex-shrink: 0;
         z-index: 1045;
-        transition: width 0.3s ease, transform 0.3s ease;
+        transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
         overflow-y: auto;
-        box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
+        overflow-x: hidden;
       }
 
       .main-content {
@@ -33436,82 +33498,95 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       }
 
       .sidebar .logo {
-        font-size: 1.25rem;
+        font-size: 1.15rem;
         font-weight: 700;
         display: flex;
         align-items: center;
         gap: 8px;
+        letter-spacing: -0.2px;
       }
 
       .sidebar .logo span {
         color: var(--ytm-accent);
       }
 
+      .sidebar-section-label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: rgba(255, 255, 255, 0.35);
+        padding: 0.75rem 1.4rem 0.3rem 1.4rem;
+        user-select: none;
+      }
+
       .nav-link {
-        color: var(--ytm-secondary-text);
+        color: #9e9ea8;
         display: flex;
         align-items: center;
         font-weight: 500;
-        gap: 1rem;
+        font-size: 0.85rem;
+        gap: 0.85rem;
         text-decoration: none;
-        padding: 0.75rem 1.25rem;
-        margin: 0.2rem 0.75rem;
+        padding: 0.55rem 0.9rem;
+        margin: 0.15rem 0.75rem;
         border-radius: 12px;
-        transition: all 0.2s ease-in-out;
-        border: none;
-        border-left: 4px solid transparent;
-        /* Left red indicator base */
-        border-radius: 0 12px 12px 0;
-        /* Flat left side, rounded right */
+        transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+        border: 1px solid transparent;
+        background: transparent;
       }
 
       .nav-link:hover {
-        color: var(--ytm-primary-text);
-        background-color: rgba(255, 255, 255, 0.05);
-        border-left-color: var(--ytm-accent);
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.05);
+        transform: translateX(3px);
       }
 
       .nav-link.active {
-        background-color: rgba(255, 0, 0, 0.1);
-        color: var(--ytm-accent);
-        font-weight: 700;
-        border-left-color: var(--ytm-accent);
+        background: linear-gradient(90deg, rgba(255, 0, 0, 0.16) 0%, rgba(255, 0, 0, 0.04) 100%);
+        color: #ff4d4d;
+        font-weight: 600;
+        border-color: rgba(255, 0, 0, 0.28);
+        box-shadow: inset 3px 0 0 #ff0000;
       }
 
       .nav-link .bi {
-        font-size: 1.25rem;
-        width: 24px;
+        font-size: 1.15rem;
+        width: 22px;
         text-align: center;
-        transition: color 0.2s;
+        color: rgba(255, 255, 255, 0.5);
+        transition: color 0.18s ease, transform 0.18s ease;
+        flex-shrink: 0;
       }
 
       .nav-link:hover .bi {
-        color: var(--ytm-primary-text);
+        color: #ffffff;
+        transform: scale(1.08);
       }
 
       .nav-link.active .bi {
-        color: var(--ytm-accent);
+        color: #ff3333;
       }
 
       /* Desktop Minimized Sidebar Mode */
       @media (min-width: 992px) {
         .sidebar.minimized {
-          width: 80px;
+          width: 76px;
         }
         .sidebar.minimized .nav-link {
           justify-content: center;
-          padding-left: 0 !important;
-          padding-right: 0 !important;
-          margin-left: 0.5rem;
-          margin-right: 0.5rem;
+          padding: 0.65rem 0 !important;
+          margin: 0.2rem 0.5rem;
           border-radius: 12px !important;
+          transform: none !important;
         }
-        .sidebar.minimized .nav-link span {
-          display: none;
+        .sidebar.minimized .nav-link span,
+        .sidebar.minimized .sidebar-section-label {
+          display: none !important;
         }
         .sidebar.minimized .nav-link .bi {
           margin: 0;
-          font-size: 1.5rem;
+          font-size: 1.35rem;
         }
         .sidebar.minimized .admin-profile-info,
         .sidebar.minimized .admin-profile-badge,
@@ -33523,12 +33598,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           margin-right: auto !important;
         }
         .sidebar.minimized .admin-profile-img {
-          width: 44px !important;
-          height: 44px !important;
+          width: 42px !important;
+          height: 42px !important;
           margin-bottom: 0 !important;
         }
-        .sidebar.minimized .p-4.border-bottom {
-          padding: 1rem 0 !important;
+        .sidebar.minimized .admin-profile-box {
+          padding: 0.75rem 0 !important;
         }
       }
 
@@ -34480,90 +34555,116 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         </button>
       </div>
       <nav class="sidebar offcanvas-lg offcanvas-start" tabindex="-1" id="admin-sidebar">
-        <div class="offcanvas-header border-bottom d-lg-none" style="border-color: var(--ytm-surface-2) !important;">
-          <div class="logo d-flex align-items-center m-0 p-0" style="font-size: 1.25rem; font-weight: 700;">
+        <div class="offcanvas-header border-bottom d-lg-none" style="border-color: rgba(255, 255, 255, 0.08) !important;">
+          <div class="logo d-flex align-items-center m-0 p-0">
+            <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 26px; width: 26px; margin-right: 8px; border-radius: 6px;">
             Admin<span style="color: var(--ytm-accent);">Panel</span>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#admin-sidebar" aria-label="Close"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column p-0 h-100">
-          <div class="d-none d-lg-flex align-items-center justify-content-between p-3 border-bottom" style="border-color: var(--ytm-surface-2) !important;">
-            <div class="logo d-flex align-items-center sidebar-logo-text m-0 p-0" style="font-size: 1.25rem; font-weight: 700;">
+          <div class="d-none d-lg-flex align-items-center justify-content-between px-3 py-3 border-bottom" style="border-color: rgba(255, 255, 255, 0.07) !important;">
+            <div class="logo d-flex align-items-center sidebar-logo-text m-0 p-0">
+              <img src="?action=get_app_icon&size=32" alt="Logo" style="height: 24px; width: 24px; margin-right: 8px; border-radius: 6px;">
               Admin<span style="color: var(--ytm-accent);">Panel</span>
             </div>
-            <button class="btn text-secondary p-0" id="desktop-sidebar-toggle" title="Toggle Sidebar">
-              <i class="bi bi-layout-sidebar fs-3"></i>
+            <button class="btn text-secondary p-0 border-0" id="desktop-sidebar-toggle" title="Toggle Sidebar">
+              <i class="bi bi-layout-sidebar fs-5"></i>
             </button>
           </div>
-          <div class="p-4 border-bottom text-center d-flex flex-column align-items-center shadow-sm" style="border-color: var(--ytm-surface-2) !important; background-color: rgba(255,255,255,0.02);">
-            <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle shadow-lg border border-secondary mb-3 admin-profile-img" style="width: 80px; height: 80px; object-fit: cover; transition: all 0.3s ease;">
-            <h5 class="m-0 fw-bold text-white text-truncate w-100 px-2 admin-profile-info" style="font-size: 1.25rem;"><?php echo htmlspecialchars($_SESSION['user_artist'] ?? 'Admin'); ?></h5>
-            <div class="text-secondary text-truncate w-100 mt-1 px-2 admin-profile-info" style="font-size: 0.85rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
-            <div class="badge bg-dark border border-secondary text-secondary mt-3 px-3 py-2 rounded-pill shadow-sm admin-profile-badge" style="letter-spacing: 1px;">ID: <?php echo $_SESSION['admin_id'] ?? '0'; ?></div>
+
+          <div class="admin-profile-box p-3 border-bottom text-center d-flex flex-column align-items-center" style="border-color: rgba(255, 255, 255, 0.06) !important; background: rgba(255, 255, 255, 0.015);">
+            <div class="position-relative mb-2">
+              <img src="?access=api&action=get_profile_picture&id=<?php echo $_SESSION['admin_id'] ?? '0'; ?>&v=<?php echo time(); ?>" alt="Admin Profile" class="rounded-circle admin-profile-img" style="width: 64px; height: 64px; object-fit: cover; border: 2px solid rgba(255, 0, 0, 0.35); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6); transition: all 0.25s ease;">
+              <span class="position-absolute bottom-0 end-0 badge rounded-pill bg-success border border-dark p-1" style="width: 12px; height: 12px;"></span>
+            </div>
+            <h6 class="m-0 fw-bold text-white text-truncate w-100 px-2 admin-profile-info" style="font-size: 0.95rem;"><?php echo htmlspecialchars($_SESSION['user_artist'] ?? 'Admin'); ?></h6>
+            <div class="text-secondary text-truncate w-100 font-monospace px-2 admin-profile-info" style="font-size: 0.74rem;"><?php echo htmlspecialchars($_SESSION['admin_email'] ?? 'Admin'); ?></div>
+            <span class="admin-badge admin-badge-primary mt-2 admin-profile-badge font-monospace" style="font-size: 0.68rem; padding: 2px 8px;">ID: #<?php echo $_SESSION['admin_id'] ?? '0'; ?></span>
           </div>
-          
-          <div class="mb-4 mt-3 d-flex flex-column">
+
+          <div class="mb-4 mt-2 d-flex flex-column">
+            <!-- Section: Configuration & Security -->
+            <div class="sidebar-section-label">System Setup</div>
+            <?php if ($is_super_admin_check || in_array('settings', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=settings" title="General Settings" class="nav-link <?php echo (($_GET['page'] ?? '') === 'settings') ? 'active' : ''; ?>"><i class="bi bi-sliders"></i><span>General Settings</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('security', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=security" title="Security &amp; Firewall" class="nav-link <?php echo (($_GET['page'] ?? '') === 'security') ? 'active' : ''; ?>"><i class="bi bi-shield-lock-fill"></i><span>Security &amp; Firewall</span></a>
+            <?php endif; ?>
+
+            <!-- Section: Core Management -->
+            <div class="sidebar-section-label">Management</div>
             <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=users" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && ($_GET['page'] ?? '') !== 'analytics' && ($_GET['page'] ?? '') !== 'storage') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+            <a href="?access=admin&page=users" title="User Management" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && !in_array(($_GET['page'] ?? ''), ['analytics', 'storage', 'settings', 'security'])) ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=songs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
+            <a href="?access=admin&page=songs" title="Song Management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=artworks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
+            <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
             <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
-            <?php endif; ?>
+
+            <!-- Section: Storage & Performance -->
+            <div class="sidebar-section-label">Storage &amp; Audio</div>
             <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=storage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
+            <a href="?access=admin&page=storage" title="Storage Studio" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('user_drive_management', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=user_drive_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
+            <a href="?access=admin&page=user_drive_management" title="User Drive Quota" class="nav-link <?php echo (($_GET['page'] ?? '') === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('bitrate_management', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=bitrate_management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
+            <a href="?access=admin&page=bitrate_management" title="Bitrate Studio" class="nav-link <?php echo (($_GET['page'] ?? '') === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
+            <?php endif; ?>
+
+            <!-- Section: Monitoring & Moderation -->
+            <div class="sidebar-section-label">Monitoring</div>
+            <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=analytics" title="Traffic Analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
+            <a href="?access=admin&page=logs" title="Activity Logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('reports', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
+            <a href="?access=admin&page=reports" title="Profile Reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('rhythm_analytics', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=rhythm_analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'rhythm_analytics') ? 'active' : ''; ?>"><i class="bi bi-controller"></i><span>Rhythm Analytics</span></a>
+            <a href="?access=admin&page=rhythm_analytics" title="Rhythm Analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'rhythm_analytics') ? 'active' : ''; ?>"><i class="bi bi-controller"></i><span>Rhythm Analytics</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
+            <a href="?access=admin&page=appeals" title="Ban Appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <?php endif; ?>
+
+            <!-- Section: Workspace Tools -->
+            <div class="sidebar-section-label">Tools</div>
             <?php if ($is_super_admin_check || in_array('manage', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=manage" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-window-sidebar"></i><span>Player Manager</span></a>
+            <a href="?access=admin&page=manage" title="Player Manager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-window-sidebar"></i><span>Player Manager</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=drive" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Drive Manager</span></a>
+            <a href="?access=admin&page=drive" title="Drive Manager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-folder2-open"></i><span>Drive Manager</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=dbmanager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
+            <a href="?access=admin&page=dbmanager" title="PHPDBManager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=ide" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
+            <a href="?access=admin&page=ide" title="PHPEditor (IDE)" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('api', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=api" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+            <a href="?access=admin&page=api" title="API Keys" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('update', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=update" class="nav-link <?php echo (($_GET['page'] ?? '') === 'update') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-down-fill"></i><span>System Update</span></a>
+            <a href="?access=admin&page=update" title="System Update" class="nav-link <?php echo (($_GET['page'] ?? '') === 'update') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-down-fill"></i><span>System Update</span></a>
             <?php endif; ?>
             <?php if ($is_super_admin_check || in_array('playground', $current_admin_permissions)): ?>
-            <a href="./#playground" target="_blank" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
+            <a href="./#playground" target="_blank" title="API Playground" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
             <?php endif; ?>
           </div>
-          
+
           <div class="mt-auto d-flex flex-column pb-3">
-            <hr class="text-secondary mx-3 mb-2 opacity-25">
-            <a href="./?access=requirements" target="_blank" class="nav-link"><i class="bi bi-shield-check"></i><span>Requirements</span></a>
-            <a href="./" class="nav-link"><i class="bi bi-music-note-beamed"></i><span>Back to Player</span></a>
-            <a href="?access=admin&logout=1" class="nav-link text-danger"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
+            <hr class="mx-3 mb-2 opacity-25" style="border-color: rgba(255, 255, 255, 0.15);">
+            <a href="./?access=requirements" target="_blank" title="Requirements" class="nav-link"><i class="bi bi-shield-check"></i><span>Requirements</span></a>
+            <a href="./" title="Back to Player" class="nav-link"><i class="bi bi-music-note-beamed"></i><span>Back to Player</span></a>
+            <a href="?access=admin&logout=1" title="Logout" class="nav-link text-danger"><i class="bi bi-box-arrow-left"></i><span>Logout</span></a>
           </div>
         </div>
         <script>
@@ -34740,7 +34841,428 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php unset($_SESSION['admin_flash_msg']); ?>
         <?php endif; ?>
 
-        <?php if (($_GET['page'] ?? '') === 'analytics'): ?>
+        <?php if (($_GET['page'] ?? '') === 'settings'): ?>
+          <?php
+            $db = get_db();
+            $s_name = $db->query("SELECT value FROM site_settings WHERE key = 'site_name'")->fetchColumn() ?: 'PHP Music';
+            $s_tagline = $db->query("SELECT value FROM site_settings WHERE key = 'site_tagline'")->fetchColumn() ?: 'Self-Hosted Music Streaming & Audio Cloud';
+            $s_ann = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement'")->fetchColumn() ?: '';
+            $s_ann_type = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement_type'")->fetchColumn() ?: 'info';
+            $s_ann_on = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement_active'")->fetchColumn() === '1';
+
+            $feat_rhythm = $db->query("SELECT value FROM site_settings WHERE key = 'feature_rhythm_game'")->fetchColumn() !== '0';
+            $feat_boards = $db->query("SELECT value FROM site_settings WHERE key = 'feature_phpboard'")->fetchColumn() !== '0';
+            $feat_blogs = $db->query("SELECT value FROM site_settings WHERE key = 'feature_blogs'")->fetchColumn() !== '0';
+            $feat_comm = $db->query("SELECT value FROM site_settings WHERE key = 'feature_community'")->fetchColumn() !== '0';
+            $feat_dms = $db->query("SELECT value FROM site_settings WHERE key = 'feature_direct_messages'")->fetchColumn() !== '0';
+            $feat_artworks = $db->query("SELECT value FROM site_settings WHERE key = 'feature_artworks'")->fetchColumn() !== '0';
+
+            $active_modules_count = ($feat_rhythm ? 1 : 0) + ($feat_boards ? 1 : 0) + ($feat_blogs ? 1 : 0) + ($feat_comm ? 1 : 0) + ($feat_dms ? 1 : 0) + ($feat_artworks ? 1 : 0);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">General System Settings</h1>
+              <div class="small text-secondary mt-1">Platform branding, announcement broadcasts, and modular feature switches</div>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metrics Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Platform Name</span>
+                    <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white text-truncate"><?php echo htmlspecialchars($s_name); ?></div>
+                  <small class="text-secondary">Global public branding</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Announcement</span>
+                    <span class="text-warning"><i class="bi bi-megaphone-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $s_ann_on ? 'Broadcasting' : 'Inactive'; ?></div>
+                  <small class="text-secondary">Banner across client players</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Active Modules</span>
+                    <span class="text-success"><i class="bi bi-grid-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $active_modules_count; ?> / 6</div>
+                  <small class="text-secondary">Functional modules enabled</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">App Version</span>
+                    <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.0'; ?></div>
+                  <small class="text-secondary">Core engine release</small>
+                </div>
+              </div>
+            </div>
+
+            <form method="POST" action="?access=admin&page=settings" class="d-flex flex-column gap-4">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <input type="hidden" name="save_general_settings" value="1">
+
+              <!-- Branding & Site Information -->
+              <div class="admin-card p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-brush text-danger"></i> Site Identity &amp; Metadata
+                  </h5>
+                  <span class="admin-badge admin-badge-primary">Public Facing</span>
+                </div>
+                <div class="row g-3">
+                  <div class="col-12 col-md-6">
+                    <label class="form-label text-secondary small fw-bold mb-1">PLATFORM / SITE NAME</label>
+                    <input type="text" name="site_name" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($s_name); ?>" required>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label class="form-label text-secondary small fw-bold mb-1">SITE TAGLINE</label>
+                    <input type="text" name="site_tagline" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($s_tagline); ?>">
+                  </div>
+                </div>
+              </div>
+
+              <!-- Global Announcement Broadcast -->
+              <div class="admin-card p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-megaphone-fill text-warning"></i> Global Broadcast Banner
+                    </h5>
+                    <div class="small text-secondary mt-1">Displays a dismissible bulletin banner at the top of the user player interface.</div>
+                  </div>
+                  <div class="form-check form-switch m-0">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="site_announcement_active" value="1" <?php echo $s_ann_on ? 'checked' : ''; ?> style="width: 38px; height: 20px; cursor: pointer;">
+                  </div>
+                </div>
+                <div class="row g-3">
+                  <div class="col-12 col-md-8">
+                    <label class="form-label text-secondary small fw-bold mb-1">ANNOUNCEMENT TEXT</label>
+                    <input type="text" name="site_announcement" class="admin-pill-input w-100" placeholder="e.g. Scheduled maintenance this Sunday at 2 AM UTC." value="<?php echo htmlspecialchars($s_ann); ?>">
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label class="form-label text-secondary small fw-bold mb-1">BANNER STYLE</label>
+                    <select name="site_announcement_type" class="admin-pill-select w-100">
+                      <option value="info" <?php echo $s_ann_type === 'info' ? 'selected' : ''; ?>>Informational (Blue)</option>
+                      <option value="success" <?php echo $s_ann_type === 'success' ? 'selected' : ''; ?>>Success / Release (Green)</option>
+                      <option value="warning" <?php echo $s_ann_type === 'warning' ? 'selected' : ''; ?>>Warning (Amber)</option>
+                      <option value="danger" <?php echo $s_ann_type === 'danger' ? 'selected' : ''; ?>>Critical Alert (Red)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Feature & Module Toggles -->
+              <div class="admin-card p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-toggles text-info"></i> Modular Feature Switches
+                  </h5>
+                  <span class="admin-badge admin-badge-info">Toggle On/Off</span>
+                </div>
+                <div class="row g-3">
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">Rhythm Studio Game</strong>
+                        <span class="text-secondary small">Interactive rhythm mini-game for tracks.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_rhythm_game" value="1" <?php echo $feat_rhythm ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">PHPBoard Forums</strong>
+                        <span class="text-secondary small">Anonymous channel discussion boards.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_phpboard" value="1" <?php echo $feat_boards ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">User Articles &amp; Blogs</strong>
+                        <span class="text-secondary small">Long-form markdown stories and tutorials.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_blogs" value="1" <?php echo $feat_blogs ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">Community Feed</strong>
+                        <span class="text-secondary small">Micro-posts and song discussion stream.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_community" value="1" <?php echo $feat_comm ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">Direct Messaging</strong>
+                        <span class="text-secondary small">Private one-on-one user chat system.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_direct_messages" value="1" <?php echo $feat_dms ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <div>
+                        <strong class="text-white d-block">Artwork &amp; Media Studio</strong>
+                        <span class="text-secondary small">PHPMusicPost illustration cloud.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="feature_artworks" value="1" <?php echo $feat_artworks ? 'checked' : ''; ?>>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center" style="height: 42px;">
+                <i class="bi bi-save me-1"></i> Save All Settings
+              </button>
+            </form>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'security'): ?>
+          <?php
+            $db = get_db();
+            // Ensure schema table exists before querying
+            try {
+              $db->exec("CREATE TABLE IF NOT EXISTS login_attempts (ip_address TEXT, email TEXT, attempts INTEGER DEFAULT 1, last_attempt INTEGER, PRIMARY KEY (ip_address, email))");
+            } catch (\Throwable $e) {}
+
+            $sec_tab = $_GET['tab'] ?? 'lockouts';
+            $blacklist = $db->query("SELECT value FROM site_settings WHERE key = 'security_ip_blacklist'")->fetchColumn() ?: '';
+            $whitelist = $db->query("SELECT value FROM site_settings WHERE key = 'security_ip_whitelist'")->fetchColumn() ?: '';
+            $rate_limit = (int)($db->query("SELECT value FROM site_settings WHERE key = 'security_rate_limit'")->fetchColumn() ?: 150);
+            $enforce_ssl = $db->query("SELECT value FROM site_settings WHERE key = 'security_enforce_ssl'")->fetchColumn() === '1';
+            $block_bots = $db->query("SELECT value FROM site_settings WHERE key = 'security_block_unknown_bots'")->fetchColumn() !== '0';
+
+            // Fetch active login attempts & lockouts
+            $lockouts = [];
+            try {
+              $stmt_lock = $db->query("SELECT ip_address, email, attempts, last_attempt FROM login_attempts ORDER BY attempts DESC, last_attempt DESC LIMIT 100");
+              if ($stmt_lock) $lockouts = $stmt_lock->fetchAll(PDO::FETCH_ASSOC);
+            } catch (\Throwable $e) {}
+
+            $locked_count = count(array_filter($lockouts, fn($l) => (int)$l['attempts'] >= 5));
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Security &amp; Threat Defense</h1>
+              <div class="small text-secondary mt-1">Brute-force lockout manager, IP firewall filters, and SSL enforcement</div>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Security Overview KPI Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Active Lockouts</span>
+                    <span class="text-danger"><i class="bi bi-shield-x fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $locked_count; ?> <span class="fs-6 text-secondary fw-normal">IPs locked</span></div>
+                  <small class="text-secondary">&ge; 5 failed login attempts</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Blacklisted IPs</span>
+                    <span class="text-warning"><i class="bi bi-slash-circle-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo count(array_filter(array_map('trim', explode(',', $blacklist)))); ?></div>
+                  <small class="text-secondary">Explicitly blocked from access</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">SSL Enforcement</span>
+                    <span class="text-success"><i class="bi bi-lock-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $enforce_ssl ? 'Active' : 'Optional'; ?></div>
+                  <small class="text-secondary">HTTPS secure connection rule</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Scraper Shield</span>
+                    <span class="text-info"><i class="bi bi-robot fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $block_bots ? 'Blocking' : 'Permissive'; ?></div>
+                  <small class="text-secondary">Automated crawler filter</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sub-Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=security&tab=lockouts" class="update-tab-btn <?php echo $sec_tab === 'lockouts' ? 'active' : ''; ?>">
+                <i class="bi bi-exclamation-triangle-fill"></i> Login Lockouts &amp; Brute Force (<?php echo count($lockouts); ?>)
+              </a>
+              <a href="?access=admin&page=security&tab=firewall" class="update-tab-btn <?php echo $sec_tab === 'firewall' ? 'active' : ''; ?>">
+                <i class="bi bi-shield-lock-fill"></i> IP Firewall &amp; Access Controls
+              </a>
+            </div>
+
+            <?php if ($sec_tab === 'lockouts'): ?>
+              <!-- Brute Force Lockouts Table -->
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <div>
+                    <h5 class="m-0 text-white fw-bold fs-6">Active Login Attempt Records</h5>
+                    <div class="small text-secondary mt-1">IP addresses and accounts monitored for automated password cracking attempts</div>
+                  </div>
+                  <?php if (!empty($lockouts)): ?>
+                    <form method="POST" action="?access=admin&page=security" onsubmit="return confirm('Release all IP login locks?');">
+                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                      <button type="submit" name="clear_all_lockouts" class="admin-btn-pill admin-btn-primary" style="height: 32px;">
+                        <i class="bi bi-unlock-fill me-1"></i> Clear All Lockouts
+                      </button>
+                    </form>
+                  <?php endif; ?>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th>Client IP Address</th>
+                        <th>Target Account Email</th>
+                        <th>Failed Attempts</th>
+                        <th>Last Attempt Time</th>
+                        <th>Security Status</th>
+                        <th class="text-end">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($lockouts)): ?>
+                        <tr><td colspan="6" class="text-center py-5 text-secondary"><i class="bi bi-shield-check fs-2 d-block mb-2 text-success opacity-50"></i>No suspicious login attempts or locked IPs currently recorded.</td></tr>
+                      <?php else: foreach ($lockouts as $l):
+                        $is_locked = (int)$l['attempts'] >= 5;
+                      ?>
+                        <tr>
+                          <td class="font-monospace text-white fw-bold">
+                            <i class="bi bi-laptop text-secondary me-1"></i><?php echo htmlspecialchars($l['ip_address']); ?>
+                          </td>
+                          <td class="text-info"><?php echo htmlspecialchars($l['email']); ?></td>
+                          <td>
+                            <span class="badge <?php echo $is_locked ? 'bg-danger' : 'bg-warning text-dark'; ?> font-monospace px-2 py-1">
+                              <?php echo (int)$l['attempts']; ?> attempts
+                            </span>
+                          </td>
+                          <td class="text-secondary small font-monospace">
+                            <?php echo date('Y-m-d H:i:s', (int)$l['last_attempt']); ?>
+                          </td>
+                          <td>
+                            <?php if ($is_locked): ?>
+                              <span class="admin-badge admin-badge-danger"><i class="bi bi-lock-fill me-1"></i>Locked Out</span>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-warning"><i class="bi bi-exclamation-circle me-1"></i>Monitoring</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="text-end">
+                            <form method="POST" action="?access=admin&page=security" class="m-0 d-inline">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="lockout_ip" value="<?php echo htmlspecialchars($l['ip_address']); ?>">
+                              <input type="hidden" name="lockout_email" value="<?php echo htmlspecialchars($l['email']); ?>">
+                              <button type="submit" name="clear_login_lockout" class="admin-btn-pill" style="height: 28px; padding: 0 0.75rem; font-size: 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);">
+                                <i class="bi bi-unlock"></i> Unlock
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <?php else: ?>
+              <!-- IP Firewall Rules & Security Policies Form -->
+              <div class="admin-card p-4 mb-4">
+                <form method="POST" action="?access=admin&page=security" class="d-flex flex-column gap-3">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_security_settings" value="1">
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">IP BLACKLIST (COMMA-SEPARATED)</label>
+                    <textarea name="security_ip_blacklist" class="form-control bg-dark text-white border-secondary font-monospace" rows="3" placeholder="192.168.1.100, 10.0.0.5"><?php echo htmlspecialchars($blacklist); ?></textarea>
+                    <small class="text-secondary d-block mt-1">IPs on this list receive an immediate 403 Forbidden on any request.</small>
+                  </div>
+
+                  <div>
+                    <label class="form-label text-secondary small fw-bold mb-1">IP WHITELIST (ADMIN BYPASS)</label>
+                    <input type="text" name="security_ip_whitelist" class="admin-pill-input w-100 font-monospace" placeholder="e.g. 127.0.0.1, 192.168.1.50" value="<?php echo htmlspecialchars($whitelist); ?>">
+                    <small class="text-secondary d-block mt-1">Whitelisted IPs bypass rate limits and automated lockout thresholds.</small>
+                  </div>
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">GLOBAL RATE LIMIT (MAX HITS / MIN / IP)</label>
+                      <input type="number" name="security_rate_limit" class="admin-pill-input w-100 font-monospace" min="30" max="1000" value="<?php echo $rate_limit; ?>" required>
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Enforce HTTPS Secure Context</strong>
+                      <span class="text-secondary small">Rejects insecure HTTP browser requests.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="security_enforce_ssl" value="1" <?php echo $enforce_ssl ? 'checked' : ''; ?>>
+                    </div>
+                  </div>
+
+                  <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong class="text-white d-block">Block Known Automated Scrapers &amp; Bots</strong>
+                      <span class="text-secondary small">Restricts curl, python, and scraping agents on media player and user endpoints.</span>
+                    </div>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="security_block_unknown_bots" value="1" <?php echo $block_bots ? 'checked' : ''; ?>>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 40px;">
+                    <i class="bi bi-shield-check me-1"></i> Save Firewall Settings
+                  </button>
+                </form>
+              </div>
+            <?php endif; ?>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'analytics'): ?>
           <?php
             $db = get_db();
 
@@ -40391,12 +40913,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $active_repo = preg_replace('/[^a-zA-Z0-9_\-\.\/]/', '', $active_repo) ?: 'HirotakaDango/PHP-Music';
             $is_custom_fork = ($active_repo !== 'HirotakaDango/PHP-Music');
 
-            // 1. Memory-Efficient Local Codebase Checksum Calculation
+            // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '11.9';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.0';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
-            $local_md5 = @md5_file(__FILE__) ?: '';
-            $local_crc = sprintf('%08X', @crc32(@file_get_contents(__FILE__) ?: ''));
+            $local_md5 = @hash_file('md5', __FILE__) ?: '';
+            $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
             $local_lines = 0;
             $fp = @fopen(__FILE__, 'rb');
             if ($fp) {
@@ -40407,25 +40929,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $local_lines++;
             }
 
-            // 2. High-Speed Cached Multi-CDN Probe & Payload Storage
+            // 2. High-Speed Cached Multi-CDN Probe (Non-blocking with short timeouts for shared hosting)
             $probe_cache_dir = MUSIC_DIR . '/.gallery_cache';
             if (!is_dir($probe_cache_dir)) @mkdir($probe_cache_dir, 0777, true);
             $probe_cache_file = $probe_cache_dir . '/gh_probe_' . md5($active_repo . '_' . $target_branch) . '.json';
             $payload_cache_file = $probe_cache_dir . '/gh_payload_' . md5($active_repo . '_' . $target_branch) . '.php.tmp';
             $cached_probe = null;
 
-            if (!$force_refresh && file_exists($probe_cache_file) && (time() - filemtime($probe_cache_file)) < 120) {
+            if (!$force_refresh && file_exists($probe_cache_file) && (time() - filemtime($probe_cache_file)) < 300) {
               $cached_probe = @json_decode(@file_get_contents($probe_cache_file), true);
-            }
-
-            // Always bypass cache if on diff tab and local payload file is missing or empty
-            if ($active_tab === 'diff' && (!file_exists($payload_cache_file) || filesize($payload_cache_file) < 10000)) {
-              $cached_probe = null;
             }
 
             if ($cached_probe && is_array($cached_probe) && !empty($cached_probe['remote_available'])) {
               $remote_available = true;
-              $remote_code = file_exists($payload_cache_file) ? @file_get_contents($payload_cache_file) : false;
               $remote_size = (int)($cached_probe['remote_size'] ?? 0);
               $remote_lines = (int)($cached_probe['remote_lines'] ?? 0);
               $remote_hash = $cached_probe['remote_hash'] ?? '';
@@ -40435,15 +40951,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $ping_latency_ms = (float)($cached_probe['ping_latency_ms'] ?? 0);
             } else {
               $endpoints = [
-                "https://raw.githubusercontent.com/{$active_repo}/{$target_branch}/index.php",
                 "https://cdn.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php",
-                "https://fastly.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php"
+                "https://raw.githubusercontent.com/{$active_repo}/{$target_branch}/index.php"
               ];
 
               $remote_code = false;
               $remote_available = false;
               $ping_start = microtime(true);
 
+              // Strict 4s connect & 6s total timeout to prevent exceeding shared hosting limits
               foreach ($endpoints as $remote_url) {
                 if (function_exists('curl_version')) {
                   $ch = curl_init();
@@ -40453,9 +40969,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     CURLOPT_FOLLOWLOCATION => true,
                     CURLOPT_SSL_VERIFYPEER => false,
                     CURLOPT_SSL_VERIFYHOST => false,
-                    CURLOPT_CONNECTTIMEOUT => 15,
-                    CURLOPT_TIMEOUT => 60, // Accommodates slow/localhost networks
-                    CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawProbe',
+                    CURLOPT_CONNECTTIMEOUT => 3,
+                    CURLOPT_TIMEOUT => 5,
+                    CURLOPT_USERAGENT => 'PHP-Music-Probe',
                     CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
                   ];
                   if (defined('CURL_IPRESOLVE_V4')) {
@@ -40471,23 +40987,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     break;
                   }
                 }
-
-                if (!$remote_available) {
-                  $ctx = stream_context_create([
-                    'http' => [
-                      'timeout' => 45,
-                      'follow_location' => true,
-                      'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawProbe\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
-                    ],
-                    'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
-                  ]);
-                  $res = @file_get_contents($remote_url, false, $ctx);
-                  if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
-                    $remote_code = $res;
-                    $remote_available = true;
-                    break;
-                  }
-                }
               }
 
               $ping_latency_ms = round((microtime(true) - $ping_start) * 1000, 1);
@@ -40495,7 +40994,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $remote_lines = $remote_code ? (substr_count($remote_code, "\n") + 1) : 0;
               $remote_hash = $remote_code ? hash('sha256', str_replace(["\r\n", "\r"], "\n", trim($remote_code))) : '';
               $remote_md5 = $remote_code ? md5($remote_code) : '';
-              $remote_crc = $remote_code ? sprintf('%08X', crc32($remote_code)) : '';
+              $remote_crc = $remote_code ? strtoupper(hash('crc32b', $remote_code)) : '';
 
               preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $remote_ver_match);
               $remote_version = $remote_ver_match[1] ?? 'Unknown';
@@ -40513,11 +41012,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   'ping_latency_ms' => $ping_latency_ms
                 ]));
               }
-            }
-
-            // Guaranteed Fallback: If on diff tab and remote_code is not loaded yet, read payload cache
-            if ($active_tab === 'diff' && empty($remote_code) && file_exists($payload_cache_file)) {
-              $remote_code = @file_get_contents($payload_cache_file);
             }
 
             $is_identical = $remote_available && !empty($remote_hash) && hash_equals($local_hash, $remote_hash);
@@ -41980,7 +42474,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <?php endif; ?>
               </div>
             <?php endif; ?>
-          </div>
 
           <!-- SMOOTH UPDATE PROGRESS MODAL (Zero Hard-Reload) -->
           <div class="modal fade" id="updateProgressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
@@ -42190,7 +42683,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     pctLabel.textContent = '100%';
                     stageLabel.textContent = 'COMPLETE: SYSTEM UPGRADED';
                     consoleBox.textContent += `[${new Date().toLocaleTimeString()}] SUCCESS: ${data.message}\n`;
-                    consoleBox.textContent += `>> Upgrade completed safely without server timeout!\n`;
+                    consoleBox.textContent += `-- Upgrade completed safely without server timeout!\n`;
                     consoleBox.scrollTop = consoleBox.scrollHeight;
 
                     spinner.classList.add('d-none');
@@ -42207,8 +42700,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 progressBar.style.width = '100%';
                 pctLabel.textContent = 'ERR';
                 stageLabel.textContent = 'UPDATE ABORTED';
-                consoleBox.textContent += `\n>> [FATAL ERROR]: ${err.message}\n`;
-                consoleBox.textContent += `>> No files were harmed. Your installed version remains intact.\n`;
+                consoleBox.textContent += `\n-- [FATAL ERROR]: ${err.message}\n`;
+                consoleBox.textContent += `-- No files were harmed. Your installed version remains intact.\n`;
                 consoleBox.scrollTop = consoleBox.scrollHeight;
 
                 spinner.classList.add('d-none');
@@ -42329,14 +42822,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 consoleBox.textContent += `[STAGE 4/4] Verifying file system write permissions on index.php...\n`;
-                const writable = <?php echo $is_file_writable ? 'true' : 'false'; ?>;
+                const writable = <?php echo !empty($is_file_writable) ? 'true' : 'false'; ?>;
                 if (!writable) {
                   throw new Error("Server index.php is currently read-only. Adjust file permissions to 0644 or 0755.");
                 }
 
-                consoleBox.textContent += `\n>> SUCCESS: Staging dry run passed all integrity checks! You can safely install the update.`;
+                consoleBox.textContent += `\n-- SUCCESS: Staging dry run passed all integrity checks! You can safely install the update.`;
               } catch (err) {
-                consoleBox.textContent += `\n>> ERROR: Staging simulation failed: ${err.message}`;
+                consoleBox.textContent += `\n-- ERROR: Staging simulation failed: ${err.message}`;
               } finally {
                 if (btn) {
                   btn.disabled = false;
@@ -42386,101 +42879,98 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
             }
 
-            // Client-Side Visual Line Diff Engine (Executes on-demand only when Diff tab is active)
+            // Client-Side Visual Line Diff Engine (Asynchronous Fetching: 0 Server Memory, 0 Buffer Bloat)
             (async function buildVisualDiff() {
               const diffBox = document.getElementById('smart-diff-container');
               if (!diffBox) return;
 
               <?php if ($active_tab !== 'diff'): ?>
               return;
-              <?php else: ?>
-              <?php
-                $diff_local = @file_get_contents(__FILE__) ?: '';
-                $diff_remote = (string)($remote_code ?: '');
-              ?>
-              const localCode = <?php echo json_encode($diff_local); ?>;
-              let remoteCode = <?php echo json_encode($diff_remote); ?>;
-
-              // Dual-layer fallback: Fetch via jsDelivr CDN if server-side cache was not resolved
-              if (!remoteCode || remoteCode.length < 10000) {
-                diffBox.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching remote code via CDN fallback...</div>';
-                try {
-                  const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
-                  const cdnUrls = [
-                    `https://cdn.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`,
-                    `https://raw.githubusercontent.com/${activeRepo}/<?php echo htmlspecialchars($target_branch); ?>/index.php`
-                  ];
-                  for (const url of cdnUrls) {
-                    const res = await fetch(url, { cache: 'no-store' });
-                    if (res.ok) {
-                      const txt = await res.text();
-                      if (txt && txt.length > 10000 && txt.includes('<?php echo "<?php"; ?>')) {
-                        remoteCode = txt;
-                        break;
-                      }
-                    }
-                  }
-                } catch (e) {
-                  console.warn('Client-side CDN fetch error:', e);
-                }
-              }
-
-              if (!remoteCode || remoteCode.length < 10000) {
-                diffBox.innerHTML = '<div class="text-center py-4 text-danger small"><i class="bi bi-exclamation-triangle me-1"></i> Cannot render diff: Remote code could not be downloaded from GitHub or CDN.</div>';
-                return;
-              }
-
-              if (localCode === remoteCode) {
-                diffBox.innerHTML = '<div class="text-center py-5 text-success small"><i class="bi bi-check2-circle fs-3 d-block mb-2"></i>Codebases are 100% identical. No line differences found.</div>';
-                document.getElementById('diff-adds-count').textContent = '+0 additions';
-                document.getElementById('diff-dels-count').textContent = '-0 deletions';
-                return;
-              }
-
-              const localLines = localCode.split('\n');
-              const remoteLines = remoteCode.split('\n');
-
-              let diffHtml = '';
-              let adds = 0;
-              let dels = 0;
-              const maxInspect = Math.max(localLines.length, remoteLines.length);
-              const maxRenderLimit = 600;
-
-              for (let i = 0; i < maxInspect && (adds + dels) < maxRenderLimit; i++) {
-                const l = localLines[i];
-                const r = remoteLines[i];
-
-                if (l === undefined && r !== undefined) {
-                  adds++;
-                  diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
-                } else if (l !== undefined && r === undefined) {
-                  dels++;
-                  diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
-                } else if (l !== r) {
-                  dels++;
-                  adds++;
-                  diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
-                  diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
-                }
-              }
-
-              function escapeHtml(text) {
-                return (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-              }
-
-              document.getElementById('diff-adds-count').textContent = `+${adds} additions`;
-              document.getElementById('diff-dels-count').textContent = `-${dels} deletions`;
-              diffBox.innerHTML = diffHtml || '<div class="text-center py-4 text-secondary small">No modified lines detected.</div>';
               <?php endif; ?>
+
+              diffBox.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Downloading local and remote versions for comparison...</div>';
+
+              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
+              const targetBranch = '<?php echo htmlspecialchars($target_branch); ?>';
+
+              try {
+                const [localRes, remoteRes] = await Promise.allSettled([
+                  fetch('?access=admin&page=drive&action=read_text&f=index.php', { cache: 'no-store' }),
+                  fetch(`https://cdn.jsdelivr.net/gh/${activeRepo}@${targetBranch}/index.php`, { cache: 'no-store' })
+                ]);
+
+                let localCode = '';
+                if (localRes.status === 'fulfilled' && localRes.value.ok) {
+                  const data = await localRes.value.json();
+                  localCode = data.content || '';
+                }
+
+                let remoteCode = '';
+                if (remoteRes.status === 'fulfilled' && remoteRes.value.ok) {
+                  remoteCode = await remoteRes.value.text();
+                } else {
+                  // Secondary direct GitHub fallback
+                  const rawFallback = await fetch(`https://raw.githubusercontent.com/${activeRepo}/${targetBranch}/index.php`, { cache: 'no-store' });
+                  if (rawFallback.ok) remoteCode = await rawFallback.text();
+                }
+
+                if (!localCode || !remoteCode || remoteCode.length < 1000) {
+                  diffBox.innerHTML = '<div class="text-center py-4 text-warning small"><i class="bi bi-exclamation-triangle me-1"></i> Unable to load remote code comparison. Ensure internet access is available.</div>';
+                  return;
+                }
+
+                if (localCode.trim() === remoteCode.trim()) {
+                  diffBox.innerHTML = '<div class="text-center py-5 text-success small"><i class="bi bi-check2-circle fs-3 d-block mb-2"></i>Codebases are 100% identical. No line differences found.</div>';
+                  document.getElementById('diff-adds-count').textContent = '+0 additions';
+                  document.getElementById('diff-dels-count').textContent = '-0 deletions';
+                  return;
+                }
+
+                const localLines = localCode.split('\n');
+                const remoteLines = remoteCode.split('\n');
+
+                let diffHtml = '';
+                let adds = 0;
+                let dels = 0;
+                const maxInspect = Math.max(localLines.length, remoteLines.length);
+                const maxRenderLimit = 500;
+
+                const escapeHtml = str => (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+                for (let i = 0; i < maxInspect && (adds + dels) < maxRenderLimit; i++) {
+                  const l = localLines[i];
+                  const r = remoteLines[i];
+
+                  if (l === undefined && r !== undefined) {
+                    adds++;
+                    diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
+                  } else if (l !== undefined && r === undefined) {
+                    dels++;
+                    diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
+                  } else if (l !== r) {
+                    dels++;
+                    adds++;
+                    diffHtml += `<div class="diff-row del"><span class="diff-gutter-num">-${i+1}</span><span>- ${escapeHtml(l)}</span></div>`;
+                    diffHtml += `<div class="diff-row add"><span class="diff-gutter-num">+${i+1}</span><span>+ ${escapeHtml(r)}</span></div>`;
+                  }
+                }
+
+                document.getElementById('diff-adds-count').textContent = `+${adds} additions`;
+                document.getElementById('diff-dels-count').textContent = `-${dels} deletions`;
+                diffBox.innerHTML = diffHtml || '<div class="text-center py-4 text-secondary small">No modified lines detected.</div>';
+              } catch (err) {
+                diffBox.innerHTML = `<div class="text-center py-4 text-danger small"><i class="bi bi-x-circle me-1"></i> Diff inspection error: ${err.message}</div>`;
+              }
             })();
 
-            // Cached GitHub Commit Timeline with force-refresh and multiline text wrapping
+            // Cached GitHub Commit Timeline (Fixed duplicate variable declaration)
             window.fetchGitHubCommitLogs = async function(forceRefresh = false) {
               const stream = document.getElementById('github-commit-stream');
               if (!stream) return;
 
               const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
-              const cacheKey = 'gh_commits_' + activeRepo.replace('/', '_') + '_<?php echo htmlspecialchars($target_branch); ?>';
+              const targetBranch = '<?php echo htmlspecialchars($target_branch); ?>';
+              const cacheKey = 'gh_commits_' + activeRepo.replace('/', '_') + '_' + targetBranch;
               
               if (!forceRefresh) {
                 const cached = sessionStorage.getItem(cacheKey);
@@ -42497,20 +42987,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               stream.innerHTML = '<div class="text-center py-3 text-secondary small"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching recent commits from GitHub...</div>';
 
-              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
               try {
-                const res = await fetch(`https://api.github.com/repos/${activeRepo}/commits?sha=<?php echo htmlspecialchars($target_branch); ?>&per_page=8`, { cache: "no-store" });
-                if (!res.ok) throw new Error("GitHub API rate limit reached or network error");
+                const res = await fetch(`https://api.github.com/repos/${activeRepo}/commits?sha=${targetBranch}&per_page=8`, { cache: "no-store" });
+                if (!res.ok) throw new Error("API rate-limited or unreachable");
                 const commits = await res.json();
 
                 if (Array.isArray(commits)) {
                   sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), commits: commits }));
                   renderCommitList(commits);
                 } else {
-                  throw new Error("Invalid commit data received.");
+                  throw new Error("Invalid commit payload");
                 }
               } catch (e) {
-                stream.innerHTML = `<div class="text-center py-2 text-secondary small"><i class="bi bi-info-circle me-1"></i> Public GitHub commit timeline unavailable (${e.message}).</div>`;
+                stream.innerHTML = `<div class="text-center py-2 text-secondary small"><i class="bi bi-info-circle me-1"></i> Public GitHub commit timeline unavailable on this network (${e.message}).</div>`;
               }
 
               function renderCommitList(commits) {
@@ -42544,7 +43033,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
             };
 
-            // GitHub Releases & Changelog Feed Loader (With Raw GitHub Fallback for Localhost)
+            // GitHub Releases & Changelog Feed Loader (Fixed duplicate variable declaration)
             window.fetchGitHubReleases = async function(forceRefresh = false) {
               const stream = document.getElementById('github-releases-stream');
               if (!stream) return;
@@ -42566,8 +43055,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               }
 
               stream.innerHTML = '<div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span> Fetching official releases from GitHub...</div>';
-
-              const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
               try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -42655,13 +43142,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             };
 
             // Execute immediately on load (supports both direct load and SPA navigation)
-            if (document.getElementById('github-commit-stream')) {
-              window.fetchGitHubCommitLogs();
-            }
-            if (document.getElementById('github-releases-stream')) {
-              window.fetchGitHubReleases();
-            }
-          </script>
+              if (document.getElementById('github-commit-stream')) {
+                window.fetchGitHubCommitLogs();
+              }
+              if (document.getElementById('github-releases-stream')) {
+                window.fetchGitHubReleases();
+              }
+            </script>
+          </div>
         <?php elseif (($_GET['page'] ?? '') === 'manage'): ?>
           <style>
             .main-content { overflow: hidden !important; padding: 0 !important; display: flex; flex-direction: column; }
@@ -45310,7 +45798,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               align-items: center;
               justify-content: space-between;
               padding: 0 1rem;
+              gap: 14px;
               flex-shrink: 0;
+              overflow: hidden;
             }
   
             .ide-header-title {
@@ -45320,6 +45810,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               display: flex;
               align-items: center;
               gap: 8px;
+              min-width: 0;
+              flex: 1 1 auto;
+              overflow: hidden;
+              white-space: nowrap;
             }
   
             .ide-header-title span {
@@ -45331,10 +45825,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               font-weight: normal;
               margin-left: 8px;
             }
+
+            #ide-current-file {
+              max-width: min(50vw, 550px);
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+              display: inline-block;
+              vertical-align: middle;
+            }
   
             .ide-actions {
               display: flex;
               gap: 8px;
+              flex-shrink: 0;
             }
   
             .ide-btn {
@@ -45461,10 +45965,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               color: #aaaaaa;
               font-size: 0.85rem;
               border-top: 2px solid transparent;
-              cursor: pointer;
+              cursor: grab;
+              user-select: none;
               white-space: nowrap;
+              transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
             }
   
+            .ide-tab:active {
+              cursor: grabbing;
+            }
+
             .ide-tab.active {
               background: #121212;
               color: #ffffff;
@@ -45474,6 +45984,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .ide-tab:hover:not(.active) {
               background: #1a1a1a;
               color: #e3e3e3;
+            }
+
+            .ide-tab.tab-dragging {
+              opacity: 0.35;
+              background: rgba(255, 0, 0, 0.1) !important;
+            }
+
+            .ide-tab.tab-drag-over {
+              border-left: 3px solid #ff0000 !important;
+              background: rgba(255, 255, 255, 0.08) !important;
             }
   
             .ide-tab-close {
@@ -46111,9 +46631,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   
           <div class="ide-container d-none d-lg-flex">
             <div class="ide-header">
-              <div class="ide-header-title">
-                <i class="bi bi-braces text-danger"></i> PHPEditor
-                <span id="ide-current-file">No file selected</span>
+              <div class="ide-header-title text-truncate">
+                <i class="bi bi-braces text-danger flex-shrink-0"></i>
+                <span class="flex-shrink-0 m-0 p-0" style="background:none;color:#fff;font-size:0.95rem;">PHPEditor</span>
+                <span id="ide-current-file" class="text-truncate font-monospace" title="No file selected">No file selected</span>
               </div>
               <div class="ide-actions">
                 <button class="ide-btn text-info" id="ide-ai-btn" title="AI Coding Assistant"><i class="bi bi-robot"></i> AI Help</button>
@@ -47620,22 +48141,92 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 window.updateIdeSelectionUI();
               };
   
+              let draggedTab = null;
+              let isTabDragging = false;
+
               const renderTabs = () => {
                 tabsContainer.innerHTML = openFiles.map(f => {
                   const isDirty = ideDraftPaths.has(f.path) || (ideSessions[f.path] && ideSessions[f.path].getUndoManager() && !ideSessions[f.path].getUndoManager().isClean());
                   return `
-                    <div class="ide-tab ${f.path === activeTabPath ? 'active' : ''}" data-path="${f.path}">
-                      <span class="tab-title flex-grow-1" onclick="window.ideOpenTab('${f.path}')">${f.name}${isDirty ? ' *' : ''}</span>
-                      <i class="bi bi-x ide-tab-close" onclick="window.ideCloseTab('${f.path}', event)"></i>
+                    <div class="ide-tab ${f.path === activeTabPath ? 'active' : ''}" data-path="${f.path}" draggable="true" title="${f.path}">
+                      <span class="tab-title flex-grow-1 text-truncate">${f.name}${isDirty ? ' *' : ''}</span>
+                      <i class="bi bi-x ide-tab-close" draggable="false" onclick="window.ideCloseTab('${f.path}', event)" title="Close tab"></i>
                     </div>
                   `;
                 }).join('');
+
+                // Tab Click & Real-time Drag-and-Drop Reordering
+                tabsContainer.querySelectorAll('.ide-tab').forEach(tabEl => {
+                  // Switch tab on click (safeguarded against drag)
+                  tabEl.addEventListener('click', (e) => {
+                    if (isTabDragging) return;
+                    if (e.target.closest('.ide-tab-close')) return;
+                    window.ideOpenTab(tabEl.dataset.path);
+                  });
+
+                  // Drag Start
+                  tabEl.addEventListener('dragstart', (e) => {
+                    if (e.target.closest('.ide-tab-close')) {
+                      e.preventDefault();
+                      return;
+                    }
+                    draggedTab = tabEl;
+                    isTabDragging = true;
+                    tabEl.classList.add('tab-dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', tabEl.dataset.path);
+                  });
+
+                  // Drag Over: Real-time dynamic swapping under cursor
+                  tabEl.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (!draggedTab || draggedTab === tabEl) return;
+
+                    const rect = tabEl.getBoundingClientRect();
+                    const isAfter = e.clientX > (rect.left + rect.width / 2);
+
+                    if (isAfter) {
+                      tabEl.after(draggedTab);
+                    } else {
+                      tabEl.before(draggedTab);
+                    }
+                  });
+
+                  // Drag End: Sync the new DOM sequence to openFiles array & localStorage
+                  tabEl.addEventListener('dragend', () => {
+                    tabEl.classList.remove('tab-dragging');
+                    draggedTab = null;
+
+                    const newOrderPaths = Array.from(tabsContainer.querySelectorAll('.ide-tab')).map(t => t.dataset.path);
+                    openFiles.sort((a, b) => newOrderPaths.indexOf(a.path) - newOrderPaths.indexOf(b.path));
+                    localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+
+                    setTimeout(() => { isTabDragging = false; }, 60);
+                  });
+                });
+
+                // Allow dropping onto empty space to append tab to the end
+                tabsContainer.ondragover = (e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                };
+                tabsContainer.ondrop = (e) => {
+                  if (e.target === tabsContainer && draggedTab) {
+                    e.preventDefault();
+                    tabsContainer.appendChild(draggedTab);
+                    const newOrderPaths = Array.from(tabsContainer.querySelectorAll('.ide-tab')).map(t => t.dataset.path);
+                    openFiles.sort((a, b) => newOrderPaths.indexOf(a.path) - newOrderPaths.indexOf(b.path));
+                    localStorage.setItem('ide_open_files', JSON.stringify(openFiles));
+                  }
+                };
 
                 if (openFiles.length === 0) {
                   editorDiv.style.display = 'none';
                   mediaViewer.classList.replace('d-flex', 'd-none');
                   emptyState.classList.replace('d-none', 'd-flex');
                   currentFileEl.textContent = 'No file selected';
+                  currentFileEl.title = 'No file selected';
                   currentPath = '';
                   activeTabPath = '';
                   document.title = 'PHPEditor - Admin Panel';
@@ -47684,6 +48275,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 if (!file) return;
 
                 currentFileEl.textContent = path;
+                currentFileEl.title = path;
                 document.title = `${file.name} - PHPEditor - Admin Panel`;
                 emptyState.classList.replace('d-flex', 'd-none');
 
@@ -63159,6 +63751,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <div class="row g-3 mb-4">
                 <div class="col-12 col-md-6">
                   <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="settings" id="perm-settings">
+                    <label class="form-check-label text-white fw-medium" for="perm-settings">General Settings</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="security" id="perm-security">
+                    <label class="form-check-label text-white fw-medium" for="perm-security">Security &amp; Firewall</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="users" id="perm-users">
                     <label class="form-check-label text-white fw-medium" for="perm-users">User Management</label>
                   </div>
@@ -64810,6 +65414,7 @@ if (strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && strpo
 
     if (!$is_valid_api) {
       // Check Custom API Keys (1,000 uses per month)
+      $stmt_key = $db_fw->prepare("SELECT id, token, uses, reset_month, quota_limit FROM api_keys WHERE token = ? AND status = 'active'");
       $stmt_key->execute([$api_key]);
       $key_row = $stmt_key->fetch();
       
