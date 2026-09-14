@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '12.0');
+define('APP_VERSION', '12.1');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -2849,80 +2849,82 @@ HTACCESS;
     return $meta;
   }
 
-  function createThumbnail($src, $dest, $size, $quality) {
-    if (!file_exists($src) || !is_readable($src)) return false;
+  if (!function_exists('userDriveCreateThumbnail')) {
+    function userDriveCreateThumbnail($src, $dest, $size, $quality) {
+      if (!file_exists($src) || !is_readable($src)) return false;
 
-    $ext = strtolower(pathinfo($src, PATHINFO_EXTENSION));
-    if ($ext === 'svg') return false;
+      $ext = strtolower(pathinfo($src, PATHINFO_EXTENSION));
+      if ($ext === 'svg') return false;
 
-    $info = @getimagesize($src);
-    if (!$info) return false;
+      $info = @getimagesize($src);
+      if (!$info) return false;
 
-    list($origW, $origH) = $info;
-    if ($origW <= 0 || $origH <= 0) return false;
+      list($origW, $origH) = $info;
+      if ($origW <= 0 || $origH <= 0) return false;
 
-    $mime = $info['mime'] ?? '';
+      $mime = $info['mime'] ?? '';
 
-    $ratio = min($size / $origW, $size / $origH);
-    $newW = max(1, (int)round($origW * $ratio));
-    $newH = max(1, (int)round($origH * $ratio));
+      $ratio = min($size / $origW, $size / $origH);
+      $newW = max(1, (int)round($origW * $ratio));
+      $newH = max(1, (int)round($origH * $ratio));
 
-    $srcImg = false;
-    switch ($mime) {
-      case 'image/jpeg': $srcImg = @imagecreatefromjpeg($src); break;
-      case 'image/png':  $srcImg = @imagecreatefrompng($src); break;
-      case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
-      case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
-      case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : false; break;
-      case 'image/bmp':
-      case 'image/x-ms-bmp': $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
-    }
-    if (!$srcImg) return false;
+      $srcImg = false;
+      switch ($mime) {
+        case 'image/jpeg': $srcImg = @imagecreatefromjpeg($src); break;
+        case 'image/png':  $srcImg = @imagecreatefrompng($src); break;
+        case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
+        case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : false; break;
+        case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : false; break;
+        case 'image/bmp':
+        case 'image/x-ms-bmp': $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : false; break;
+      }
+      if (!$srcImg) return false;
 
-    if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
-      $exif = @exif_read_data($src);
-      if (!empty($exif['Orientation'])) {
-        $rotated = false;
-        switch ($exif['Orientation']) {
-          case 3: $rotated = imagerotate($srcImg, 180, 0); break;
-          case 6:
-            $rotated = imagerotate($srcImg, -90, 0);
-            list($origW, $origH) = [$origH, $origW];
-            break;
-          case 8:
-            $rotated = imagerotate($srcImg, 90, 0);
-            list($origW, $origH) = [$origH, $origW];
-            break;
-        }
-        if ($rotated !== false) {
-          imagedestroy($srcImg);
-          $srcImg = $rotated;
-          $ratio = min($size / $origW, $size / $origH);
-          $newW = max(1, (int)round($origW * $ratio));
-          $newH = max(1, (int)round($origH * $ratio));
+      if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
+        $exif = @exif_read_data($src);
+        if (!empty($exif['Orientation'])) {
+          $rotated = false;
+          switch ($exif['Orientation']) {
+            case 3: $rotated = imagerotate($srcImg, 180, 0); break;
+            case 6:
+              $rotated = imagerotate($srcImg, -90, 0);
+              list($origW, $origH) = [$origH, $origW];
+              break;
+            case 8:
+              $rotated = imagerotate($srcImg, 90, 0);
+              list($origW, $origH) = [$origH, $origW];
+              break;
+          }
+          if ($rotated !== false) {
+            imagedestroy($srcImg);
+            $srcImg = $rotated;
+            $ratio = min($size / $origW, $size / $origH);
+            $newW = max(1, (int)round($origW * $ratio));
+            $newH = max(1, (int)round($origH * $ratio));
+          }
         }
       }
-    }
 
-    $destImg = imagecreatetruecolor($newW, $newH);
-    if (!$destImg) {
+      $destImg = imagecreatetruecolor($newW, $newH);
+      if (!$destImg) {
+        imagedestroy($srcImg);
+        return false;
+      }
+
+      $bg = imagecolorallocate($destImg, 33, 31, 38);
+      imagefilledrectangle($destImg, 0, 0, $newW, $newH, $bg);
+      imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
+
+      $destDir = dirname($dest);
+      if (!is_dir($destDir)) {
+        @mkdir($destDir, 0777, true);
+      }
+
+      $ok = imagejpeg($destImg, $dest, $quality);
       imagedestroy($srcImg);
-      return false;
+      imagedestroy($destImg);
+      return $ok;
     }
-
-    $bg = imagecolorallocate($destImg, 33, 31, 38);
-    imagefilledrectangle($destImg, 0, 0, $newW, $newH, $bg);
-    imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $newW, $newH, $origW, $origH);
-
-    $destDir = dirname($dest);
-    if (!is_dir($destDir)) {
-      @mkdir($destDir, 0777, true);
-    }
-
-    $ok = imagejpeg($destImg, $dest, $quality);
-    imagedestroy($srcImg);
-    imagedestroy($destImg);
-    return $ok;
   }
 
   function streamRangeFile($path, $mime) {
@@ -4027,7 +4029,7 @@ HTACCESS;
           if (!empty($mediaMeta['raw_cover'])) {
             $tmpCover = tempnam(sys_get_temp_dir(), 'cov_');
             @file_put_contents($tmpCover, $mediaMeta['raw_cover']);
-            createThumbnail($tmpCover, $cachePath, $config['thumb_size'], $config['thumb_quality']);
+            userDriveCreateThumbnail($tmpCover, $cachePath, $config['thumb_size'], $config['thumb_quality']);
             @unlink($tmpCover);
           }
         }
@@ -4042,7 +4044,7 @@ HTACCESS;
         }
 
         if ((!file_exists($cachePath) || filesize($cachePath) === 0) && in_array($ext, $config['image_extensions'])) {
-          createThumbnail($fullPath, $cachePath, $config['thumb_size'], $config['thumb_quality']);
+          userDriveCreateThumbnail($fullPath, $cachePath, $config['thumb_size'], $config['thumb_quality']);
         }
       }
 
@@ -18597,7 +18599,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     if (file_exists($rawPath) && is_file($rawPath)) {
       $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel . '.jpg';
       if (!is_dir(dirname($targetThumb))) @mkdir(dirname($targetThumb), 0755, true);
-      if (createThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
+      if (artworkCreateThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
         return $targetThumb;
       }
       return $rawPath;
@@ -18652,59 +18654,61 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     return $dist;
   }
   
-  function createThumbnail($src, $dest, $targetWidth = 480, $quality = 88) {
-    if (!file_exists($src)) return false;
-    $info = @getimagesize($src);
-    if (!$info) return false;
-  
-    list($w, $h) = $info;
-    $mime = $info['mime'];
-    $srcImg = null;
-  
-    switch ($mime) {
-      case 'image/jpeg': $srcImg = @imagecreatefromjpeg($src); break;
-      case 'image/png':  $srcImg = @imagecreatefrompng($src); break;
-      case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
-      case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : null; break;
-      case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : null; break;
-      case 'image/bmp':  $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : null; break;
-    }
-    if (!$srcImg) return false;
-  
-    if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
-      $exif = @exif_read_data($src);
-      if (!empty($exif['Orientation'])) {
-        switch ($exif['Orientation']) {
-          case 3: $srcImg = imagerotate($srcImg, 180, 0); break;
-          case 6:
-            $srcImg = imagerotate($srcImg, -90, 0);
-            list($w, $h) = [$h, $w];
-            break;
-          case 8:
-            $srcImg = imagerotate($srcImg, 90, 0);
-            list($w, $h) = [$h, $w];
-            break;
+  if (!function_exists('artworkCreateThumbnail')) {
+    function artworkCreateThumbnail($src, $dest, $targetWidth = 480, $quality = 88) {
+      if (!file_exists($src)) return false;
+      $info = @getimagesize($src);
+      if (!$info) return false;
+    
+      list($w, $h) = $info;
+      $mime = $info['mime'];
+      $srcImg = null;
+    
+      switch ($mime) {
+        case 'image/jpeg': $srcImg = @imagecreatefromjpeg($src); break;
+        case 'image/png':  $srcImg = @imagecreatefrompng($src); break;
+        case 'image/gif':  $srcImg = @imagecreatefromgif($src); break;
+        case 'image/webp': $srcImg = function_exists('imagecreatefromwebp') ? @imagecreatefromwebp($src) : null; break;
+        case 'image/avif': $srcImg = function_exists('imagecreatefromavif') ? @imagecreatefromavif($src) : null; break;
+        case 'image/bmp':  $srcImg = function_exists('imagecreatefrombmp') ? @imagecreatefrombmp($src) : null; break;
+      }
+      if (!$srcImg) return false;
+    
+      if ($mime === 'image/jpeg' && function_exists('exif_read_data')) {
+        $exif = @exif_read_data($src);
+        if (!empty($exif['Orientation'])) {
+          switch ($exif['Orientation']) {
+            case 3: $srcImg = imagerotate($srcImg, 180, 0); break;
+            case 6:
+              $srcImg = imagerotate($srcImg, -90, 0);
+              list($w, $h) = [$h, $w];
+              break;
+            case 8:
+              $srcImg = imagerotate($srcImg, 90, 0);
+              list($w, $h) = [$h, $w];
+              break;
+          }
         }
       }
+    
+      $ratio = min($targetWidth / $w, 1.0);
+      $targetHeight = max(1, (int)round($h * $ratio));
+      $finalWidth = max(1, (int)round($w * $ratio));
+    
+      $destImg = imagecreatetruecolor($finalWidth, $targetHeight);
+      if ($mime === 'image/png' || $mime === 'image/webp') {
+        imagealphablending($destImg, false);
+        imagesavealpha($destImg, true);
+        $transparent = imagecolorallocatealpha($destImg, 255, 255, 255, 127);
+        imagefilledrectangle($destImg, 0, 0, $finalWidth, $targetHeight, $transparent);
+      }
+      imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $finalWidth, $targetHeight, $w, $h);
+    
+      $ok = imagejpeg($destImg, $dest, $quality);
+      imagedestroy($srcImg);
+      imagedestroy($destImg);
+      return $ok;
     }
-  
-    $ratio = min($targetWidth / $w, 1.0);
-    $targetHeight = max(1, (int)round($h * $ratio));
-    $finalWidth = max(1, (int)round($w * $ratio));
-  
-    $destImg = imagecreatetruecolor($finalWidth, $targetHeight);
-    if ($mime === 'image/png' || $mime === 'image/webp') {
-      imagealphablending($destImg, false);
-      imagesavealpha($destImg, true);
-      $transparent = imagecolorallocatealpha($destImg, 255, 255, 255, 127);
-      imagefilledrectangle($destImg, 0, 0, $finalWidth, $targetHeight, $transparent);
-    }
-    imagecopyresampled($destImg, $srcImg, 0, 0, 0, 0, $finalWidth, $targetHeight, $w, $h);
-  
-    $ok = imagejpeg($destImg, $dest, $quality);
-    imagedestroy($srcImg);
-    imagedestroy($destImg);
-    return $ok;
   }
   
   function getFileMime($path, $fallback = 'image/jpeg') {
@@ -19312,7 +19316,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $base64 = preg_replace('#^data:image/\w+;base64,#i', '', $thumbData);
           file_put_contents($thumbPath, base64_decode($base64));
         } else {
-          createThumbnail($finalPath, $thumbPath, $config['thumb_width'], $config['thumb_quality']);
+          artworkCreateThumbnail($finalPath, $thumbPath, $config['thumb_width'], $config['thumb_quality']);
         }
   
         $phash = compute_phash($thumbPath);
@@ -19886,7 +19890,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       } elseif (isset($_FILES['similar_file']) && $_FILES['similar_file']['error'] === 0) {
         $tmpUpload = $_FILES['similar_file']['tmp_name'];
         $tempThumb = $config['chunk_dir'] . DIRECTORY_SEPARATOR . 'sim_tmp_' . bin2hex(random_bytes(6)) . '.jpg';
-        if (createThumbnail($tmpUpload, $tempThumb, $config['thumb_width'], $config['thumb_quality'])) {
+        if (artworkCreateThumbnail($tmpUpload, $tempThumb, $config['thumb_width'], $config['thumb_quality'])) {
           $targetHash = compute_phash($tempThumb);
           @unlink($tempThumb);
         } else {
@@ -20314,7 +20318,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $thumbRel = $destRel . '.jpg';
           $thumbFull = $config['thumb_dir'] . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $thumbRel);
           if (!is_dir(dirname($thumbFull))) @mkdir(dirname($thumbFull), 0755, true);
-          createThumbnail($destFull, $thumbFull, $config['thumb_width'], $config['thumb_quality']);
+          artworkCreateThumbnail($destFull, $thumbFull, $config['thumb_width'], $config['thumb_quality']);
 
           $pHash = compute_phash($thumbFull);
           if ($idx === 0) $leadHash = $pHash;
@@ -21060,9 +21064,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($file) . '.jpg';
         }
         if (!file_exists($thumbCandidate) && file_exists($rawPath)) {
-          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRelPath . '.jpg';
+          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel . '.jpg';
           if (!is_dir(dirname($targetThumb))) @mkdir(dirname($targetThumb), 0755, true);
-          if (createThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
+          if (artworkCreateThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
             $thumbCandidate = $targetThumb;
           }
         }
@@ -31320,6 +31324,174 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // RUN BACKGROUND MAINTENANCE JOB
+    if (isset($_POST['run_backend_task'])) {
+      $db = get_db();
+      $task_key = $_POST['task_key'] ?? '';
+      $reclaimed = 0;
+      $msg = "Task completed.";
+
+      if ($task_key === 'purge_temp_chunks') {
+        $tmp_dir = MUSIC_DIR . '/.tmp_uploads';
+        if (is_dir($tmp_dir)) {
+          $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($tmp_dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+          foreach ($files as $f) {
+            if ($f->isFile()) { $reclaimed += $f->getSize(); @unlink($f->getRealPath()); }
+            elseif ($f->isDir()) { @rmdir($f->getRealPath()); }
+          }
+        }
+        $msg = "Purged temporary chunks. Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB.";
+      } elseif ($task_key === 'purge_expired_tokens') {
+        $db->exec("DELETE FROM password_resets WHERE expires_at < datetime('now')");
+        $db->exec("DELETE FROM song_invites WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
+        $db->exec("DELETE FROM playlist_invites WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
+        $msg = "Purged all expired password resets and invite tokens.";
+      } elseif ($task_key === 'purge_orphan_files') {
+        $db_files = $db->query("SELECT file FROM music")->fetchAll(PDO::FETCH_COLUMN);
+        $norm_db = array_map(function($f) { return str_replace('\\', '/', realpath($f) ?: $f); }, $db_files);
+        $norm_set = array_flip($norm_db);
+        $uploads_dir = MUSIC_DIR . '/uploads';
+        $orphan_count = 0;
+        if (is_dir($uploads_dir)) {
+          $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($uploads_dir, FilesystemIterator::SKIP_DOTS));
+          foreach ($it as $file) {
+            $p = str_replace('\\', '/', $file->getRealPath());
+            if (preg_match('/\.(mp3|flac|m4a|ogg|wav)$/i', $p) && !isset($norm_set[$p])) {
+              $reclaimed += $file->getSize();
+              @unlink($p);
+              $orphan_count++;
+            }
+          }
+        }
+        $msg = "Removed {$orphan_count} orphaned audio file(s). Reclaimed " . number_format($reclaimed / 1048576, 2) . " MB.";
+      } elseif ($task_key === 'cleanup_stale_sessions') {
+        $sess_path = session_save_path() ?: sys_get_temp_dir();
+        $cnt = 0;
+        if (is_dir($sess_path)) {
+          foreach (glob($sess_path . '/sess_*') as $sf) {
+            if (time() - filemtime($sf) > 86400 * 7) { @unlink($sf); $cnt++; }
+          }
+        }
+        $msg = "Cleared {$cnt} stale session file(s).";
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Executed task: {$task_key} ({$msg})", 0);
+      $_SESSION['admin_flash_msg'] = $msg;
+      header('Location: ?access=admin&page=jobs');
+      exit;
+    }
+
+    // CREATE DATABASE SNAPSHOT BACKUP
+    if (isset($_POST['create_database_backup'])) {
+      $db = get_db();
+      $bk_dir = MUSIC_DIR . '/.file_version/db_backups';
+      if (!is_dir($bk_dir)) {
+        @mkdir($bk_dir, 0755, true);
+        @file_put_contents($bk_dir . '/.htaccess', "Order Deny,Allow\nDeny from all");
+      }
+      $note = preg_replace('/[^a-zA-Z0-9_\-]/', '', trim($_POST['backup_note'] ?? 'manual'));
+      $filename = 'music_db_' . date('Ymd_His') . ($note ? "_{$note}" : '') . '.sqlite';
+      $dest = $bk_dir . '/' . $filename;
+
+      // Attempt to safely flush WAL to main DB file before backup
+      try {
+        $db->exec("PRAGMA wal_checkpoint(PASSIVE);");
+      } catch (\Throwable $e) {
+        // Silently bypass lock errors during checkpoint
+      }
+
+      $backup_success = false;
+      
+      // 1. Try safe online backup via VACUUM INTO
+      try {
+        $db->exec("VACUUM INTO " . $db->quote($dest));
+        $backup_success = true;
+      } catch (\Throwable $e) {
+        // 2. Fallback to direct filesystem copy if SQLite is locked
+        if (@copy(DB_FILE, $dest)) {
+          $backup_success = true;
+        }
+      }
+
+      if ($backup_success && file_exists($dest)) {
+        try {
+          log_admin_activity($db, $_SESSION['admin_email'], "Created database backup: {$filename}", 0);
+        } catch (\Throwable $e) {}
+        $_SESSION['admin_flash_msg'] = "Database snapshot created: {$filename}";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Backup failed: Database is heavily locked and fallback copy was denied. Try again in a few seconds.";
+      }
+      header('Location: ?access=admin&page=db_backups');
+      exit;
+    }
+
+    // RESTORE DATABASE SNAPSHOT
+    if (isset($_POST['restore_database_backup']) && isset($_POST['backup_file'])) {
+      $db = get_db();
+      $safe_file = basename($_POST['backup_file']);
+      $src = MUSIC_DIR . '/.file_version/db_backups/' . $safe_file;
+
+      if (file_exists($src)) {
+        // Create emergency backup of current DB before overwrite
+        $bk_dir = MUSIC_DIR . '/.file_version/db_backups';
+        @copy(DB_FILE, $bk_dir . '/pre_restore_' . date('Ymd_His') . '.sqlite');
+
+        // Copy snapshot over live DB
+        try {
+          $db->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        } catch (\Throwable $e) {}
+        @copy($src, DB_FILE);
+        log_admin_activity($db, $_SESSION['admin_email'], "Restored database from snapshot: {$safe_file}", 0);
+        $_SESSION['admin_flash_msg'] = "Database restored successfully from {$safe_file}.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Snapshot file not found.";
+      }
+      header('Location: ?access=admin&page=db_backups');
+      exit;
+    }
+
+    // DELETE DATABASE SNAPSHOT
+    if (isset($_POST['delete_database_backup']) && isset($_POST['backup_file'])) {
+      $db = get_db();
+      $safe_file = basename($_POST['backup_file']);
+      $target = MUSIC_DIR . '/.file_version/db_backups/' . $safe_file;
+      if (file_exists($target) && @unlink($target)) {
+        log_admin_activity($db, $_SESSION['admin_email'], "Deleted database backup: {$safe_file}", 0);
+        $_SESSION['admin_flash_msg'] = "Deleted snapshot {$safe_file}.";
+      }
+      header('Location: ?access=admin&page=db_backups');
+      exit;
+    }
+
+    // CLEAR PHP ERROR LOG
+    if (isset($_POST['clear_php_error_log'])) {
+      $db = get_db();
+      $log_file = ini_get('error_log') ?: (__DIR__ . '/php_error.log');
+      if (file_exists($log_file) && is_writable($log_file)) {
+        @file_put_contents($log_file, '');
+        log_admin_activity($db, $_SESSION['admin_email'], "Cleared PHP Error Log file ({$log_file})", 0);
+        $_SESSION['admin_flash_msg'] = "Error log cleared successfully.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Error log file is either missing or read-only.";
+      }
+      header('Location: ?access=admin&page=error_logs');
+      exit;
+    }
+
+    // FLUSH SYSTEM OPCACHE
+    if (isset($_POST['flush_server_opcache'])) {
+      $db = get_db();
+      if (function_exists('opcache_reset')) {
+        @opcache_reset();
+        log_admin_activity($db, $_SESSION['admin_email'], "Flushed Zend OPcache memory", 0);
+        $_SESSION['admin_flash_msg'] = "Zend OPcache has been completely reset.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "OPcache is not loaded on this server.";
+      }
+      header('Location: ?access=admin&page=phpinfo');
+      exit;
+    }
+
     // UNLOCK LOGIN ATTEMPTS FOR IP OR TARGET EMAIL
     if (isset($_POST['clear_login_lockout'])) {
       $db = get_db();
@@ -33318,7 +33490,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['settings', 'security', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground']; // Default to all if missing
+  $current_admin_permissions = ['settings', 'security', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -33377,7 +33549,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'playground' => 'Interactive API Playground',
     'update' => 'System & Codebase Update',
     'settings' => 'General System Settings & Branding',
-    'security' => 'Security, IP Firewall & Threat Defense'
+    'security' => 'Security, IP Firewall & Threat Defense',
+    'jobs' => 'Background Tasks & Cron Scheduler',
+    'db_backups' => 'Database Snapshot Vault & Backups',
+    'error_logs' => 'PHP Error Logs & Crash Monitor',
+    'phpinfo' => 'PHP Runtime & Server Diagnostics'
   ];
   $active_page_key = $_GET['page'] ?? 'users';
   $admin_page_title = isset($page_titles[$active_page_key]) ? $page_titles[$active_page_key] . " - Admin Panel" : "Admin Panel";
@@ -34635,6 +34811,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <a href="?access=admin&page=appeals" title="Ban Appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
             <?php endif; ?>
 
+            <!-- Section: Backend & Server Engine -->
+            <div class="sidebar-section-label">Server Engine</div>
+            <?php if ($is_super_admin_check || in_array('jobs', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=jobs" title="Background Tasks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'jobs') ? 'active' : ''; ?>"><i class="bi bi-clock-history"></i><span>Background Tasks</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('db_backups', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=db_backups" title="DB Backup Vault" class="nav-link <?php echo (($_GET['page'] ?? '') === 'db_backups') ? 'active' : ''; ?>"><i class="bi bi-database-fill-up"></i><span>DB Backup Vault</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('error_logs', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=error_logs" title="PHP Error Logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'error_logs') ? 'active' : ''; ?>"><i class="bi bi-bug-fill"></i><span>PHP Error Logs</span></a>
+            <?php endif; ?>
+            <?php if ($is_super_admin_check || in_array('phpinfo', $current_admin_permissions)): ?>
+            <a href="?access=admin&page=phpinfo" title="PHP Diagnostics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'phpinfo') ? 'active' : ''; ?>"><i class="bi bi-cpu-fill"></i><span>PHP Diagnostics</span></a>
+            <?php endif; ?>
+
             <!-- Section: Workspace Tools -->
             <div class="sidebar-section-label">Tools</div>
             <?php if ($is_super_admin_check || in_array('manage', $current_admin_permissions)): ?>
@@ -34841,7 +35032,612 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php unset($_SESSION['admin_flash_msg']); ?>
         <?php endif; ?>
 
-        <?php if (($_GET['page'] ?? '') === 'settings'): ?>
+        <?php if (($_GET['page'] ?? '') === 'jobs'): ?>
+          <?php
+            $db = get_db();
+            // Calculate pending cleanup stats
+            $tmp_chunks_count = 0;
+            $tmp_chunks_bytes = 0;
+            $tmp_dir = MUSIC_DIR . '/.tmp_uploads';
+            if (is_dir($tmp_dir)) {
+              foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($tmp_dir, FilesystemIterator::SKIP_DOTS)) as $f) {
+                if ($f->isFile()) { $tmp_chunks_count++; $tmp_chunks_bytes += $f->getSize(); }
+              }
+            }
+
+            $expired_resets = (int)($db->query("SELECT COUNT(*) FROM password_resets WHERE expires_at < datetime('now')")->fetchColumn() ?: 0);
+            $expired_invites = (int)($db->query("SELECT COUNT(*) FROM song_invites WHERE expires_at IS NOT NULL AND expires_at < datetime('now')")->fetchColumn() ?: 0);
+            $total_orphaned_tokens = $expired_resets + $expired_invites;
+
+            $total_songs = (int)($db->query("SELECT COUNT(*) FROM music")->fetchColumn() ?: 0);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Background Tasks &amp; Cron Scheduler</h1>
+              <div class="small text-secondary mt-1">Run backend routine maintenance, garbage collection, and queue purges manually or via server crontab</div>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Summary KPI Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Temp Upload Chunks</span>
+                    <span class="text-warning"><i class="bi bi-hourglass-split fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $tmp_chunks_count; ?> <span class="fs-6 text-secondary fw-normal">files</span></div>
+                  <small class="text-secondary"><?php echo format_admin_bytes($tmp_chunks_bytes); ?> in .tmp_uploads</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Expired Tokens</span>
+                    <span class="text-danger"><i class="bi bi-key fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $total_orphaned_tokens; ?></div>
+                  <small class="text-secondary">Password resets &amp; song invites</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Music Index Total</span>
+                    <span class="text-success"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($total_songs); ?></div>
+                  <small class="text-secondary">Indexed tracks in music.db</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Cron Endpoint</span>
+                    <span class="text-info"><i class="bi bi-terminal fs-5"></i></span>
+                  </div>
+                  <div class="fs-5 fw-bold text-white font-monospace">Active</div>
+                  <small class="text-secondary">CLI and HTTP callable</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Crontab Command Instruction -->
+            <div class="admin-card p-4 mb-4">
+              <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-2">
+                <i class="bi bi-terminal-fill text-info"></i> Automated Server Crontab Setup
+              </h5>
+              <p class="text-secondary small mb-3">Add this command to your server crontab (<code>crontab -e</code>) to run background maintenance automatically every hour:</p>
+              <div class="p-3 bg-black rounded-3 border border-secondary border-opacity-25 font-monospace text-white small d-flex justify-content-between align-items-center">
+                <code>0 * * * * php <?php echo __FILE__; ?> --cron >/dev/null 2>&1</code>
+                <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.6rem; font-size: 0.72rem;" onclick="navigator.clipboard.writeText('0 * * * * php <?php echo addslashes(__FILE__); ?> --cron >/dev/null 2>&1'); this.innerText='Copied!';">Copy</button>
+              </div>
+            </div>
+
+            <!-- Routine Maintenance Tasks Table -->
+            <div class="admin-card p-4">
+              <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-3">
+                <i class="bi bi-gear-wide-connected text-danger"></i> Manual Task Triggers
+              </h5>
+              <div class="d-flex flex-column gap-3">
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Purge Stale Chunk Uploads</strong>
+                    <span class="text-secondary small">Deletes abandoned multi-part upload chunks older than 2 hours in <code>.tmp_uploads</code>.</span>
+                  </div>
+                  <form method="POST" action="?access=admin&page=jobs" class="m-0">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="run_backend_task" value="1">
+                    <input type="hidden" name="task_key" value="purge_temp_chunks">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary" style="height: 32px;"><i class="bi bi-play-fill"></i> Run Now</button>
+                  </form>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Purge Expired Invites &amp; Reset Tokens</strong>
+                    <span class="text-secondary small">Removes expired password tokens, collaborative song invites, and playlist invites from the database.</span>
+                  </div>
+                  <form method="POST" action="?access=admin&page=jobs" class="m-0">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="run_backend_task" value="1">
+                    <input type="hidden" name="task_key" value="purge_expired_tokens">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary" style="height: 32px;"><i class="bi bi-play-fill"></i> Run Now</button>
+                  </form>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Clean Orphaned Disk Files</strong>
+                    <span class="text-secondary small">Scans <code>uploads/</code> to detect and delete audio tracks not mapped to any database record.</span>
+                  </div>
+                  <form method="POST" action="?access=admin&page=jobs" class="m-0" onsubmit="return confirm('Scan and purge unmapped files on disk?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="run_backend_task" value="1">
+                    <input type="hidden" name="task_key" value="purge_orphan_files">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary" style="height: 32px;"><i class="bi bi-play-fill"></i> Run Now</button>
+                  </form>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Clean Stale Session Files</strong>
+                    <span class="text-secondary small">Prunes abandoned PHP session locks older than 7 days from the server session directory.</span>
+                  </div>
+                  <form method="POST" action="?access=admin&page=jobs" class="m-0">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="run_backend_task" value="1">
+                    <input type="hidden" name="task_key" value="cleanup_stale_sessions">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary" style="height: 32px;"><i class="bi bi-play-fill"></i> Run Now</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'db_backups'): ?>
+          <?php
+            $db = get_db();
+            $bk_dir = MUSIC_DIR . '/.file_version/db_backups';
+            $backups = [];
+            $total_size = 0;
+            if (is_dir($bk_dir)) {
+              foreach (scandir($bk_dir) as $f) {
+                if ($f !== '.' && $f !== '..' && preg_match('/\.(sqlite|db)$/i', $f)) {
+                  $fp = $bk_dir . '/' . $f;
+                  $sz = filesize($fp);
+                  $total_size += $sz;
+                  $backups[] = [
+                    'filename' => $f,
+                    'path' => $fp,
+                    'size' => $sz,
+                    'mtime' => filemtime($fp)
+                  ];
+                }
+              }
+              usort($backups, fn($a, $b) => $b['mtime'] - $a['mtime']);
+            }
+            $live_db_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Database Snapshot Vault</h1>
+              <div class="small text-secondary mt-1">Create isolated point-in-time SQLite database copies with rollback support</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto">
+              <button class="admin-btn-pill admin-btn-primary" data-bs-toggle="modal" data-bs-target="#createDbBackupModal">
+                <i class="bi bi-plus-circle-fill"></i> Take Database Snapshot
+              </button>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Live Database Size</span>
+                    <span class="text-danger"><i class="bi bi-database-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo format_admin_bytes($live_db_size); ?></div>
+                  <small class="text-secondary font-monospace"><?php echo basename(DB_FILE); ?></small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Stored Snapshots</span>
+                    <span class="text-success"><i class="bi bi-archive-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo count($backups); ?> <span class="fs-6 text-secondary fw-normal">copies</span></div>
+                  <small class="text-secondary">Stored in .file_version/db_backups/</small>
+                </div>
+              </div>
+              <div class="col-12 col-sm-4">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Vault Disk Usage</span>
+                    <span class="text-info"><i class="bi bi-hdd-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo format_admin_bytes($total_size); ?></div>
+                  <small class="text-secondary">Total backup storage footprint</small>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-card mb-4">
+              <div class="p-3 border-bottom border-secondary border-opacity-25">
+                <h5 class="m-0 text-white fw-bold fs-6">Available Database Snapshots</h5>
+              </div>
+              <div class="table-responsive">
+                <table class="admin-table align-middle text-nowrap">
+                  <thead>
+                    <tr>
+                      <th>Snapshot Filename</th>
+                      <th>Date Created</th>
+                      <th>File Size</th>
+                      <th class="text-end" style="width: 220px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php if (empty($backups)): ?>
+                      <tr><td colspan="4" class="text-center py-5 text-secondary">No database snapshots found in vault.</td></tr>
+                    <?php else: foreach ($backups as $b): ?>
+                      <tr>
+                        <td>
+                          <div class="d-flex align-items-center gap-2">
+                            <i class="bi bi-database-fill-check text-info fs-5"></i>
+                            <span class="font-monospace text-white fw-bold"><?php echo htmlspecialchars($b['filename']); ?></span>
+                          </div>
+                        </td>
+                        <td class="text-secondary font-monospace small"><?php echo date('Y-m-d H:i:s', $b['mtime']); ?></td>
+                        <td class="font-monospace small text-white"><?php echo format_admin_bytes($b['size']); ?></td>
+                        <td class="text-end">
+                          <div class="d-flex align-items-center justify-content-end gap-1">
+                            <a href="?access=admin&page=drive&action=download&f=<?php echo urlencode('.file_version/db_backups/' . $b['filename']); ?>" class="admin-btn-pill" style="height: 30px; padding: 0 0.65rem; font-size: 0.75rem;" title="Download Snapshot">
+                              <i class="bi bi-download"></i>
+                            </a>
+                            <form method="POST" action="?access=admin&page=db_backups" class="m-0 d-inline" onsubmit="return confirm('Restore this database snapshot? Current live database will be backed up before overwrite.');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="restore_database_backup" value="1">
+                              <input type="hidden" name="backup_file" value="<?php echo htmlspecialchars($b['filename']); ?>">
+                              <button type="submit" class="admin-btn-pill" style="height: 30px; padding: 0 0.75rem; font-size: 0.75rem; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);">
+                                <i class="bi bi-arrow-counterclockwise"></i> Restore
+                              </button>
+                            </form>
+                            <form method="POST" action="?access=admin&page=db_backups" class="m-0 d-inline" onsubmit="return confirm('Permanently delete this database backup?');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="delete_database_backup" value="1">
+                              <input type="hidden" name="backup_file" value="<?php echo htmlspecialchars($b['filename']); ?>">
+                              <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 30px; width: 30px;"><i class="bi bi-trash"></i></button>
+                            </form>
+                          </div>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Create Snapshot Modal -->
+          <div class="modal fade" id="createDbBackupModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-database-fill-up text-danger me-2"></i> New DB Backup</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=db_backups">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="create_database_backup" value="1">
+                  <div class="modal-body p-3">
+                    <label class="form-label text-secondary small fw-bold mb-1">SNAPSHOT LABEL (OPTIONAL)</label>
+                    <input type="text" name="backup_note" class="admin-pill-input w-100 mb-3" placeholder="e.g. pre_migration">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
+                      Create Database Backup
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'error_logs'): ?>
+          <?php
+            $log_path = ini_get('error_log') ?: (__DIR__ . '/php_error.log');
+            $search_log = trim($_GET['search'] ?? '');
+            $severity_filter = $_GET['severity'] ?? '';
+
+            $lines = [];
+            $total_bytes = 0;
+            if (file_exists($log_path) && is_readable($log_path)) {
+              $total_bytes = filesize($log_path);
+              $raw_lines = @file($log_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+              $raw_lines = array_reverse(array_slice($raw_lines, -250)); // Last 250 entries in reverse
+
+              foreach ($raw_lines as $l) {
+                if ($search_log !== '' && stripos($l, $search_log) === false) continue;
+                if ($severity_filter !== '') {
+                  if (stripos($l, $severity_filter) === false) continue;
+                }
+                $lines[] = $l;
+              }
+            }
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">PHP Error Logs &amp; Crash Monitor</h1>
+              <div class="small text-secondary mt-1">Real-time inspection of runtime exceptions, database lock warnings, and server errors</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="error_logs">
+                <select name="severity" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="" <?php echo $severity_filter === '' ? 'selected' : ''; ?>>All Severities</option>
+                  <option value="Fatal error" <?php echo $severity_filter === 'Fatal error' ? 'selected' : ''; ?>>Fatal Errors</option>
+                  <option value="Warning" <?php echo $severity_filter === 'Warning' ? 'selected' : ''; ?>>Warnings</option>
+                  <option value="Notice" <?php echo $severity_filter === 'Notice' ? 'selected' : ''; ?>>Notices</option>
+                  <option value="Deprecated" <?php echo $severity_filter === 'Deprecated' ? 'selected' : ''; ?>>Deprecated</option>
+                </select>
+                <div class="position-relative">
+                  <input type="text" name="search" class="admin-pill-input ps-3 pe-4" placeholder="Filter errors..." value="<?php echo htmlspecialchars($search_log); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+              <form method="POST" action="?access=admin&page=error_logs" class="m-0" onsubmit="return confirm('Clear the entire error log file?');">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="clear_php_error_log" class="admin-btn-pill text-danger" style="border-color: color-mix(in srgb, #ef4444 30%, transparent);">
+                  <i class="bi bi-trash3"></i> Clear Log
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <div class="p-3 mb-4 rounded-4 bg-dark bg-opacity-50 border border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-file-earmark-text text-danger fs-5"></i>
+                <span class="text-white small fw-bold">Active Log File:</span>
+                <code class="text-info font-monospace small"><?php echo htmlspecialchars($log_path); ?></code>
+              </div>
+              <span class="admin-badge admin-badge-info"><?php echo format_admin_bytes($total_bytes); ?></span>
+            </div>
+
+            <div class="admin-card p-3 font-monospace small" style="background: #050508; max-height: 70vh; overflow-y: auto; line-height: 1.6;">
+              <?php if (empty($lines)): ?>
+                <div class="text-center py-5 text-secondary"><i class="bi bi-check-circle fs-3 text-success d-block mb-2 opacity-50"></i>No PHP errors or exceptions logged. System operating smoothly!</div>
+              <?php else: foreach ($lines as $line):
+                $is_fatal = stripos($line, 'fatal') !== false || stripos($line, 'error') !== false;
+                $is_warn = stripos($line, 'warning') !== false;
+                $color = $is_fatal ? '#f87171' : ($is_warn ? '#fbbf24' : '#94a3b8');
+              ?>
+                <div class="p-2 border-bottom border-secondary border-opacity-10 text-break" style="color: <?php echo $color; ?>;">
+                  <?php echo htmlspecialchars($line); ?>
+                </div>
+              <?php endforeach; endif; ?>
+            </div>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'phpinfo'): ?>
+          <?php
+            $db = get_db();
+            $opcache_status = function_exists('opcache_get_status') ? @opcache_get_status(false) : false;
+            $opcache_mem = $opcache_status['memory_usage'] ?? null;
+            $opcache_stats = $opcache_status['opcache_statistics'] ?? null;
+            $hit_rate = $opcache_stats ? round($opcache_stats['opcache_hit_rate'], 1) : 0;
+            $db_ver = $db->query("SELECT sqlite_version()")->fetchColumn() ?: 'Unknown';
+            
+            $essential_exts = ['pdo_sqlite', 'gd', 'curl', 'openssl', 'zip', 'mbstring', 'intl', 'zlib', 'fileinfo', 'exif'];
+            $loaded_exts = get_loaded_extensions();
+            natcasesort($loaded_exts);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">PHP Runtime &amp; Server Diagnostics</h1>
+              <div class="small text-secondary mt-1">Deep inspection of PHP limits, memory allocations, OPcache, and extensions</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto">
+              <?php if ($opcache_status): ?>
+                <form method="POST" action="?access=admin&page=phpinfo" class="m-0" onsubmit="return confirm('Flush OPcache memory? This may cause a temporary CPU spike as scripts recompile.');">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <button type="submit" name="flush_server_opcache" class="admin-btn-pill" style="height: 38px; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);" title="Reset OPcache memory">
+                    <i class="bi bi-lightning-charge-fill me-1"></i> Flush OPcache
+                  </button>
+                </form>
+              <?php endif; ?>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Key Runtime Settings -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden border-0" style="background: linear-gradient(145deg, #1a1a24, #12121a); box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing:0.5px;">PHP Version</span>
+                    <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(56, 189, 248, 0.15); display: flex; align-items: center; justify-content: center; color: #38bdf8;">
+                      <i class="bi bi-filetype-php fs-5"></i>
+                    </div>
+                  </div>
+                  <div class="fs-2 fw-bold text-white mb-1 lh-1"><?php echo PHP_VERSION; ?></div>
+                  <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="admin-badge admin-badge-info"><?php echo PHP_SAPI; ?></span>
+                    <span class="text-secondary" style="font-size: 0.72rem;">Zend v<?php echo zend_version(); ?></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden border-0" style="background: linear-gradient(145deg, #1a1a24, #12121a); box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing:0.5px;">Memory Limit</span>
+                    <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(251, 191, 36, 0.15); display: flex; align-items: center; justify-content: center; color: #fbbf24;">
+                      <i class="bi bi-memory fs-5"></i>
+                    </div>
+                  </div>
+                  <div class="fs-2 fw-bold text-white mb-1 lh-1"><?php echo ini_get('memory_limit'); ?></div>
+                  <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="admin-badge admin-badge-warning">Per Request</span>
+                    <span class="text-secondary" style="font-size: 0.72rem;">Max RAM allocated</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden border-0" style="background: linear-gradient(145deg, #1a1a24, #12121a); box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing:0.5px;">Upload Limit</span>
+                    <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(248, 113, 113, 0.15); display: flex; align-items: center; justify-content: center; color: #f87171;">
+                      <i class="bi bi-cloud-arrow-up fs-5"></i>
+                    </div>
+                  </div>
+                  <div class="d-flex align-items-baseline gap-1 mb-1 lh-1">
+                    <span class="fs-2 fw-bold text-white"><?php echo ini_get('upload_max_filesize'); ?></span>
+                    <span class="text-secondary font-monospace" style="font-size: 0.85rem;">/ <?php echo ini_get('post_max_size'); ?> POST</span>
+                  </div>
+                  <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="admin-badge admin-badge-danger">Max <?php echo ini_get('max_execution_time'); ?>s</span>
+                    <span class="text-secondary" style="font-size: 0.72rem;">Execution time</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100 position-relative overflow-hidden border-0" style="background: linear-gradient(145deg, #1a1a24, #12121a); box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="text-secondary small fw-bold text-uppercase" style="letter-spacing:0.5px;">SQLite Engine</span>
+                    <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(74, 222, 128, 0.15); display: flex; align-items: center; justify-content: center; color: #4ade80;">
+                      <i class="bi bi-database fs-5"></i>
+                    </div>
+                  </div>
+                  <div class="fs-2 fw-bold text-white mb-1 lh-1"><?php echo $db_ver; ?></div>
+                  <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="admin-badge admin-badge-success">pdo_sqlite</span>
+                    <span class="text-secondary" style="font-size: 0.72rem;">Database driver</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="row g-4 mb-4">
+              <!-- Core Runtime Configuration -->
+              <div class="col-12 col-xl-6">
+                <div class="admin-card p-4 h-100 d-flex flex-column">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-gear-wide-connected text-info"></i> Core Runtime Variables
+                    </h5>
+                    <span class="admin-badge admin-badge-secondary">php.ini</span>
+                  </div>
+                  
+                  <div class="d-flex flex-column gap-1">
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">max_input_vars</span>
+                      <span class="text-white fw-bold font-monospace"><?php echo ini_get('max_input_vars'); ?></span>
+                    </div>
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">post_max_size</span>
+                      <span class="text-white fw-bold font-monospace"><?php echo ini_get('post_max_size'); ?></span>
+                    </div>
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">upload_max_filesize</span>
+                      <span class="text-white fw-bold font-monospace"><?php echo ini_get('upload_max_filesize'); ?></span>
+                    </div>
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">max_execution_time</span>
+                      <span class="text-white fw-bold font-monospace"><?php echo ini_get('max_execution_time'); ?>s</span>
+                    </div>
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">default_charset</span>
+                      <span class="text-white fw-bold font-monospace"><?php echo ini_get('default_charset') ?: 'UTF-8'; ?></span>
+                    </div>
+                    <div class="p-2 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">zlib.output_compression</span>
+                      <span class="<?php echo ini_get('zlib.output_compression') ? 'text-success' : 'text-danger'; ?> fw-bold font-monospace"><?php echo ini_get('zlib.output_compression') ? 'On' : 'Off'; ?></span>
+                    </div>
+                    <div class="p-2 d-flex justify-content-between align-items-center">
+                      <span class="text-secondary font-monospace small">sys_get_temp_dir()</span>
+                      <span class="text-white fw-bold font-monospace small text-truncate" style="max-width:200px;" title="<?php echo sys_get_temp_dir(); ?>"><?php echo sys_get_temp_dir(); ?></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- OPcache Performance Overview -->
+              <div class="col-12 col-xl-6">
+                <?php if ($opcache_status && $opcache_mem): 
+                  $op_used = $opcache_mem['used_memory'];
+                  $op_free = $opcache_mem['free_memory'];
+                  $op_wasted = $opcache_mem['wasted_memory'];
+                  $op_total = $op_used + $op_free + $op_wasted;
+                  $op_pct = $op_total > 0 ? ($op_used / $op_total) * 100 : 0;
+                ?>
+                  <div class="admin-card p-4 h-100 d-flex flex-column" style="border-color: rgba(251, 191, 36, 0.3);">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                      <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                        <i class="bi bi-lightning-charge-fill text-warning"></i> Zend OPcache Acceleration
+                      </h5>
+                      <span class="admin-badge admin-badge-success">Active</span>
+                    </div>
+                    
+                    <div class="mb-4">
+                      <div class="d-flex justify-content-between align-items-end mb-2">
+                        <span class="text-secondary small fw-bold text-uppercase">Memory Usage</span>
+                        <span class="text-white fw-bold font-monospace"><?php echo format_admin_bytes($op_used); ?> <span class="text-secondary fw-normal">/ <?php echo format_admin_bytes($op_total); ?></span></span>
+                      </div>
+                      <div class="progress" style="height: 10px; background: #050505; border: 1px solid #333; border-radius: 6px;">
+                        <div class="progress-bar bg-warning progress-bar-striped progress-bar-animated" style="width: <?php echo $op_pct; ?>%;"></div>
+                      </div>
+                    </div>
+
+                    <div class="row g-3 mt-auto">
+                      <div class="col-6">
+                        <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex flex-column gap-1">
+                          <span class="text-secondary small text-uppercase fw-bold" style="font-size: 0.65rem;">Hit Rate</span>
+                          <span class="text-success fw-bold fs-4 lh-1"><?php echo $hit_rate; ?>%</span>
+                          <span class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo number_format($opcache_stats['hits'] ?? 0); ?> hits</span>
+                        </div>
+                      </div>
+                      <div class="col-6">
+                        <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex flex-column gap-1">
+                          <span class="text-secondary small text-uppercase fw-bold" style="font-size: 0.65rem;">Cached Scripts</span>
+                          <span class="text-white fw-bold fs-4 lh-1"><?php echo number_format($opcache_stats['num_cached_scripts'] ?? 0); ?></span>
+                          <span class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo number_format($opcache_stats['num_cached_keys'] ?? 0); ?> keys</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                <?php else: ?>
+                  <div class="admin-card p-4 h-100 d-flex flex-column align-items-center justify-content-center text-center">
+                    <i class="bi bi-lightning-charge fs-1 text-secondary opacity-50 mb-3"></i>
+                    <h6 class="fw-bold text-white mb-2">OPcache is Disabled</h6>
+                    <p class="text-secondary small mb-0" style="max-width: 300px;">Zend OPcache is currently disabled or unavailable on this server. Enabling it via <code class="text-info">php.ini</code> dramatically improves script execution speed.</p>
+                  </div>
+                <?php endif; ?>
+              </div>
+            </div>
+
+            <!-- Loaded Extensions Matrix -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                  <i class="bi bi-boxes text-danger"></i> Loaded PHP Modules
+                </h5>
+                <span class="admin-badge admin-badge-primary font-monospace"><?php echo count($loaded_exts); ?> Modules</span>
+              </div>
+              
+              <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 mb-4">
+                <h6 class="text-white fw-bold fs-6 mb-3 d-flex align-items-center gap-2"><i class="bi bi-shield-check text-success"></i> Essential Core Extensions</h6>
+                <div class="d-flex flex-wrap gap-2">
+                  <?php foreach ($essential_exts as $e_ext): 
+                    $is_loaded = in_array(strtolower($e_ext), array_map('strtolower', $loaded_exts));
+                  ?>
+                    <span class="admin-badge <?php echo $is_loaded ? 'admin-badge-success' : 'admin-badge-danger'; ?> font-monospace px-3 py-2" style="font-size: 0.8rem;">
+                      <i class="bi <?php echo $is_loaded ? 'bi-check-circle-fill' : 'bi-x-circle-fill'; ?> me-2"></i><?php echo htmlspecialchars($e_ext); ?>
+                    </span>
+                  <?php endforeach; ?>
+                </div>
+              </div>
+
+              <h6 class="text-secondary fw-bold fs-6 mb-3 ms-1 text-uppercase" style="letter-spacing: 0.5px; font-size: 0.75rem !important;">All Active Extensions</h6>
+              <div class="d-flex flex-wrap gap-2">
+                <?php
+                  foreach ($loaded_exts as $ext):
+                    $is_essential = in_array(strtolower($ext), $essential_exts);
+                ?>
+                  <span class="admin-badge <?php echo $is_essential ? 'admin-badge-success' : 'admin-badge-secondary'; ?> font-monospace">
+                    <?php echo htmlspecialchars($ext); ?>
+                  </span>
+                <?php endforeach; ?>
+              </div>
+            </div>
+          </div>
+
+        <?php elseif (($_GET['page'] ?? '') === 'settings'): ?>
           <?php
             $db = get_db();
             $s_name = $db->query("SELECT value FROM site_settings WHERE key = 'site_name'")->fetchColumn() ?: 'PHP Music';
@@ -34905,7 +35701,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.0'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.1'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -40915,7 +41711,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.0';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.1';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -75315,47 +76111,73 @@ function perform_cover_scan($db) {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title><?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio</title>
 
     <?php
-      $og_image_url = !empty($og_image) ? $og_image : ($current_url . '?action=og_image');
+      // 1. Fetch site identity settings from database with safe defaults
+      $site_name = 'PHP Music';
+      $site_tagline = 'Self-Hosted Web Audio & Studio';
+
+      try {
+        $db_settings = get_db();
+        $db_name_val = $db_settings->query("SELECT value FROM site_settings WHERE key = 'site_name' LIMIT 1")->fetchColumn();
+        if ($db_name_val !== false && trim((string)$db_name_val) !== '') {
+          $site_name = trim((string)$db_name_val);
+        }
+        $db_tagline_val = $db_settings->query("SELECT value FROM site_settings WHERE key = 'site_tagline' LIMIT 1")->fetchColumn();
+        if ($db_tagline_val !== false && trim((string)$db_tagline_val) !== '') {
+          $site_tagline = trim((string)$db_tagline_val);
+        }
+      } catch (\Throwable $e) {}
+
+      // 2. Format title: uses "$site_name – $site_tagline" on default pages, or "$og_title – $site_name" on shared tracks/albums
+      if (empty($og_title) || $og_title === 'PHP Music' || $og_title === $site_name) {
+        $meta_page_title = $site_name . (!empty($site_tagline) ? ' – ' . $site_tagline : '');
+      } elseif (stripos($og_title, $site_name) !== false) {
+        $meta_page_title = $og_title;
+      } else {
+        $meta_page_title = $og_title . ' – ' . $site_name;
+      }
+
+      $og_image_url = !empty($og_image) ? $og_image : ($current_url . '?action=og_image&title=' . urlencode($site_name) . '&sub=' . urlencode($site_tagline));
       $og_image_type = (strpos($og_image_url, 'action=og_image') !== false) ? 'image/svg+xml' : 'image/jpeg';
     ?>
 
+    <title><?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?></title>
+
     <!-- Primary Meta & Search Engine Optimization (50-60 char title & 120-160 char description) -->
-    <meta name="title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
-    <meta name="description" content="<?php echo $og_desc; ?>">
-    <link rel="canonical" href="<?php echo $current_url; ?>">
+    <meta name="title" content="<?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta name="description" content="<?php echo htmlspecialchars($og_desc, ENT_QUOTES, 'UTF-8'); ?>">
+    <link rel="canonical" href="<?php echo htmlspecialchars($current_url, ENT_QUOTES, 'UTF-8'); ?>">
     <meta name="theme-color" content="#030303">
-    <meta name="application-name" content="PHP Music">
+    <meta name="application-name" content="<?php echo htmlspecialchars($site_name, ENT_QUOTES, 'UTF-8'); ?>">
 
     <!-- Open Graph Social Media Protocol (Standard 1200x630 Aspect Ratio) -->
-    <meta property="og:site_name" content="PHP Music">
+    <meta property="og:site_name" content="<?php echo htmlspecialchars($site_name, ENT_QUOTES, 'UTF-8'); ?>">
     <meta property="og:locale" content="en_US">
     <meta property="og:type" content="website">
-    <meta property="og:url" content="<?php echo $current_url; ?>">
-    <meta property="og:title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
-    <meta property="og:description" content="<?php echo $og_desc; ?>">
-    <meta property="og:image" content="<?php echo $og_image_url; ?>">
-    <meta property="og:image:secure_url" content="<?php echo $og_image_url; ?>">
+    <meta property="og:url" content="<?php echo htmlspecialchars($current_url, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta property="og:title" content="<?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta property="og:description" content="<?php echo htmlspecialchars($og_desc, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta property="og:image" content="<?php echo htmlspecialchars($og_image_url, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta property="og:image:secure_url" content="<?php echo htmlspecialchars($og_image_url, ENT_QUOTES, 'UTF-8'); ?>">
     <meta property="og:image:type" content="<?php echo $og_image_type; ?>">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="<?php echo $og_title; ?> Preview">
+    <meta property="og:image:alt" content="<?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?> Preview">
 
     <!-- X (Twitter) Large Image Summary Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:url" content="<?php echo $current_url; ?>">
-    <meta name="twitter:title" content="<?php echo $og_title; ?> – Self-Hosted Web Audio &amp; Studio">
-    <meta name="twitter:description" content="<?php echo $og_desc; ?>">
-    <meta name="twitter:image" content="<?php echo $og_image_url; ?>">
-    <meta name="twitter:image:alt" content="<?php echo $og_title; ?> Preview">
+    <meta name="twitter:url" content="<?php echo htmlspecialchars($current_url, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta name="twitter:title" content="<?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta name="twitter:description" content="<?php echo htmlspecialchars($og_desc, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta name="twitter:image" content="<?php echo htmlspecialchars($og_image_url, ENT_QUOTES, 'UTF-8'); ?>">
+    <meta name="twitter:image:alt" content="<?php echo htmlspecialchars($meta_page_title, ENT_QUOTES, 'UTF-8'); ?> Preview">
 
     <!-- PWA Capabilities & Icons -->
     <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
     <link rel="apple-touch-icon" href="?action=get_app_icon&amp;size=192">
     <link rel="manifest" href="?pwa=manifest" crossorigin="use-credentials">
-    <link rel="alternate" type="application/rss+xml" title="PHP Music RSS Feed" href="?action=rss">
+    <link rel="alternate" type="application/rss+xml" title="<?php echo htmlspecialchars($site_name, ENT_QUOTES, 'UTF-8'); ?> RSS Feed" href="?action=rss">
     <script>
       window.adminAutoToken = '<?php echo ($is_super_admin || $is_admin) ? "super_admin_bypass" : ""; ?>';
       window.autoScanEnabled = <?php echo isset($auto_scan) && $auto_scan ? 'true' : 'false'; ?>;
