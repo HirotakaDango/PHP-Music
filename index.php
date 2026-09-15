@@ -307,7 +307,7 @@ if (empty($temp_action) && preg_match('/action=([a-zA-Z0-9_]+)/', $raw_uri, $act
   $temp_action = $act_match[1];
 }
 
-$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon', 'rss']);
+$is_media_request = in_array($temp_action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'download_song', 'download_cover', 'icon', 'app_icon', 'get_app_icon', 'get_pwa_screenshot', 'rss']);
 $is_explicit_api = strpos($raw_uri, 'access=api') !== false || (isset($_GET['access']) && $_GET['access'] === 'api');
 
 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
@@ -326,7 +326,37 @@ if (function_exists('opcache_is_script_cached') && function_exists('opcache_comp
   }
 }
 
+if (isset($_GET['action']) && $_GET['action'] === 'get_pwa_screenshot') {
+  $fn = basename($_GET['file'] ?? '');
+  $target_file = __DIR__ . '/screenshots/' . $fn;
+  if ($fn && file_exists($target_file)) {
+    $mime = function_exists('mime_content_type') ? mime_content_type($target_file) : 'image/webp';
+    header('Content-Type: ' . ($mime ?: 'image/webp'));
+    header('Cache-Control: public, max-age=86400');
+    header('Content-Length: ' . filesize($target_file));
+    readfile($target_file);
+    exit;
+  }
+  http_response_code(404);
+  exit;
+}
+
 if (isset($_GET['action']) && $_GET['action'] === 'og_image') {
+  // Serve custom Open Graph image from icons/ folder if uploaded
+  $custom_og_jpg = __DIR__ . '/icons/og-image.jpg';
+  $custom_og_png = __DIR__ . '/icons/og-image.png';
+  if (file_exists($custom_og_jpg)) {
+    header('Content-Type: image/jpeg');
+    header('Cache-Control: public, max-age=86400');
+    readfile($custom_og_jpg);
+    exit;
+  } elseif (file_exists($custom_og_png)) {
+    header('Content-Type: image/png');
+    header('Cache-Control: public, max-age=86400');
+    readfile($custom_og_png);
+    exit;
+  }
+
   header('Content-Type: image/svg+xml; charset=utf-8');
   header('Cache-Control: public, max-age=604800, immutable');
   $title = htmlspecialchars(!empty($_GET['title']) ? $_GET['title'] : 'PHP Music');
@@ -358,8 +388,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'og_image') {
     <circle cx="0" cy="0" r="60" fill="none" stroke="#202020" stroke-width="1.5"/>
     <circle cx="0" cy="0" r="48" fill="none" stroke="#1c1c1c" stroke-width="1.5"/>
     <circle cx="0" cy="0" r="34" fill="url(#discGrad)"/>
-    <circle cx="0" cy="0" r="10" fill="#0a0a0a" stroke="#ffffff" stroke-width="2"/>
-    <path d="M-6 4 V-14 C-6 -17 -2 -19 4 -19 V-14 C0 -14 -2 -13 -2 -11 V4 C-4 2 -8 2 -10 4 C-12 6 -12 9 -9 10 C-6 11 -4 9 -4 6 V-8 H2 V4 C0 2 -4 2 -6 4 Z" fill="#ffffff"/>
+    <!-- Clean Modern Audio Waveform Icon -->
+    <path d="M-14 -4 V 4 M-7 -11 V 11 M0 -18 V 18 M7 -11 V 11 M14 -4 V 4" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
   </g>
 
   <!-- Typography -->
@@ -372,38 +402,90 @@ SVG;
 }
 
 if (isset($_GET['pwa'])) {
+  // Read configured PWA settings dynamically from database if available
+  $pwa_cfg = [
+    'name' => 'PHP Music',
+    'short_name' => 'Music',
+    'description' => 'A simple, fast music player with user accounts and uploads.',
+    'theme_color' => '#0a0a0a',
+    'background_color' => '#0a0a0a',
+    'display' => 'standalone',
+    'orientation' => 'any',
+    'sw_version' => 'v31'
+  ];
+  $db_path = __DIR__ . '/music.db';
+  if (file_exists($db_path)) {
+    try {
+      $pdb = new PDO('sqlite:' . $db_path);
+      $stmt = $pdb->query("SELECT key, value FROM site_settings WHERE key LIKE 'pwa_%'");
+      if ($stmt) {
+        $rows = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        foreach ($rows as $k => $v) {
+          $sub = substr($k, 4);
+          if ($v !== null && $v !== '') $pwa_cfg[$sub] = $v;
+        }
+      }
+    } catch (\Throwable $e) {}
+  }
+
   if ($_GET['pwa'] == 'manifest') {
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo json_encode([
-      "name" => "PHP Music",
-      "short_name" => "Music",
+      "name" => $pwa_cfg['name'],
+      "short_name" => $pwa_cfg['short_name'],
       "start_url" => "./",
       "scope" => "./",
-      "display" => "standalone",
-      "background_color" => "#0a0a0a",
-      "theme_color" => "#0a0a0a",
-      "description" => "A simple, fast music player with user accounts and uploads.",
+      "display" => $pwa_cfg['display'],
+      "orientation" => $pwa_cfg['orientation'],
+      "background_color" => $pwa_cfg['background_color'],
+      "theme_color" => $pwa_cfg['theme_color'],
+      "description" => $pwa_cfg['description'],
       "icons" => [[
           "src" => "?action=get_app_icon&size=192",
           "sizes" => "192x192",
-          "type" => "image/svg+xml",
+          "type" => file_exists(__DIR__ . '/icons/icon-192.png') ? "image/png" : "image/svg+xml",
           "purpose" => "any maskable"
         ],[
           "src" => "?action=get_app_icon&size=512",
           "sizes" => "512x512",
-          "type" => "image/svg+xml",
+          "type" => file_exists(__DIR__ . '/icons/icon-512.png') ? "image/png" : "image/svg+xml",
           "purpose" => "any maskable"
         ]
-      ]
-    ]);
+      ],
+      "screenshots" => (function() {
+        $shots = [];
+        $dir = __DIR__ . '/screenshots';
+        if (is_dir($dir)) {
+          $files = array_diff(scandir($dir), ['.', '..']);
+          natcasesort($files);
+          foreach ($files as $f) {
+            $path = $dir . '/' . $f;
+            if (is_file($path) && preg_match('/\.(webp|png|jpg|jpeg)$/i', $f)) {
+              $dim = @getimagesize($path);
+              $w = $dim[0] ?? 1280;
+              $h = $dim[1] ?? 720;
+              $shots[] = [
+                "src" => "?action=get_pwa_screenshot&file=" . rawurlencode($f),
+                "sizes" => "{$w}x{$h}",
+                "type" => ($dim['mime'] ?? 'image/webp'),
+                "form_factor" => ($w >= $h ? "wide" : "narrow"),
+                "label" => pathinfo($f, PATHINFO_FILENAME)
+              ];
+            }
+          }
+        }
+        return $shots;
+      })()
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
   }
   if ($_GET['pwa'] == 'sw') {
     header('Content-Type: application/javascript; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    $sw_cache_id = 'php-music-cache-' . preg_replace('/[^a-zA-Z0-9_-]/', '', $pwa_cfg['sw_version']);
     echo <<<SW
-const CACHE_NAME = 'php-music-cache-v31';
+const CACHE_NAME = '{$sw_cache_id}';
 const STATIC_ASSETS =[
   './',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
@@ -606,7 +688,17 @@ if (isset($_GET['page']) && $_GET['page'] === 'forbidden') {
 
 // Define essential constants early so early-access pages (?access=requirements) have database & directory paths
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
-if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
+if (!defined('DB_FILE')) {
+  $custom_db_cfg = file_exists(__DIR__ . '/.db_config.ini') ? trim((string)@file_get_contents(__DIR__ . '/.db_config.ini')) : '';
+  $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
+  define('DB_FILE', __DIR__ . '/' . $active_db_name);
+}
+if (!is_dir(__DIR__ . '/icons')) {
+  @mkdir(__DIR__ . '/icons', 0755, true);
+}
+if (!is_dir(__DIR__ . '/screenshots')) {
+  @mkdir(__DIR__ . '/screenshots', 0755, true);
+}
 
 // FFMPEG DETECTION & PORTABLE RUNTIME ENGINE (Zero Composer Dependency)
 function is_cli_exec_available() {
@@ -1601,8 +1693,12 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 }
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
-if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '12.2');
+if (!defined('DB_FILE')) {
+  $custom_db_cfg = file_exists(__DIR__ . '/.db_config.ini') ? trim((string)@file_get_contents(__DIR__ . '/.db_config.ini')) : '';
+  $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
+  define('DB_FILE', __DIR__ . '/' . $active_db_name);
+}
+define('APP_VERSION', '12.3');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -28944,7 +29040,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     
           async logout() {
             await this.api('auth_logout', {}, 'POST');
-            location.reload();
+            this.user = null;
+            this.renderUserSlot();
+            this.toast('Logged out successfully');
+            this.nav('#/');
           }
     
           async initArtistCarousel(artistUserId, currentArtId) {
@@ -32217,6 +32316,233 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   }
 
   if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
+    // SAVE PWA WEB APP SETTINGS
+    if (isset($_POST['save_pwa_settings'])) {
+      $db = get_db();
+      $pwa_name = trim(htmlspecialchars($_POST['pwa_name'] ?? 'PHP Music', ENT_QUOTES, 'UTF-8'));
+      $pwa_short = trim(htmlspecialchars($_POST['pwa_short_name'] ?? 'Music', ENT_QUOTES, 'UTF-8'));
+      $pwa_desc = trim(htmlspecialchars($_POST['pwa_description'] ?? 'A simple, fast music player with user accounts and uploads.', ENT_QUOTES, 'UTF-8'));
+      $pwa_theme = trim($_POST['pwa_theme_color'] ?? '#0a0a0a');
+      $pwa_bg = trim($_POST['pwa_background_color'] ?? '#0a0a0a');
+      $pwa_disp = in_array($_POST['pwa_display'] ?? '', ['standalone', 'fullscreen', 'minimal-ui', 'browser']) ? $_POST['pwa_display'] : 'standalone';
+      $pwa_orient = in_array($_POST['pwa_orientation'] ?? '', ['any', 'natural', 'portrait', 'landscape']) ? $_POST['pwa_orientation'] : 'any';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['pwa_name', $pwa_name]);
+      $stmt->execute(['pwa_short_name', $pwa_short]);
+      $stmt->execute(['pwa_description', $pwa_desc]);
+      $stmt->execute(['pwa_theme_color', $pwa_theme]);
+      $stmt->execute(['pwa_background_color', $pwa_bg]);
+      $stmt->execute(['pwa_display', $pwa_disp]);
+      $stmt->execute(['pwa_orientation', $pwa_orient]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved PWA App Configuration & Manifest', 0);
+      $_SESSION['admin_flash_msg'] = "PWA Manifest configuration saved successfully.";
+      header('Location: ?access=admin&page=pwa');
+      exit;
+    }
+
+    // UPLOAD CUSTOM PWA APP ICON (Generates 512x512 and 192x192 PNGs)
+    if (isset($_POST['upload_pwa_icon']) && !empty($_FILES['pwa_icon']['tmp_name'])) {
+      $file = $_FILES['pwa_icon'];
+      if ($file['error'] === UPLOAD_ERR_OK) {
+        $icons_dir = __DIR__ . '/icons';
+        if (!is_dir($icons_dir)) @mkdir($icons_dir, 0755, true);
+
+        $img_data = @file_get_contents($file['tmp_name']);
+        if ($img_data && function_exists('imagecreatefromstring')) {
+          $src = @imagecreatefromstring($img_data);
+          if ($src) {
+            $src_w = imagesx($src);
+            $src_h = imagesy($src);
+
+            // Custom Crop vs. Automatic Center Crop
+            $has_custom_crop = isset($_POST['crop_w'], $_POST['crop_h']) && (int)$_POST['crop_w'] > 0 && (int)$_POST['crop_h'] > 0;
+
+            if ($has_custom_crop) {
+              $req_x = max(0, min($src_w - 1, (int)($_POST['crop_x'] ?? 0)));
+              $req_y = max(0, min($src_h - 1, (int)($_POST['crop_y'] ?? 0)));
+              $req_w = max(10, min($src_w - $req_x, (int)$_POST['crop_w']));
+              $req_h = max(10, min($src_h - $req_y, (int)$_POST['crop_h']));
+              $crop_size = min($req_w, $req_h);
+              $crop_x = $req_x;
+              $crop_y = $req_y;
+            } else {
+              // Without custom crop: automatically crop into the center
+              $crop_size = min($src_w, $src_h);
+              $crop_x = (int)(($src_w - $crop_size) / 2);
+              $crop_y = (int)(($src_h - $crop_size) / 2);
+            }
+
+            foreach ([512, 192] as $dim) {
+              $dst = imagecreatetruecolor($dim, $dim);
+              imagealphablending($dst, false);
+              imagesavealpha($dst, true);
+              $trans = imagecolorallocatealpha($dst, 0, 0, 0, 127);
+              imagefilledrectangle($dst, 0, 0, $dim, $dim, $trans);
+              imagecopyresampled($dst, $src, 0, 0, $crop_x, $crop_y, $dim, $dim, $crop_size, $crop_size);
+              imagepng($dst, $icons_dir . '/icon-' . $dim . '.png', 8);
+              imagedestroy($dst);
+            }
+            imagedestroy($src);
+
+            log_admin_activity(get_db(), $_SESSION['admin_email'], 'Uploaded Custom PWA App Icons (512x512 & 192x192)', 0);
+            $_SESSION['admin_flash_msg'] = "Custom App Icons generated and saved to ./icons/ successfully!";
+          } else {
+            $_SESSION['admin_flash_msg'] = "Uploaded image format could not be decoded by GD library.";
+          }
+        }
+      }
+      header('Location: ?access=admin&page=pwa&tab=icons');
+      exit;
+    }
+
+    // UPLOAD OPEN GRAPH SOCIAL PREVIEW IMAGE (1200x630 JPEG)
+    if (isset($_POST['upload_pwa_og_image']) && !empty($_FILES['og_image_file']['tmp_name'])) {
+      $file = $_FILES['og_image_file'];
+      if ($file['error'] === UPLOAD_ERR_OK) {
+        $icons_dir = __DIR__ . '/icons';
+        if (!is_dir($icons_dir)) @mkdir($icons_dir, 0755, true);
+
+        $img_data = @file_get_contents($file['tmp_name']);
+        if ($img_data && function_exists('imagecreatefromstring')) {
+          $src = @imagecreatefromstring($img_data);
+          if ($src) {
+            $src_w = imagesx($src);
+            $src_h = imagesy($src);
+            $dst_w = 1200;
+            $dst_h = 630;
+
+            $dst = imagecreatetruecolor($dst_w, $dst_h);
+            imagecopyresampled($dst, $src, 0, 0, 0, 0, $dst_w, $dst_h, $src_w, $src_h);
+            imagejpeg($dst, $icons_dir . '/og-image.jpg', 85);
+            imagedestroy($src);
+            imagedestroy($dst);
+
+            log_admin_activity(get_db(), $_SESSION['admin_email'], 'Uploaded Open Graph Share Image (1200x630)', 0);
+            $_SESSION['admin_flash_msg'] = "Open Graph social share image saved to ./icons/og-image.jpg!";
+          }
+        }
+      }
+      header('Location: ?access=admin&page=pwa&tab=icons');
+      exit;
+    }
+
+    // RESET APP ICON & OG IMAGE TO DEFAULT VECTORS
+    if (isset($_POST['reset_pwa_icons'])) {
+      @unlink(__DIR__ . '/icons/icon-512.png');
+      @unlink(__DIR__ . '/icons/icon-192.png');
+      log_admin_activity(get_db(), $_SESSION['admin_email'], 'Reset PWA App Icon to default vector SVG', 0);
+      $_SESSION['admin_flash_msg'] = "App icons reset to default vector SVG.";
+      header('Location: ?access=admin&page=pwa&tab=icons');
+      exit;
+    }
+
+    // UPLOAD / REPLACE PWA SCREENSHOT (Auto-Resized strictly below 1MB)
+    if (isset($_POST['upload_pwa_screenshot']) && !empty($_FILES['screenshot_file']['tmp_name'])) {
+      $file = $_FILES['screenshot_file'];
+      if ($file['error'] === UPLOAD_ERR_OK) {
+        $shots_dir = __DIR__ . '/screenshots';
+        if (!is_dir($shots_dir)) @mkdir($shots_dir, 0755, true);
+
+        $img_data = @file_get_contents($file['tmp_name']);
+        if ($img_data && function_exists('imagecreatefromstring')) {
+          $src = @imagecreatefromstring($img_data);
+          if ($src) {
+            $orig_w = imagesx($src);
+            $orig_h = imagesy($src);
+
+            // Cap dimensions at 1920px max bound while maintaining exact aspect ratio
+            $max_dim = 1920;
+            $w = $orig_w;
+            $h = $orig_h;
+            if ($w > $max_dim || $h > $max_dim) {
+              if ($w >= $h) {
+                $h = (int)round(($h / $w) * $max_dim);
+                $w = $max_dim;
+              } else {
+                $w = (int)round(($w / $h) * $max_dim);
+                $h = $max_dim;
+              }
+            }
+
+            // Determine target filename (support replace mode or new file)
+            $replace_target = basename($_POST['replace_target'] ?? '');
+            if ($replace_target && file_exists($shots_dir . '/' . $replace_target)) {
+              $dest_name = $replace_target;
+            } else {
+              $dest_name = 'screenshot_' . date('Ymd_His') . '_' . substr(md5(uniqid()), 0, 6) . '.webp';
+            }
+            $dest_file = $shots_dir . '/' . $dest_name;
+
+            // Compress progressively until output size is strictly below 1MB (1,000,000 bytes)
+            $quality = 85;
+            $saved = false;
+
+            for ($attempt = 0; $attempt < 6; $attempt++) {
+              $dst = imagecreatetruecolor($w, $h);
+              imagealphablending($dst, false);
+              imagesavealpha($dst, true);
+              imagecopyresampled($dst, $src, 0, 0, 0, 0, $w, $h, $orig_w, $orig_h);
+
+              ob_start();
+              if (function_exists('imagewebp')) {
+                imagewebp($dst, null, $quality);
+              } else {
+                imagejpeg($dst, null, $quality);
+              }
+              $blob = ob_get_clean();
+              imagedestroy($dst);
+
+              if (strlen($blob) <= 1000000 || ($quality <= 35 && $w <= 800)) {
+                @file_put_contents($dest_file, $blob);
+                $saved = true;
+                break;
+              }
+
+              $quality -= 15;
+              if ($quality < 40) {
+                $w = (int)round($w * 0.82);
+                $h = (int)round($h * 0.82);
+                $quality = 70;
+              }
+            }
+            imagedestroy($src);
+
+            if ($saved) {
+              $size_kb = round(filesize($dest_file) / 1024, 1);
+              $form_factor = ($orig_w >= $orig_h) ? 'Wide (Desktop/Tablet)' : 'Narrow (Mobile)';
+              log_admin_activity(get_db(), $_SESSION['admin_email'], "Saved PWA Screenshot {$dest_name} ({$size_kb} KB, {$form_factor})", 0);
+              $_SESSION['admin_flash_msg'] = "Screenshot saved successfully ({$size_kb} KB, {$form_factor}) - auto-optimized under 1MB.";
+            }
+          }
+        }
+      }
+      header('Location: ?access=admin&page=pwa&tab=screenshots');
+      exit;
+    }
+
+    // DELETE PWA SCREENSHOT
+    if (isset($_POST['delete_pwa_screenshot'])) {
+      $target = basename($_POST['screenshot_name'] ?? '');
+      $file = __DIR__ . '/screenshots/' . $target;
+      if ($target && file_exists($file) && @unlink($file)) {
+        log_admin_activity(get_db(), $_SESSION['admin_email'], "Deleted PWA Screenshot {$target}", 0);
+        $_SESSION['admin_flash_msg'] = "Screenshot {$target} removed.";
+      }
+      header('Location: ?access=admin&page=pwa&tab=screenshots');
+      exit;
+    }
+
+    if (isset($_POST['reset_pwa_og_image'])) {
+      @unlink(__DIR__ . '/icons/og-image.jpg');
+      @unlink(__DIR__ . '/icons/og-image.png');
+      log_admin_activity(get_db(), $_SESSION['admin_email'], 'Reset Open Graph social image to dynamic generator', 0);
+      $_SESSION['admin_flash_msg'] = "Open Graph image reset to default dynamic generator.";
+      header('Location: ?access=admin&page=pwa&tab=icons');
+      exit;
+    }
+
     // SAVE GENERAL SYSTEM SETTINGS & BRANDING
     if (isset($_POST['save_general_settings'])) {
       $db = get_db();
@@ -32250,6 +32576,61 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       log_admin_activity($db, $_SESSION['admin_email'], 'Saved General System Settings & Module Toggles', 0);
       $_SESSION['admin_flash_msg'] = "System branding and feature settings saved successfully.";
       header('Location: ?access=admin&page=settings');
+      exit;
+    }
+
+    // EMERGENCY: ONE-CLICK EMERGENCY ACTIONS
+    if (isset($_POST['hijack_action'])) {
+      $db = get_db();
+      $h_action = $_POST['hijack_action'];
+      $msg = "Action completed.";
+
+      if ($h_action === 'emergency_lockdown') {
+        $db->exec("INSERT INTO site_settings (key, value) VALUES ('site_maintenance_mode', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+        $db->exec("INSERT INTO site_settings (key, value) VALUES ('site_maintenance_reason', 'Site placed in Emergency Lockdown following suspected unauthorized access.') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        log_admin_activity($db, $_SESSION['admin_email'], 'TRIGGERED EMERGENCY LOCKDOWN', 0);
+        $msg = "EMERGENCY LOCKDOWN ACTIVATED: Public requests are now blocked.";
+      } elseif ($h_action === 'revoke_all_admins') {
+        $db->exec("UPDATE users SET is_admin = 0, status = 'user' WHERE status != 'super_admin'");
+        log_admin_activity($db, $_SESSION['admin_email'], 'REVOKED ALL ADMIN ROLES (Kept Super Admin only)', 0);
+        $msg = "Revoked all elevated administrator permissions. Only the Super Admin retains access.";
+      } elseif ($h_action === 'purge_all_sessions') {
+        $sess_path = session_save_path() ?: sys_get_temp_dir();
+        $cnt = 0;
+        if (is_dir($sess_path)) {
+          foreach (glob($sess_path . '/sess_*') as $sf) {
+            if ($sf !== session_save_path() . '/sess_' . session_id()) {
+              @unlink($sf);
+              $cnt++;
+            }
+          }
+        }
+        $db->exec("DELETE FROM login_attempts");
+        log_admin_activity($db, $_SESSION['admin_email'], 'TERMINATED ALL SESSIONS', 0);
+        $msg = "Terminated {$cnt} active session(s) across all users and revoked brute-force states.";
+      } elseif ($h_action === 'wipe_rogue_scripts') {
+        $deleted = 0;
+        $scan_dirs = [MUSIC_DIR . '/uploads', MUSIC_DIR . '/users_drive', MUSIC_DIR . '/.tmp_uploads'];
+        foreach ($scan_dirs as $sdir) {
+          if (is_dir($sdir)) {
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($sdir, FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $f) {
+              if ($f->isFile()) {
+                $ext = strtolower($f->getExtension());
+                if (in_array($ext, ['php', 'phtml', 'phar', 'cgi', 'pl', 'py', 'sh', 'asp', 'aspx', 'jsp', 'env', 'bak'])) {
+                  @unlink($f->getRealPath());
+                  $deleted++;
+                }
+              }
+            }
+          }
+        }
+        log_admin_activity($db, $_SESSION['admin_email'], "WIPED {$deleted} ROGUE SCRIPT(S) FROM MEDIA DIRECTORIES", 0);
+        $msg = "Scanned and eliminated {$deleted} unauthorized executable script(s).";
+      }
+
+      $_SESSION['admin_flash_msg'] = $msg;
+      header('Location: ?access=admin&page=hijack_recovery');
       exit;
     }
 
@@ -32329,6 +32710,65 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       log_admin_activity($db, $_SESSION['admin_email'], "Executed task: {$task_key} ({$msg})", 0);
       $_SESSION['admin_flash_msg'] = $msg;
       header('Location: ?access=admin&page=jobs');
+      exit;
+    }
+
+    // RENAME ACTIVE DATABASE
+    if (isset($_POST['rename_active_database'])) {
+      $db = get_db();
+      $new_name = trim($_POST['new_db_name'] ?? '');
+      $new_name = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $new_name);
+
+      if (empty($new_name)) {
+        $_SESSION['admin_flash_msg'] = "Database name cannot be empty.";
+        header('Location: ?access=admin&page=db_backups');
+        exit;
+      }
+
+      if (!preg_match('/\.(db|sqlite|sqlite3)$/i', $new_name)) {
+        $new_name .= '.db';
+      }
+
+      $cur_db_path = DB_FILE;
+      $new_db_path = __DIR__ . '/' . $new_name;
+
+      if ($cur_db_path === $new_db_path) {
+        $_SESSION['admin_flash_msg'] = "The new database name is identical to the current one.";
+        header('Location: ?access=admin&page=db_backups');
+        exit;
+      }
+
+      if (file_exists($new_db_path)) {
+        $_SESSION['admin_flash_msg'] = "A database file named '{$new_name}' already exists. Please choose a different name.";
+        header('Location: ?access=admin&page=db_backups');
+        exit;
+      }
+
+      // Checkpoint and flush WAL journal before renaming
+      try {
+        $db->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+      } catch (\Throwable $e) {}
+
+      $db = null; // Release database handle
+
+      $renamed = @rename($cur_db_path, $new_db_path);
+      if ($renamed) {
+        if (file_exists($cur_db_path . '-wal')) @rename($cur_db_path . '-wal', $new_db_path . '-wal');
+        if (file_exists($cur_db_path . '-shm')) @rename($cur_db_path . '-shm', $new_db_path . '-shm');
+
+        @file_put_contents(__DIR__ . '/.db_config.ini', $new_name);
+
+        try {
+          $db_new = new PDO('sqlite:' . $new_db_path, null, null, [PDO::ATTR_TIMEOUT => 15]);
+          log_admin_activity($db_new, $_SESSION['admin_email'], "Renamed active database from " . basename($cur_db_path) . " to {$new_name}", 0);
+        } catch (\Throwable $e) {}
+
+        $_SESSION['admin_flash_msg'] = "Database successfully renamed to '{$new_name}'.";
+      } else {
+        $_SESSION['admin_flash_msg'] = "Failed to rename database. The file may be temporarily locked by readers or write permissions were denied.";
+      }
+
+      header('Location: ?access=admin&page=db_backups');
       exit;
     }
 
@@ -34441,7 +34881,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['settings', 'security', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
+  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -34481,6 +34921,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 ?>
 <?php
   $page_titles = [
+    'hijack_recovery' => 'Emergency & Incident Recovery',
     'analytics' => 'Daily Traffic & Visitor Analytics',
     'storage' => 'Storage Management & Cleanup',
     'user_drive_management' => 'User Drive Quota & Capacity Management',
@@ -34501,6 +34942,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'update' => 'System & Codebase Update',
     'settings' => 'General System Settings & Branding',
     'security' => 'Security, IP Firewall & Threat Defense',
+    'pwa' => 'PWA Management',
     'jobs' => 'Background Tasks & Cron Scheduler',
     'db_backups' => 'Database Snapshot Vault & Backups',
     'error_logs' => 'PHP Error Logs & Crash Monitor',
@@ -34637,14 +35079,56 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         color: var(--ytm-accent);
       }
 
-      .sidebar-section-label {
-        font-size: 0.68rem;
+      .sidebar-accordion-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.55rem 0.9rem;
+        margin: 0.35rem 0.75rem 0.15rem 0.75rem;
+        border-radius: 10px;
+        font-size: 0.72rem;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.8px;
-        color: rgba(255, 255, 255, 0.35);
-        padding: 0.75rem 1.4rem 0.3rem 1.4rem;
+        letter-spacing: 0.7px;
+        color: rgba(255, 255, 255, 0.45);
+        cursor: pointer;
         user-select: none;
+        transition: all 0.15s ease;
+        background: transparent;
+      }
+
+      .sidebar-accordion-header:hover {
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .sidebar-accordion-header .accordion-arrow {
+        font-size: 0.68rem;
+        transition: transform 0.2s ease;
+      }
+
+      .sidebar-accordion-header.collapsed .accordion-arrow {
+        transform: rotate(-90deg);
+      }
+
+      .sidebar-accordion-body {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        transition: all 0.2s ease;
+      }
+
+      .sidebar-accordion-body.collapsed {
+        display: none;
+      }
+
+      @media (min-width: 992px) {
+        .sidebar.minimized .sidebar-accordion-header {
+          display: none !important;
+        }
+        .sidebar.minimized .sidebar-accordion-body {
+          display: flex !important;
+        }
       }
 
       .nav-link {
@@ -34695,10 +35179,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         color: #ff3333;
       }
 
+      /* Sidebar Control Strip & Personal Collapse Buttons */
+      .sidebar-ctrl-strip {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .sidebar-ctrl-btn {
+        color: rgba(255, 255, 255, 0.45) !important;
+        font-size: 0.78rem;
+        transition: all 0.15s ease;
+      }
+      .sidebar-ctrl-btn:hover {
+        color: #ffffff !important;
+        transform: scale(1.12);
+      }
+      .sidebar-ctrl-btn.active {
+        color: #ff4d4d !important;
+      }
+
       /* Desktop Minimized Sidebar Mode */
       @media (min-width: 992px) {
         .sidebar.minimized {
           width: 76px;
+        }
+        .sidebar.minimized .sidebar-ctrl-strip {
+          display: none !important;
         }
         .sidebar.minimized .nav-link {
           justify-content: center;
@@ -35710,96 +36215,148 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <span class="admin-badge admin-badge-primary mt-2 admin-profile-badge font-monospace" style="font-size: 0.68rem; padding: 2px 8px;">ID: #<?php echo $_SESSION['admin_id'] ?? '0'; ?></span>
           </div>
 
+          <!-- Personal Sidebar Controls: Manual Mode, Expand All, Collapse All -->
+          <div class="sidebar-ctrl-strip d-flex align-items-center justify-content-between px-3 py-2">
+            <span class="text-uppercase fw-bold text-secondary" style="font-size: 0.65rem; letter-spacing: 0.8px;">Navigation</span>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none sidebar-ctrl-btn" id="btn-sidebar-single-mode" onclick="toggleSidebarAccordionMode()" title="Toggle Single-Section (Auto-Collapse Others) vs Free Manual Mode">
+                <i class="bi bi-ui-radios-grid" id="icon-sidebar-mode"></i>
+              </button>
+              <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none sidebar-ctrl-btn" onclick="adminCollapseAllSections(false)" title="Expand All Sections">
+                <i class="bi bi-arrows-expand"></i>
+              </button>
+              <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none sidebar-ctrl-btn" onclick="adminCollapseAllSections(true)" title="Collapse All Sections">
+                <i class="bi bi-arrows-collapse"></i>
+              </button>
+            </div>
+          </div>
+
+          <?php
+            $active_p = $_GET['page'] ?? 'users';
+            $is_setup_active = in_array($active_p, ['hijack_recovery', 'settings', 'security', 'pwa']);
+            $is_content_active = in_array($active_p, ['users', 'songs', 'artworks', 'storage', 'user_drive_management', 'bitrate_management']) || empty($_GET['page']);
+            $is_monitor_active = in_array($active_p, ['analytics', 'logs', 'reports', 'rhythm_analytics', 'appeals']);
+            $is_engine_active = in_array($active_p, ['jobs', 'db_backups', 'error_logs', 'phpinfo']);
+            $is_tools_active = in_array($active_p, ['manage', 'drive', 'dbmanager', 'ide', 'api', 'update']);
+          ?>
           <div class="mb-4 mt-2 d-flex flex-column">
-            <!-- Section: Configuration & Security -->
-            <div class="sidebar-section-label">System Setup</div>
-            <?php if ($is_super_admin_check || in_array('settings', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=settings" title="General Settings" class="nav-link <?php echo (($_GET['page'] ?? '') === 'settings') ? 'active' : ''; ?>"><i class="bi bi-sliders"></i><span>General Settings</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('security', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=security" title="Security &amp; Firewall" class="nav-link <?php echo (($_GET['page'] ?? '') === 'security') ? 'active' : ''; ?>"><i class="bi bi-shield-lock-fill"></i><span>Security &amp; Firewall</span></a>
-            <?php endif; ?>
+            <!-- 1. Security & Configuration Accordion -->
+            <div class="sidebar-accordion-header <?php echo $is_setup_active ? '' : 'collapsed'; ?>" onclick="toggleAdminAccordion(this, 'admin-sec-setup')">
+              <span class="d-flex align-items-center gap-2"><i class="bi bi-shield-lock text-danger"></i>Security &amp; Setup</span>
+              <i class="bi bi-chevron-down accordion-arrow"></i>
+            </div>
+            <div class="sidebar-accordion-body <?php echo $is_setup_active ? '' : 'collapsed'; ?>" id="admin-sec-setup">
+              <?php if ($is_super_admin_check || in_array('hijack_recovery', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=hijack_recovery" title="Hijack Recovery" class="nav-link text-danger <?php echo ($active_p === 'hijack_recovery') ? 'active' : ''; ?>"><i class="bi bi-shield-slash-fill text-danger"></i><span>Emergency</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('settings', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=settings" title="General Settings" class="nav-link <?php echo ($active_p === 'settings') ? 'active' : ''; ?>"><i class="bi bi-sliders"></i><span>General Settings</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('security', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=security" title="Security &amp; Firewall" class="nav-link <?php echo ($active_p === 'security') ? 'active' : ''; ?>"><i class="bi bi-shield-lock-fill"></i><span>Security &amp; Firewall</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('pwa', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=pwa" title="Progressive Web App" class="nav-link <?php echo ($active_p === 'pwa') ? 'active' : ''; ?>"><i class="bi bi-phone-fill"></i><span>Progressive Web App</span></a>
+              <?php endif; ?>
+            </div>
 
-            <!-- Section: Core Management -->
-            <div class="sidebar-section-label">Management</div>
-            <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=users" title="User Management" class="nav-link <?php echo ((empty($_GET['page']) || $_GET['page'] === 'users') && !in_array(($_GET['page'] ?? ''), ['analytics', 'storage', 'settings', 'security'])) ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=songs" title="Song Management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo (($_GET['page'] ?? '') === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Management</span></a>
-            <?php endif; ?>
+            <!-- 2. Content & Storage Accordion -->
+            <div class="sidebar-accordion-header <?php echo $is_content_active ? '' : 'collapsed'; ?>" onclick="toggleAdminAccordion(this, 'admin-sec-content')">
+              <span class="d-flex align-items-center gap-2"><i class="bi bi-folder-fill text-warning"></i>Media &amp; Storage</span>
+              <i class="bi bi-chevron-down accordion-arrow"></i>
+            </div>
+            <div class="sidebar-accordion-body <?php echo $is_content_active ? '' : 'collapsed'; ?>" id="admin-sec-content">
+              <?php if ($is_super_admin_check || in_array('users', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=users" title="User Management" class="nav-link <?php echo ($active_p === 'users') ? 'active' : ''; ?>"><i class="bi bi-people-fill"></i><span>User Management</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=songs" title="Song Management" class="nav-link <?php echo ($active_p === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo ($active_p === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Studio</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=storage" title="Storage Studio" class="nav-link <?php echo ($active_p === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('user_drive_management', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=user_drive_management" title="User Drive Quota" class="nav-link <?php echo ($active_p === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('bitrate_management', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=bitrate_management" title="Bitrate Studio" class="nav-link <?php echo ($active_p === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
+              <?php endif; ?>
+            </div>
 
-            <!-- Section: Storage & Performance -->
-            <div class="sidebar-section-label">Storage &amp; Audio</div>
-            <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=storage" title="Storage Studio" class="nav-link <?php echo (($_GET['page'] ?? '') === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('user_drive_management', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=user_drive_management" title="User Drive Quota" class="nav-link <?php echo (($_GET['page'] ?? '') === 'user_drive_management') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-up-fill"></i><span>User Drive Quota</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('bitrate_management', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=bitrate_management" title="Bitrate Studio" class="nav-link <?php echo (($_GET['page'] ?? '') === 'bitrate_management') ? 'active' : ''; ?>"><i class="bi bi-soundwave"></i><span>Bitrate Studio</span></a>
-            <?php endif; ?>
+            <!-- 3. Monitoring & Moderation Accordion -->
+            <div class="sidebar-accordion-header <?php echo $is_monitor_active ? '' : 'collapsed'; ?>" onclick="toggleAdminAccordion(this, 'admin-sec-monitor')">
+              <span class="d-flex align-items-center gap-2"><i class="bi bi-graph-up-arrow text-info"></i>Monitoring &amp; Logs</span>
+              <i class="bi bi-chevron-down accordion-arrow"></i>
+            </div>
+            <div class="sidebar-accordion-body <?php echo $is_monitor_active ? '' : 'collapsed'; ?>" id="admin-sec-monitor">
+              <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=analytics" title="Traffic Analytics" class="nav-link <?php echo ($active_p === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=logs" title="Activity Logs" class="nav-link <?php echo ($active_p === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('reports', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=reports" title="Profile Reports" class="nav-link <?php echo ($active_p === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('rhythm_analytics', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=rhythm_analytics" title="Rhythm Analytics" class="nav-link <?php echo ($active_p === 'rhythm_analytics') ? 'active' : ''; ?>"><i class="bi bi-controller"></i><span>Rhythm Analytics</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=appeals" title="Ban Appeals" class="nav-link <?php echo ($active_p === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
+              <?php endif; ?>
+            </div>
 
-            <!-- Section: Monitoring & Moderation -->
-            <div class="sidebar-section-label">Monitoring</div>
-            <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=analytics" title="Traffic Analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=logs" title="Activity Logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('reports', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=reports" title="Profile Reports" class="nav-link <?php echo (($_GET['page'] ?? '') === 'reports') ? 'active' : ''; ?>"><i class="bi bi-shield-fill-exclamation"></i><span>Profile Reports</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('rhythm_analytics', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=rhythm_analytics" title="Rhythm Analytics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'rhythm_analytics') ? 'active' : ''; ?>"><i class="bi bi-controller"></i><span>Rhythm Analytics</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('appeals', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=appeals" title="Ban Appeals" class="nav-link <?php echo (($_GET['page'] ?? '') === 'appeals') ? 'active' : ''; ?>"><i class="bi bi-envelope-paper"></i><span>Ban Appeals</span></a>
-            <?php endif; ?>
+            <!-- 4. Server Engine & Health Accordion -->
+            <div class="sidebar-accordion-header <?php echo $is_engine_active ? '' : 'collapsed'; ?>" onclick="toggleAdminAccordion(this, 'admin-sec-engine')">
+              <span class="d-flex align-items-center gap-2"><i class="bi bi-cpu-fill text-success"></i>Server Engine</span>
+              <i class="bi bi-chevron-down accordion-arrow"></i>
+            </div>
+            <div class="sidebar-accordion-body <?php echo $is_engine_active ? '' : 'collapsed'; ?>" id="admin-sec-engine">
+              <?php if ($is_super_admin_check || in_array('jobs', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=jobs" title="Background Tasks" class="nav-link <?php echo ($active_p === 'jobs') ? 'active' : ''; ?>"><i class="bi bi-clock-history"></i><span>Background Tasks</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('db_backups', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=db_backups" title="DB Backup Vault" class="nav-link <?php echo ($active_p === 'db_backups') ? 'active' : ''; ?>"><i class="bi bi-database-fill-up"></i><span>DB Backup Vault</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('error_logs', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=error_logs" title="PHP Error Logs" class="nav-link <?php echo ($active_p === 'error_logs') ? 'active' : ''; ?>"><i class="bi bi-bug-fill"></i><span>PHP Error Logs</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('phpinfo', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=phpinfo" title="PHP Diagnostics" class="nav-link <?php echo ($active_p === 'phpinfo') ? 'active' : ''; ?>"><i class="bi bi-cpu-fill"></i><span>PHP Diagnostics</span></a>
+              <?php endif; ?>
+            </div>
 
-            <!-- Section: Backend & Server Engine -->
-            <div class="sidebar-section-label">Server Engine</div>
-            <?php if ($is_super_admin_check || in_array('jobs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=jobs" title="Background Tasks" class="nav-link <?php echo (($_GET['page'] ?? '') === 'jobs') ? 'active' : ''; ?>"><i class="bi bi-clock-history"></i><span>Background Tasks</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('db_backups', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=db_backups" title="DB Backup Vault" class="nav-link <?php echo (($_GET['page'] ?? '') === 'db_backups') ? 'active' : ''; ?>"><i class="bi bi-database-fill-up"></i><span>DB Backup Vault</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('error_logs', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=error_logs" title="PHP Error Logs" class="nav-link <?php echo (($_GET['page'] ?? '') === 'error_logs') ? 'active' : ''; ?>"><i class="bi bi-bug-fill"></i><span>PHP Error Logs</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('phpinfo', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=phpinfo" title="PHP Diagnostics" class="nav-link <?php echo (($_GET['page'] ?? '') === 'phpinfo') ? 'active' : ''; ?>"><i class="bi bi-cpu-fill"></i><span>PHP Diagnostics</span></a>
-            <?php endif; ?>
-
-            <!-- Section: Workspace Tools -->
-            <div class="sidebar-section-label">Tools</div>
-            <?php if ($is_super_admin_check || in_array('manage', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=manage" title="Player Manager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'manage') ? 'active' : ''; ?>"><i class="bi bi-window-sidebar"></i><span>Player Manager</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=drive" title="Drive Manager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'drive') ? 'active' : ''; ?>"><i class="bi bi-folder2-open"></i><span>Drive Manager</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=dbmanager" title="PHPDBManager" class="nav-link <?php echo (($_GET['page'] ?? '') === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=ide" title="PHPEditor (IDE)" class="nav-link <?php echo (($_GET['page'] ?? '') === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('api', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=api" title="API Keys" class="nav-link <?php echo (($_GET['page'] ?? '') === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('update', $current_admin_permissions)): ?>
-            <a href="?access=admin&page=update" title="System Update" class="nav-link <?php echo (($_GET['page'] ?? '') === 'update') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-down-fill"></i><span>System Update</span></a>
-            <?php endif; ?>
-            <?php if ($is_super_admin_check || in_array('playground', $current_admin_permissions)): ?>
-            <a href="./#playground" target="_blank" title="API Playground" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
-            <?php endif; ?>
+            <!-- 5. Developer Tools Accordion -->
+            <div class="sidebar-accordion-header <?php echo $is_tools_active ? '' : 'collapsed'; ?>" onclick="toggleAdminAccordion(this, 'admin-sec-tools')">
+              <span class="d-flex align-items-center gap-2"><i class="bi bi-tools text-primary"></i>Developer Tools</span>
+              <i class="bi bi-chevron-down accordion-arrow"></i>
+            </div>
+            <div class="sidebar-accordion-body <?php echo $is_tools_active ? '' : 'collapsed'; ?>" id="admin-sec-tools">
+              <?php if ($is_super_admin_check || in_array('manage', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=manage" title="Player Manager" class="nav-link <?php echo ($active_p === 'manage') ? 'active' : ''; ?>"><i class="bi bi-window-sidebar"></i><span>Player Manager</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('drive', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=drive" title="Drive Manager" class="nav-link <?php echo ($active_p === 'drive') ? 'active' : ''; ?>"><i class="bi bi-folder2-open"></i><span>Drive Manager</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('dbmanager', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=dbmanager" title="PHPDBManager" class="nav-link <?php echo ($active_p === 'dbmanager') ? 'active' : ''; ?>"><i class="bi bi-database-fill-gear"></i><span>PHPDBManager</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('ide', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=ide" title="PHPEditor (IDE)" class="nav-link <?php echo ($active_p === 'ide') ? 'active' : ''; ?>"><i class="bi bi-code-slash"></i><span>PHPEditor (IDE)</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('api', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=api" title="API Keys" class="nav-link <?php echo ($active_p === 'api') ? 'active' : ''; ?>"><i class="bi bi-braces-asterisk"></i><span>API Keys</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('update', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=update" title="System Update" class="nav-link <?php echo ($active_p === 'update') ? 'active' : ''; ?>"><i class="bi bi-cloud-arrow-down-fill"></i><span>System Update</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('playground', $current_admin_permissions)): ?>
+                <a href="./#playground" target="_blank" title="API Playground" class="nav-link"><i class="bi bi-window-stack"></i><span>API Playground</span></a>
+              <?php endif; ?>
+            </div>
           </div>
 
           <div class="mt-auto d-flex flex-column pb-3">
@@ -35810,8 +36367,118 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           </div>
         </div>
         <script>
+          const adminAccordionSections = ['admin-sec-setup', 'admin-sec-content', 'admin-sec-monitor', 'admin-sec-engine', 'admin-sec-tools'];
+
+          // Toggle individual section manually (supports Single Auto-Collapse vs Independent Multi-Open)
+          window.toggleAdminAccordion = function(headerEl, bodyId) {
+            const body = document.getElementById(bodyId);
+            if (!body) return;
+
+            const isCollapsing = !body.classList.contains('collapsed');
+            const isSingleMode = localStorage.getItem('admin_sidebar_single_mode') === '1';
+
+            if (!isCollapsing && isSingleMode) {
+              // Auto-collapse all other sections when opening this one
+              adminAccordionSections.forEach(id => {
+                if (id !== bodyId) {
+                  const otherBody = document.getElementById(id);
+                  const otherHeader = otherBody?.previousElementSibling;
+                  if (otherBody && otherHeader) {
+                    otherBody.classList.add('collapsed');
+                    otherHeader.classList.add('collapsed');
+                    localStorage.setItem('admin_accordion_' + id, '0');
+                  }
+                }
+              });
+            }
+
+            body.classList.toggle('collapsed', isCollapsing);
+            headerEl.classList.toggle('collapsed', isCollapsing);
+            localStorage.setItem('admin_accordion_' + bodyId, isCollapsing ? '0' : '1');
+          };
+
+          // Global Collapse All (collapse = true) / Expand All (collapse = false)
+          window.adminCollapseAllSections = function(collapse = true) {
+            adminAccordionSections.forEach(id => {
+              const body = document.getElementById(id);
+              const header = body?.previousElementSibling;
+              if (body && header) {
+                body.classList.toggle('collapsed', collapse);
+                header.classList.toggle('collapsed', collapse);
+                localStorage.setItem('admin_accordion_' + id, collapse ? '0' : '1');
+              }
+            });
+          };
+
+          // Toggle personal preference between Multi-Open Manual Mode and Single-Open Accordion Mode
+          window.toggleSidebarAccordionMode = function() {
+            const current = localStorage.getItem('admin_sidebar_single_mode') === '1';
+            const nextMode = !current;
+            localStorage.setItem('admin_sidebar_single_mode', nextMode ? '1' : '0');
+            syncSidebarModeUI(nextMode);
+
+            if (nextMode) {
+              // If entering single mode, keep only the currently active page section open
+              let activeKept = false;
+              adminAccordionSections.forEach(id => {
+                const body = document.getElementById(id);
+                const header = body?.previousElementSibling;
+                if (body && header) {
+                  const hasActive = !!body.querySelector('.nav-link.active');
+                  const keep = hasActive || (!activeKept && !body.classList.contains('collapsed'));
+                  if (keep) {
+                    activeKept = true;
+                    body.classList.remove('collapsed');
+                    header.classList.remove('collapsed');
+                    localStorage.setItem('admin_accordion_' + id, '1');
+                  } else {
+                    body.classList.add('collapsed');
+                    header.classList.add('collapsed');
+                    localStorage.setItem('admin_accordion_' + id, '0');
+                  }
+                }
+              });
+            }
+          };
+
+          function syncSidebarModeUI(isSingle) {
+            const btn = document.getElementById('btn-sidebar-single-mode');
+            const icon = document.getElementById('icon-sidebar-mode');
+            if (btn && icon) {
+              btn.classList.toggle('active', isSingle);
+              icon.className = isSingle ? 'bi bi-ui-radios text-danger' : 'bi bi-ui-radios-grid';
+              btn.title = isSingle 
+                ? 'Mode: Single Section Open (Click to switch to Independent Manual Mode)' 
+                : 'Mode: Independent Manual Mode (Click to switch to Single Section Mode)';
+            }
+          }
+
           document.addEventListener('DOMContentLoaded', () => {
             const sidebar = document.getElementById('admin-sidebar');
+            const isSingleMode = localStorage.getItem('admin_sidebar_single_mode') === '1';
+            syncSidebarModeUI(isSingleMode);
+
+            // Restore individual manual collapse preferences
+            adminAccordionSections.forEach(id => {
+              const body = document.getElementById(id);
+              const header = body?.previousElementSibling;
+              if (body && header) {
+                const hasActive = !!body.querySelector('.nav-link.active');
+                const saved = localStorage.getItem('admin_accordion_' + id);
+
+                if (hasActive) {
+                  // Active page section is kept visible unless user explicitly collapsed all
+                  body.classList.remove('collapsed');
+                  header.classList.remove('collapsed');
+                } else if (saved === '0') {
+                  body.classList.add('collapsed');
+                  header.classList.add('collapsed');
+                } else if (saved === '1' && !isSingleMode) {
+                  body.classList.remove('collapsed');
+                  header.classList.remove('collapsed');
+                }
+              }
+            });
             const toggleBtn = document.getElementById('desktop-sidebar-toggle');
             if (toggleBtn && sidebar) {
               const updateToggleIcon = (isMin) => {
@@ -35936,8 +36603,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const href = link.getAttribute('href');
               if (!href) return;
 
-              // 1. BYPASS SPA FOR DRIVE: Allow clean native browser execution for Drive page
-              if (href.includes('page=drive') || window.location.search.includes('page=drive')) {
+              // Bypass SPA for Drive and file downloads
+              if (href.includes('page=drive') || window.location.search.includes('page=drive') || href.includes('action=download') || href.includes('export')) {
                 return;
               }
 
@@ -35951,6 +36618,82 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   }
                 }
                 loadAdminPage(href, true);
+              }
+            });
+
+            // Smooth AJAX Form Interceptor (Zero Hard Page Reloads on Submissions)
+            document.addEventListener('submit', async (e) => {
+              const form = e.target.closest('form');
+              if (!form) return;
+
+              const actionUrl = form.getAttribute('action') || window.location.href;
+
+              // Exclude downloads, backups exports, and Drive file ops from AJAX interception
+              if (
+                actionUrl.includes('action=download') ||
+                actionUrl.includes('export') ||
+                actionUrl.includes('page=drive') ||
+                window.location.search.includes('page=drive') ||
+                form.hasAttribute('data-native-submit') ||
+                form.querySelector('input[type="file"]')
+              ) {
+                return;
+              }
+
+              e.preventDefault();
+              showAdminLoader();
+
+              try {
+                const submitter = e.submitter;
+                const fd = new FormData(form);
+                if (submitter && submitter.name) {
+                  fd.append(submitter.name, submitter.value);
+                }
+
+                const res = await fetch(actionUrl, {
+                  method: (form.method || 'POST').toUpperCase(),
+                  body: fd,
+                  headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+
+                if (!res.ok) throw new Error('HTTP Error ' + res.status);
+
+                const htmlText = await res.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlText, 'text/html');
+
+                const newContent = doc.querySelector('#admin-dynamic-content') || doc.querySelector('main.main-content');
+                const currentContent = document.querySelector('#admin-dynamic-content');
+
+                if (newContent && currentContent) {
+                  currentContent.innerHTML = newContent.innerHTML;
+                  if (doc.title) document.title = doc.title;
+
+                  // Execute refreshed DOM scripts smoothly
+                  currentContent.querySelectorAll('script').forEach(oldScript => {
+                    const newScript = document.createElement('script');
+                    Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+                    newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                  });
+
+                  // Close any active Bootstrap modals
+                  document.querySelectorAll('.modal.show').forEach(m => {
+                    const inst = bootstrap.Modal.getInstance(m);
+                    if (inst) inst.hide();
+                  });
+                  document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+                  document.body.classList.remove('modal-open');
+                  document.body.style.removeProperty('overflow');
+                  document.body.style.removeProperty('padding-right');
+                } else {
+                  window.location.href = res.url || actionUrl;
+                }
+              } catch (err) {
+                console.error('Smooth Form Submission Error:', err);
+                form.submit(); // Graceful fallback to native submit on network failure
+              } finally {
+                hideAdminLoader();
               }
             });
 
@@ -35983,7 +36726,153 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php unset($_SESSION['admin_flash_msg']); ?>
         <?php endif; ?>
 
-        <?php if (($_GET['page'] ?? '') === 'jobs'): ?>
+        <?php if (($_GET['page'] ?? '') === 'hijack_recovery'): ?>
+          <?php
+            $db = get_db();
+            $is_locked = $db->query("SELECT value FROM site_settings WHERE key = 'site_maintenance_mode'")->fetchColumn() === '1';
+            $admin_count = (int)$db->query("SELECT COUNT(*) FROM users WHERE is_admin = 1 OR status = 'admin'")->fetchColumn();
+            $super_admin_email = $db->query("SELECT email FROM users WHERE status = 'super_admin' LIMIT 1")->fetchColumn() ?: 'Unknown';
+
+            // Rogue script detection
+            $rogue_files = [];
+            $scan_dirs = [MUSIC_DIR . '/uploads', MUSIC_DIR . '/users_drive', MUSIC_DIR . '/.tmp_uploads'];
+            foreach ($scan_dirs as $sdir) {
+              if (is_dir($sdir)) {
+                $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($sdir, FilesystemIterator::SKIP_DOTS));
+                foreach ($it as $f) {
+                  if ($f->isFile() && in_array(strtolower($f->getExtension()), ['php', 'phtml', 'phar', 'cgi', 'pl', 'py', 'sh', 'asp', 'aspx', 'jsp', 'env'])) {
+                    $rogue_files[] = str_replace(MUSIC_DIR, '', $f->getRealPath());
+                  }
+                }
+              }
+            }
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-danger d-flex align-items-center gap-2">
+                <i class="bi bi-shield-slash-fill"></i> Site Hijack &amp; Emergency Incident Response
+              </h1>
+              <div class="small text-secondary mt-1">Containment tools and step-by-step remediation in the event of unauthorized access, account compromise, or defacement.</div>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Threat Alert Banner -->
+            <div class="p-3 mb-4 rounded-4 border <?php echo $is_locked ? 'bg-danger bg-opacity-10 border-danger' : 'bg-dark bg-opacity-50 border-secondary border-opacity-25'; ?> d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi <?php echo $is_locked ? 'bi-lock-fill text-danger' : 'bi-shield-check text-success'; ?> fs-4"></i>
+                <div>
+                  <strong class="text-white d-block">Current Site Status: <?php echo $is_locked ? '<span class="text-danger">EMERGENCY LOCKDOWN ACTIVE</span>' : '<span class="text-success">NORMAL OPERATIONS</span>'; ?></strong>
+                  <span class="text-secondary small">Super Admin: <code class="text-info"><?php echo htmlspecialchars($super_admin_email); ?></code></span>
+                </div>
+              </div>
+              <span class="admin-badge <?php echo $is_locked ? 'admin-badge-danger' : 'admin-badge-success'; ?>">
+                <?php echo $is_locked ? 'Public Access Blocked' : 'Site Online'; ?>
+              </span>
+            </div>
+
+            <!-- Instant Containment Actions -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-md-6 col-xl-3">
+                <div class="admin-card p-3 h-100 d-flex flex-column justify-content-between">
+                  <div>
+                    <span class="text-danger fw-bold small text-uppercase d-block mb-1"><i class="bi bi-lock-fill me-1"></i> 1. Lockdown Site</span>
+                    <p class="text-secondary small mb-3">Instantly closes public access, redirecting all non-admin visitors to an emergency maintenance screen.</p>
+                  </div>
+                  <form method="POST" action="?access=admin&page=hijack_recovery" onsubmit="return confirm('Activate Emergency Lockdown immediately?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="hijack_action" value="emergency_lockdown">
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">Lockdown Now</button>
+                  </form>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-6 col-xl-3">
+                <div class="admin-card p-3 h-100 d-flex flex-column justify-content-between">
+                  <div>
+                    <span class="text-warning fw-bold small text-uppercase d-block mb-1"><i class="bi bi-person-x-fill me-1"></i> 2. Revoke All Admins</span>
+                    <p class="text-secondary small mb-3">Demotes all delegated admins (<?php echo $admin_count; ?> staff) back to standard users, leaving only the primary Super Admin.</p>
+                  </div>
+                  <form method="POST" action="?access=admin&page=hijack_recovery" onsubmit="return confirm('Demote ALL administrators except Super Admin?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="hijack_action" value="revoke_all_admins">
+                    <button type="submit" class="admin-btn-pill w-100 justify-content-center text-warning" style="border-color: rgba(245,158,11,0.4);">Revoke Roles</button>
+                  </form>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-6 col-xl-3">
+                <div class="admin-card p-3 h-100 d-flex flex-column justify-content-between">
+                  <div>
+                    <span class="text-info fw-bold small text-uppercase d-block mb-1"><i class="bi bi-box-arrow-left me-1"></i> 3. Terminate Sessions</span>
+                    <p class="text-secondary small mb-3">Destroys all active PHP session tokens on the server, forcing an immediate logout for every user and attacker.</p>
+                  </div>
+                  <form method="POST" action="?access=admin&page=hijack_recovery" onsubmit="return confirm('Force terminate all active sessions across the server?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="hijack_action" value="purge_all_sessions">
+                    <button type="submit" class="admin-btn-pill w-100 justify-content-center text-info" style="border-color: rgba(56,189,248,0.4);">Kill Sessions</button>
+                  </form>
+                </div>
+              </div>
+
+              <div class="col-12 col-md-6 col-xl-3">
+                <div class="admin-card p-3 h-100 d-flex flex-column justify-content-between">
+                  <div>
+                    <span class="text-danger fw-bold small text-uppercase d-block mb-1"><i class="bi bi-trash-fill me-1"></i> 4. Wipe Rogue Scripts</span>
+                    <p class="text-secondary small mb-3">Deletes any executable scripts (.php, .phtml, .sh, .py) hidden inside public media upload folders.</p>
+                  </div>
+                  <form method="POST" action="?access=admin&page=hijack_recovery" onsubmit="return confirm('Delete all detected executable scripts in media folders?');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <input type="hidden" name="hijack_action" value="wipe_rogue_scripts">
+                    <button type="submit" class="admin-btn-pill w-100 justify-content-center text-danger" style="border-color: rgba(239,68,68,0.4);">
+                      Eliminate (<?php echo count($rogue_files); ?>)
+                    </button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <!-- Incident Response Checklist Guide -->
+            <div class="admin-card p-4 mb-4">
+              <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-3">
+                <i class="bi bi-list-check text-info"></i> Five-Step Hijack Incident Playbook
+              </h5>
+
+              <div class="d-flex flex-column gap-3">
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <strong class="text-white d-block mb-1">Step 1: If completely locked out of the Admin Panel</strong>
+                  <p class="text-secondary small mb-2">Access the emergency clearance hook directly by navigating to:</p>
+                  <div class="p-2 bg-dark rounded font-monospace small text-info text-break mb-2">
+                    <code><?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . strtok($_SERVER['REQUEST_URI'], '?'); ?>?action=clear_session_emergency</code>
+                  </div>
+                  <small class="text-secondary">This runs independently of database locks and resets administrative authentication cookies.</small>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <strong class="text-white d-block mb-1">Step 2: Reset the Super Admin Password via SQLite CLI</strong>
+                  <p class="text-secondary small mb-2">If credentials were changed by an attacker, log into your server terminal and run:</p>
+                  <pre class="p-2 bg-dark rounded font-monospace small text-white text-break mb-0" style="white-space: pre-wrap;">sqlite3 music.db "UPDATE users SET password_hash = '$(php -r 'echo password_hash("NewPassword123!", PASSWORD_DEFAULT);')', banned = 0 WHERE status = 'super_admin';"</pre>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <strong class="text-white d-block mb-1">Step 3: Restore Pristine Codebase from GitHub</strong>
+                  <p class="text-secondary small mb-2">If `index.php` was defaced or altered, restore it from the clean upstream branch in one command:</p>
+                  <pre class="p-2 bg-dark rounded font-monospace small text-white text-break mb-0" style="white-space: pre-wrap;">curl -fsSL https://raw.githubusercontent.com/HirotakaDango/PHP-Music/main/index.php -o index.php</pre>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <strong class="text-white d-block mb-1">Step 4: Restore Clean Database Snapshot</strong>
+                  <p class="text-secondary small mb-2">Navigate to the <a href="?access=admin&page=db_backups" class="text-danger fw-bold">DB Backup Vault</a> and roll back to a timestamped snapshot prior to the intrusion.</p>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <strong class="text-white d-block mb-1">Step 5: Rearm Universal Security Shields</strong>
+                  <p class="text-secondary small mb-2">Visit <a href="?access=admin&page=update&tab=integrity" class="text-info fw-bold">Firewall Integrity</a> and click <strong>Re-arm Firewall Shields</strong> to regenerate `.htaccess` and `nginx-phpmusic.conf` execution blocks.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        <?php elseif (($_GET['page'] ?? '') === 'jobs'): ?>
           <?php
             $db = get_db();
             // Calculate pending cleanup stats
@@ -36156,7 +37045,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <h1 class="content-title m-0 fw-bold text-white">Database Snapshot Vault</h1>
               <div class="small text-secondary mt-1">Create isolated point-in-time SQLite database copies with rollback support</div>
             </div>
-            <div class="d-flex align-items-center gap-2 ms-auto">
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+              <button type="button" class="admin-btn-pill" data-bs-toggle="modal" data-bs-target="#renameDbModal" title="Rename active database file">
+                <i class="bi bi-pencil-square text-info"></i> Rename Database
+              </button>
               <button class="admin-btn-pill admin-btn-primary" data-bs-toggle="modal" data-bs-target="#createDbBackupModal">
                 <i class="bi bi-plus-circle-fill"></i> Take Database Snapshot
               </button>
@@ -36269,6 +37161,38 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <input type="text" name="backup_note" class="admin-pill-input w-100 mb-3" placeholder="e.g. pre_migration">
                     <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center">
                       Create Database Backup
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rename Active Database Modal -->
+          <div class="modal fade" id="renameDbModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 18px; box-shadow: 0 20px 50px rgba(0,0,0,0.9);">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2">
+                    <i class="bi bi-pencil-square text-info"></i> Rename Active Database
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=db_backups">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="rename_active_database" value="1">
+                  <div class="modal-body p-3 text-start">
+                    <div class="mb-3">
+                      <span class="text-secondary small fw-bold d-block mb-1">CURRENT DATABASE</span>
+                      <code class="text-white bg-black p-2 rounded d-block font-monospace small border border-secondary border-opacity-25 text-truncate"><?php echo htmlspecialchars(basename(DB_FILE)); ?></code>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">NEW DATABASE FILENAME</label>
+                      <input type="text" name="new_db_name" class="admin-pill-input w-100 font-monospace" placeholder="e.g. library_2026.sqlite" value="<?php echo htmlspecialchars(basename(DB_FILE)); ?>" required>
+                      <small class="text-secondary d-block mt-1" style="font-size: 0.72rem;">Extension (.db, .sqlite, .sqlite3) will be appended automatically if omitted.</small>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2" onclick="return confirm('Rename active database? Active connections will seamlessly reconnect.');">
+                      <i class="bi bi-check2 me-1"></i> Apply New Name
                     </button>
                   </div>
                 </form>
@@ -36652,7 +37576,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.2'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.3'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -37009,6 +37933,958 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <?php endif; ?>
           </div>
 
+        <?php elseif (($_GET['page'] ?? '') === 'pwa'): ?>
+          <?php
+            $db = get_db();
+            $pwa_tab = $_GET['tab'] ?? 'manifest';
+
+            $p_name = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_name'")->fetchColumn() ?: 'PHP Music';
+            $p_short = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_short_name'")->fetchColumn() ?: 'Music';
+            $p_desc = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_description'")->fetchColumn() ?: 'A simple, fast music player with user accounts and uploads.';
+            $p_theme = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_theme_color'")->fetchColumn() ?: '#0a0a0a';
+            $p_bg = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_background_color'")->fetchColumn() ?: '#0a0a0a';
+            $p_disp = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_display'")->fetchColumn() ?: 'standalone';
+            $p_orient = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_orientation'")->fetchColumn() ?: 'any';
+            $p_sw_ver = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_sw_version'")->fetchColumn() ?: 'v31';
+
+            $is_https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || ($_SERVER['SERVER_PORT'] == 443);
+            $app_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER["REQUEST_URI"], '?');
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Progressive Web App (PWA) Management</h1>
+              <div class="small text-secondary mt-1">Configure Web App Manifest, Service Worker offline caching, installation banners, and app appearance</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+              <a href="./?pwa=manifest" target="_blank" class="admin-btn-pill">
+                <i class="bi bi-box-arrow-up-right"></i> View Manifest.json
+              </a>
+              <a href="./?pwa=sw" target="_blank" class="admin-btn-pill">
+                <i class="bi bi-file-earmark-code"></i> Inspect sw.js
+              </a>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- PWA Metrics & Readiness Summary Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Manifest Status</span>
+                    <span class="text-success"><i class="bi bi-file-earmark-check-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white">Active</div>
+                  <small class="text-secondary font-monospace"><?php echo htmlspecialchars($p_short); ?> (<?php echo htmlspecialchars($p_disp); ?>)</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Cache Version</span>
+                    <span class="text-info"><i class="bi bi-layers-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white font-monospace">php-music-<?php echo htmlspecialchars($p_sw_ver); ?></div>
+                  <small class="text-secondary">Service Worker Cache Bucket</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">HTTPS Context</span>
+                    <span class="<?php echo $is_https ? 'text-success' : 'text-warning'; ?>"><i class="bi bi-shield-check fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold <?php echo $is_https ? 'text-success' : 'text-warning'; ?>">
+                    <?php echo $is_https ? 'Secure (HTTPS)' : 'Insecure (HTTP)'; ?>
+                  </div>
+                  <small class="text-secondary"><?php echo $is_https ? 'PWA installable on devices' : 'HTTPS required for installation'; ?></small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Maskable Icons</span>
+                    <span class="text-danger"><i class="bi bi-app fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white">192px &amp; 512px</div>
+                  <small class="text-secondary">Vector SVG with maskable purpose</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=pwa&tab=manifest" class="update-tab-btn <?php echo $pwa_tab === 'manifest' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> Web App Manifest
+              </a>
+              <a href="?access=admin&page=pwa&tab=icons" class="update-tab-btn <?php echo $pwa_tab === 'icons' ? 'active' : ''; ?>">
+                <i class="bi bi-image-fill"></i> App Icons &amp; Open Graph
+              </a>
+              <a href="?access=admin&page=pwa&tab=screenshots" class="update-tab-btn <?php echo $pwa_tab === 'screenshots' ? 'active' : ''; ?>">
+                <i class="bi bi-images"></i> Install Screenshots
+              </a>
+              <a href="?access=admin&page=pwa&tab=cache" class="update-tab-btn <?php echo $pwa_tab === 'cache' ? 'active' : ''; ?>">
+                <i class="bi bi-cpu-fill"></i> Service Worker &amp; Cache
+              </a>
+              <a href="?access=admin&page=pwa&tab=install" class="update-tab-btn <?php echo $pwa_tab === 'install' ? 'active' : ''; ?>">
+                <i class="bi bi-laptop"></i> Installation Guide
+              </a>
+            </div>
+
+            <?php if ($pwa_tab === 'manifest'): ?>
+              <!-- Web App Manifest Configuration Form -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-window-fullscreen text-danger"></i> Manifest &amp; App Metadata
+                    </h5>
+                    <div class="small text-secondary mt-1">Defines how your streaming app appears on mobile devices when added to the home screen.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">W3C Compliant</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=pwa" class="d-flex flex-column gap-3">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_pwa_settings" value="1">
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">APP FULL NAME</label>
+                      <input type="text" name="pwa_name" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($p_name); ?>" placeholder="PHP Music" required>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">APP SHORT NAME (HOME SCREEN LABEL)</label>
+                      <input type="text" name="pwa_short_name" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($p_short); ?>" placeholder="Music" required>
+                    </div>
+                    <div class="col-12">
+                      <label class="form-label text-secondary small fw-bold mb-1">APP DESCRIPTION</label>
+                      <input type="text" name="pwa_description" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($p_desc); ?>" placeholder="A simple, fast music player with user accounts and uploads.">
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">THEME COLOR (STATUS BAR)</label>
+                      <div class="d-flex align-items-center gap-2">
+                        <input type="color" name="pwa_theme_color" value="<?php echo htmlspecialchars($p_theme); ?>" style="width: 44px; height: 40px; border: 1px solid var(--drive-border); border-radius: 10px; background: transparent; cursor: pointer;">
+                        <input type="text" class="admin-pill-input flex-grow-1 font-monospace" value="<?php echo htmlspecialchars($p_theme); ?>" oninput="this.previousElementSibling.value = this.value">
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">BACKGROUND COLOR (SPLASH SCREEN)</label>
+                      <div class="d-flex align-items-center gap-2">
+                        <input type="color" name="pwa_background_color" value="<?php echo htmlspecialchars($p_bg); ?>" style="width: 44px; height: 40px; border: 1px solid var(--drive-border); border-radius: 10px; background: transparent; cursor: pointer;">
+                        <input type="text" class="admin-pill-input flex-grow-1 font-monospace" value="<?php echo htmlspecialchars($p_bg); ?>" oninput="this.previousElementSibling.value = this.value">
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">DISPLAY MODE</label>
+                      <select name="pwa_display" class="admin-pill-select w-100">
+                        <option value="standalone" <?php echo $p_disp === 'standalone' ? 'selected' : ''; ?>>Standalone (App-like, hides browser chrome)</option>
+                        <option value="fullscreen" <?php echo $p_disp === 'fullscreen' ? 'selected' : ''; ?>>Fullscreen (Immersive)</option>
+                        <option value="minimal-ui" <?php echo $p_disp === 'minimal-ui' ? 'selected' : ''; ?>>Minimal UI</option>
+                        <option value="browser" <?php echo $p_disp === 'browser' ? 'selected' : ''; ?>>Browser (Standard tab)</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">DEFAULT ORIENTATION</label>
+                      <select name="pwa_orientation" class="admin-pill-select w-100">
+                        <option value="any" <?php echo $p_orient === 'any' ? 'selected' : ''; ?>>Any (Responsive rotate)</option>
+                        <option value="portrait" <?php echo $p_orient === 'portrait' ? 'selected' : ''; ?>>Portrait</option>
+                        <option value="landscape" <?php echo $p_orient === 'landscape' ? 'selected' : ''; ?>>Landscape</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 42px;">
+                    <i class="bi bi-save me-1"></i> Save Manifest Configuration
+                  </button>
+                </form>
+              </div>
+
+            <?php elseif ($pwa_tab === 'screenshots'): ?>
+              <?php
+                $shots_dir = __DIR__ . '/screenshots';
+                $screenshots = [];
+                if (is_dir($shots_dir)) {
+                  $files = array_diff(scandir($shots_dir), ['.', '..']);
+                  natcasesort($files);
+                  foreach ($files as $f) {
+                    $fp = $shots_dir . '/' . $f;
+                    if (is_file($fp) && preg_match('/\.(webp|png|jpg|jpeg)$/i', $f)) {
+                      $dim = @getimagesize($fp);
+                      $w = $dim[0] ?? 0;
+                      $h = $dim[1] ?? 0;
+                      $screenshots[] = [
+                        'name' => $f,
+                        'size' => filesize($fp),
+                        'width' => $w,
+                        'height' => $h,
+                        'form_factor' => ($w >= $h ? 'wide' : 'narrow'),
+                        'mtime' => filemtime($fp)
+                      ];
+                    }
+                  }
+                }
+              ?>
+
+              <!-- Upload New Screenshot Card (Offline Patching Style Dropzone) -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-images text-danger"></i> Add App Store &amp; Install Screenshot
+                    </h5>
+                    <div class="small text-secondary mt-1">Screenshots are included in <code class="text-info">?pwa=manifest</code> for rich installation UI on Chrome, Edge, and Play Store.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Auto &lt; 1 MB</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=pwa&tab=screenshots" enctype="multipart/form-data" id="form-pwa-screenshot">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="upload_pwa_screenshot" value="1">
+                  <input type="hidden" name="replace_target" id="screenshot-replace-target" value="">
+
+                  <!-- Drag and Drop Dropzone Container (Offline Patching Style) -->
+                  <div id="pwa-screenshot-dropzone" class="p-4 rounded-4 border border-secondary border-dashed text-center d-flex flex-column align-items-center justify-content-center w-100 mb-3" style="background: rgba(255, 255, 255, 0.02); min-height: 170px; cursor: pointer; transition: all 0.2s ease;">
+                    <input type="file" name="screenshot_file" id="pwa_screenshot_file_input" class="d-none" accept="image/png,image/jpeg,image/webp" required>
+                    <div style="width: 54px; height: 54px; border-radius: 14px; background: rgba(255, 0, 68, 0.12); display: flex; align-items: center; justify-content: center; margin-bottom: 10px;">
+                      <i class="bi bi-camera-fill text-danger fs-3"></i>
+                    </div>
+                    <strong class="text-white d-block mb-1" id="pwa-screenshot-main-label" style="font-size: 0.95rem;">Drag &amp; drop app screenshot here, or click to browse</strong>
+                    <span class="text-secondary small font-monospace" id="pwa-screenshot-sub-label">Upload landscape (16:9 / wide) or portrait (narrow) capture. Auto-compressed below 1MB.</span>
+                  </div>
+
+                  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <span class="small text-secondary font-monospace" id="pwa-screenshot-status-note">Target: New Screenshot</span>
+                    <div class="d-flex gap-2">
+                      <button type="button" class="admin-btn-pill d-none" id="btn-cancel-screenshot-replace" onclick="resetScreenshotForm();">Cancel Replace</button>
+                      <button type="submit" class="admin-btn-pill admin-btn-primary px-4" id="btn-submit-screenshot">
+                        <i class="bi bi-upload me-1"></i> Save Screenshot
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+
+              <!-- Existing Screenshots Grid -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-collection-play-fill text-info"></i> Configured Screenshots (<?php echo count($screenshots); ?>)
+                    </h5>
+                    <div class="small text-secondary mt-1">Saved in <code class="text-info">./screenshots/</code> folder.</div>
+                  </div>
+                </div>
+
+                <?php if (empty($screenshots)): ?>
+                  <div class="text-center py-5 text-secondary">
+                    <i class="bi bi-images fs-1 d-block mb-2 opacity-50"></i>
+                    No screenshots configured yet. Drag and drop your first desktop or mobile screenshot above.
+                  </div>
+                <?php else: ?>
+                  <div class="row g-3">
+                    <?php foreach ($screenshots as $shot): 
+                      $is_wide = $shot['form_factor'] === 'wide';
+                      $size_kb = round($shot['size'] / 1024, 1);
+                      $shot_url = '?action=get_pwa_screenshot&file=' . rawurlencode($shot['name']);
+                    ?>
+                      <div class="col-12 col-sm-6 col-lg-4 col-xl-3">
+                        <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 d-flex flex-column h-100">
+                          <div class="position-relative overflow-hidden rounded-3 mb-2 bg-dark d-flex align-items-center justify-content-center" style="aspect-ratio: <?php echo $is_wide ? '16/9' : '9/16'; ?>; max-height: 220px;">
+                            <img src="<?php echo $shot_url; ?>" alt="Screenshot" style="width: 100%; height: 100%; object-fit: contain;">
+                            <span class="position-absolute top-0 start-0 m-2 badge <?php echo $is_wide ? 'bg-primary' : 'bg-warning text-dark'; ?> font-monospace" style="font-size: 0.65rem;">
+                              <?php echo strtoupper($shot['form_factor']); ?>
+                            </span>
+                            <span class="position-absolute top-0 end-0 m-2 badge bg-success font-monospace" style="font-size: 0.65rem;">
+                              &lt; 1MB (<?php echo $size_kb; ?> KB)
+                            </span>
+                          </div>
+
+                          <div class="mt-auto">
+                            <span class="text-white fw-medium d-block text-truncate small mb-1" title="<?php echo htmlspecialchars($shot['name']); ?>"><?php echo htmlspecialchars($shot['name']); ?></span>
+                            <div class="d-flex justify-content-between align-items-center small text-secondary font-monospace mb-2" style="font-size: 0.72rem;">
+                              <span><?php echo $shot['width']; ?>&times;<?php echo $shot['height']; ?> px</span>
+                              <span><?php echo date('M j, Y', $shot['mtime']); ?></span>
+                            </div>
+
+                            <div class="d-flex gap-2">
+                              <button type="button" class="admin-btn-pill flex-grow-1 justify-content-center" style="height: 30px; font-size: 0.75rem; color: #38bdf8;" onclick="setupScreenshotReplace('<?php echo htmlspecialchars(addslashes($shot['name'])); ?>');">
+                                <i class="bi bi-arrow-repeat me-1"></i> Replace
+                              </button>
+                              <form method="POST" action="?access=admin&page=pwa&tab=screenshots" class="m-0" onsubmit="return confirm('Delete this screenshot?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="screenshot_name" value="<?php echo htmlspecialchars($shot['name']); ?>">
+                                <button type="submit" name="delete_pwa_screenshot" class="btn btn-sm btn-outline-danger border-0 p-1" style="width: 30px; height: 30px;" title="Delete Screenshot">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    <?php endforeach; ?>
+                  </div>
+                <?php endif; ?>
+              </div>
+
+              <script>
+                (function initPwaScreenshotDropzone() {
+                  const dropzone = document.getElementById('pwa-screenshot-dropzone');
+                  const fileInput = document.getElementById('pwa_screenshot_file_input');
+                  const mainLabel = document.getElementById('pwa-screenshot-main-label');
+
+                  if (dropzone && fileInput) {
+                    dropzone.onclick = () => fileInput.click();
+
+                    ['dragenter', 'dragover'].forEach(evt => {
+                      dropzone.addEventListener(evt, e => {
+                        e.preventDefault();
+                        dropzone.style.borderColor = '#ff0044';
+                        dropzone.style.backgroundColor = 'rgba(255, 0, 68, 0.08)';
+                      });
+                    });
+
+                    ['dragleave', 'drop'].forEach(evt => {
+                      dropzone.addEventListener(evt, e => {
+                        e.preventDefault();
+                        dropzone.style.borderColor = '';
+                        dropzone.style.backgroundColor = '';
+                      });
+                    });
+
+                    dropzone.addEventListener('drop', e => {
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        fileInput.files = e.dataTransfer.files;
+                        if (mainLabel) mainLabel.textContent = e.dataTransfer.files[0].name;
+                      }
+                    });
+
+                    fileInput.addEventListener('change', e => {
+                      if (e.target.files && e.target.files[0] && mainLabel) {
+                        mainLabel.textContent = e.target.files[0].name;
+                      }
+                    });
+                  }
+                })();
+
+                function setupScreenshotReplace(targetName) {
+                  document.getElementById('screenshot-replace-target').value = targetName;
+                  document.getElementById('pwa-screenshot-status-note').innerHTML = `<span class="text-warning fw-bold"><i class="bi bi-arrow-repeat me-1"></i> Replacing:</span> ${targetName}`;
+                  document.getElementById('btn-submit-screenshot').innerHTML = '<i class="bi bi-arrow-repeat me-1"></i> Replace Screenshot';
+                  document.getElementById('btn-cancel-screenshot-replace').classList.remove('d-none');
+                  document.getElementById('form-pwa-screenshot').scrollIntoView({ behavior: 'smooth' });
+                  document.getElementById('pwa_screenshot_file_input').click();
+                }
+
+                function resetScreenshotForm() {
+                  document.getElementById('screenshot-replace-target').value = '';
+                  document.getElementById('pwa-screenshot-status-note').textContent = 'Target: New Screenshot';
+                  document.getElementById('btn-submit-screenshot').innerHTML = '<i class="bi bi-upload me-1"></i> Save Screenshot';
+                  document.getElementById('btn-cancel-screenshot-replace').classList.add('d-none');
+                  document.getElementById('pwa-screenshot-main-label').textContent = 'Drag & drop app screenshot here, or click to browse';
+                  document.getElementById('pwa_screenshot_file_input').value = '';
+                }
+              </script>
+
+            <?php elseif ($pwa_tab === 'cache'): ?>
+              <!-- Service Worker & Cache Invalidation Panel -->
+              <div class="admin-card p-4 mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-cpu text-info"></i> Service Worker &amp; Offline Cache Invalidation
+                    </h5>
+                    <div class="small text-secondary mt-1">Force all active PWA clients to discard outdated static caches and pull fresh assets.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-info">sw.js</span>
+                </div>
+
+                <div class="p-3 mb-4 rounded-3 bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Active Cache Identifier:</strong>
+                    <code class="text-warning font-monospace fs-6">php-music-cache-<?php echo htmlspecialchars($p_sw_ver); ?></code>
+                  </div>
+                  <form method="POST" action="?access=admin&page=pwa" onsubmit="return confirm('Bump cache version? Client browsers will automatically flush old cached files on their next visit.');">
+                    <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                    <button type="submit" name="bump_sw_cache_version" class="admin-btn-pill admin-btn-primary">
+                      <i class="bi bi-arrow-repeat me-1"></i> Bump Version &amp; Invalidate Client Caches
+                    </button>
+                  </form>
+                </div>
+
+                <h6 class="text-secondary small fw-bold text-uppercase mb-2">Precached Core Assets</h6>
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 font-monospace small text-secondary">
+                  <div class="py-1 text-white">&bull; ./ (Root Application Shell)</div>
+                  <div class="py-1 text-white">&bull; Bootstrap 5.3.2 (CSS &amp; Bundle JS)</div>
+                  <div class="py-1 text-white">&bull; Bootstrap Icons 1.11.3 (Font &amp; WOFF2)</div>
+                  <div class="py-1 text-white">&bull; SortableJS (Playlist Drag &amp; Drop Engine)</div>
+                  <div class="py-1 text-white">&bull; Google Roboto Fonts (300, 400, 500, 700)</div>
+                </div>
+              </div>
+
+            <?php elseif ($pwa_tab === 'icons'): ?>
+              <?php
+                $has_custom_icon = file_exists(__DIR__ . '/icons/icon-512.png');
+                $has_custom_og = file_exists(__DIR__ . '/icons/og-image.jpg') || file_exists(__DIR__ . '/icons/og-image.png');
+              ?>
+              <div class="row g-4 mb-4">
+                <!-- App Icon Manager -->
+                <div class="col-12 col-xl-6">
+                  <div class="admin-card p-4 h-100 d-flex flex-column">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <div>
+                        <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                          <i class="bi bi-app text-danger"></i> PWA App Icon (Home Screen &amp; Taskbar)
+                        </h5>
+                        <div class="small text-secondary mt-1">Generates both 512&times;512 and 192&times;192 maskable PNGs into <code class="text-info">./icons/</code>.</div>
+                      </div>
+                      <span class="admin-badge <?php echo $has_custom_icon ? 'admin-badge-success' : 'admin-badge-secondary'; ?>">
+                        <?php echo $has_custom_icon ? 'Custom PNG' : 'Default SVG'; ?>
+                      </span>
+                    </div>
+
+                    <!-- Taller, Enhanced App Icon Showcase Preview -->
+                    <div class="p-4 mb-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex flex-column align-items-center justify-content-center text-center position-relative overflow-hidden" style="min-height: 220px;">
+                      <div class="position-relative mb-2">
+                        <img src="?action=get_app_icon&size=512&t=<?php echo time(); ?>" alt="App Icon Preview" style="width: 120px; height: 120px; border-radius: 26px; object-fit: cover; border: 2px solid rgba(255, 0, 68, 0.4); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8), 0 0 24px rgba(255, 0, 68, 0.2);" onerror="this.src='?action=get_app_icon'">
+                        <span class="position-absolute bottom-0 end-0 badge rounded-pill bg-danger border border-dark p-1" style="width: 14px; height: 14px;"></span>
+                      </div>
+                      <strong class="text-white fs-6 d-block mt-1"><?php echo htmlspecialchars($p_name); ?></strong>
+                      <span class="text-secondary small font-monospace d-block">Source: <?php echo $has_custom_icon ? './icons/icon-512.png' : 'Default Vector SVG'; ?></span>
+                      <a href="?action=get_app_icon&size=512" target="_blank" class="small text-info text-decoration-none mt-1"><i class="bi bi-box-arrow-up-right me-1"></i> Open Raw 512px Asset</a>
+                    </div>
+
+                    <form method="POST" action="?access=admin&page=pwa&tab=icons" enctype="multipart/form-data" class="d-flex flex-column gap-3 mt-auto" id="form-pwa-icon-upload">
+                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                      <!-- Custom Crop Coordinate Inputs (Empty = Auto Center Crop) -->
+                      <input type="hidden" name="crop_x" id="pwa_icon_crop_x" value="">
+                      <input type="hidden" name="crop_y" id="pwa_icon_crop_y" value="">
+                      <input type="hidden" name="crop_w" id="pwa_icon_crop_w" value="">
+                      <input type="hidden" name="crop_h" id="pwa_icon_crop_h" value="">
+
+                      <!-- Drag and Drop Dropzone Container (Offline Patching Style) -->
+                      <div id="pwa-icon-dropzone" class="p-4 rounded-4 border border-secondary border-dashed text-center d-flex flex-column align-items-center justify-content-center w-100" style="background: rgba(255, 255, 255, 0.02); min-height: 160px; cursor: pointer; transition: all 0.2s ease;">
+                        <input type="file" name="pwa_icon" id="pwa_icon_file_input" class="d-none" accept="image/png,image/jpeg,image/webp" required>
+                        <div id="pwa-icon-icon-wrap" style="width: 52px; height: 52px; border-radius: 14px; background: rgba(255, 0, 68, 0.12); display: flex; align-items: center; justify-content: center; margin-bottom: 10px;">
+                          <i class="bi bi-app text-danger fs-3"></i>
+                        </div>
+                        <strong class="text-white d-block mb-1" id="pwa-icon-main-label" style="font-size: 0.92rem;">Drag &amp; drop app icon here, or click to browse</strong>
+                        <span class="text-secondary small font-monospace" id="pwa-icon-sub-label">PNG, JPEG, or WebP. Auto-crops into center unless customized.</span>
+                      </div>
+
+                      <!-- Live Crop Mode & Action Bar -->
+                      <div id="pwa_icon_crop_preview_bar" class="d-none align-items-center justify-content-between p-2 rounded-3 bg-black border border-secondary border-opacity-25">
+                        <div class="d-flex align-items-center gap-2">
+                          <canvas id="pwa_icon_thumb_canvas" width="40" height="40" class="rounded border border-secondary" style="width:40px; height:40px; object-fit:cover;"></canvas>
+                          <div style="font-size:0.75rem;">
+                            <span id="pwa_icon_crop_status_text" class="text-success fw-bold d-block">Center Cropped (Auto)</span>
+                            <span id="pwa_icon_crop_dim_text" class="text-secondary font-monospace">Automatic 1:1</span>
+                          </div>
+                        </div>
+                        <button type="button" class="admin-btn-pill" id="btn-open-icon-cropper" style="height:30px; font-size:0.75rem; color:#38bdf8; border-color:color-mix(in srgb, #06b6d4 30%, transparent);">
+                          <i class="bi bi-crop me-1"></i> Custom Crop
+                        </button>
+                      </div>
+
+                      <div class="d-flex gap-2">
+                        <button type="submit" name="upload_pwa_icon" class="admin-btn-pill admin-btn-primary flex-grow-1 justify-content-center">
+                          <i class="bi bi-upload me-1"></i> Upload &amp; Generate Icons
+                        </button>
+                        <?php if ($has_custom_icon): ?>
+                          <button type="submit" name="reset_pwa_icons" class="admin-btn-pill text-danger" onclick="return confirm('Revert to default vector SVG icon?');">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i> Reset
+                          </button>
+                        <?php endif; ?>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Open Graph Social Share Card -->
+                <div class="col-12 col-xl-6">
+                  <div class="admin-card p-4 h-100 d-flex flex-column">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                      <div>
+                        <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                          <i class="bi bi-share-fill text-info"></i> Open Graph &amp; Social Preview (1200&times;630)
+                        </h5>
+                        <div class="small text-secondary mt-1">Preview banner for Discord, Twitter/X, WhatsApp, and Facebook link shares.</div>
+                      </div>
+                      <span class="admin-badge <?php echo $has_custom_og ? 'admin-badge-success' : 'admin-badge-secondary'; ?>">
+                        <?php echo $has_custom_og ? 'Custom Card' : 'Dynamic SVG'; ?>
+                      </span>
+                    </div>
+
+                    <!-- Taller Open Graph Social Banner Preview (1200x630 Display) -->
+                    <div class="p-3 mb-3 rounded-3 bg-black border border-secondary border-opacity-25 text-center position-relative overflow-hidden d-flex flex-column align-items-center justify-content-center" style="min-height: 220px;">
+                      <img src="?action=og_image&t=<?php echo time(); ?>" alt="Open Graph Preview" style="width: 100%; max-height: 200px; object-fit: cover; border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75);">
+                    </div>
+
+                    <form method="POST" action="?access=admin&page=pwa&tab=icons" enctype="multipart/form-data" class="d-flex flex-column gap-3 mt-auto">
+                      <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+
+                      <!-- Drag and Drop Dropzone Container (Offline Patching Style) -->
+                      <div id="pwa-og-dropzone" class="p-4 rounded-4 border border-secondary border-dashed text-center d-flex flex-column align-items-center justify-content-center w-100" style="background: rgba(255, 255, 255, 0.02); min-height: 160px; cursor: pointer; transition: all 0.2s ease;">
+                        <input type="file" name="og_image_file" id="pwa_og_file_input" class="d-none" accept="image/jpeg,image/png,image/webp" required>
+                        <div id="pwa-og-icon-wrap" style="width: 52px; height: 52px; border-radius: 14px; background: rgba(56, 189, 248, 0.12); display: flex; align-items: center; justify-content: center; margin-bottom: 10px;">
+                          <i class="bi bi-share-fill text-info fs-3"></i>
+                        </div>
+                        <strong class="text-white d-block mb-1" id="pwa-og-main-label" style="font-size: 0.92rem;">Drag &amp; drop social banner here, or click to browse</strong>
+                        <span class="text-secondary small font-monospace" id="pwa-og-sub-label">1200&times;630 JPEG or PNG recommended for social sharing previews.</span>
+                      </div>
+
+                      <div class="d-flex gap-2">
+                        <button type="submit" name="upload_pwa_og_image" class="admin-btn-pill admin-btn-primary flex-grow-1 justify-content-center">
+                          <i class="bi bi-upload me-1"></i> Upload Social Banner
+                        </button>
+                        <?php if ($has_custom_og): ?>
+                          <button type="submit" name="reset_pwa_og_image" class="admin-btn-pill text-danger" onclick="return confirm('Revert to dynamic SVG social image generator?');">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i> Reset
+                          </button>
+                        <?php endif; ?>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              </div>
+
+            <?php elseif ($pwa_tab === 'install'): ?>
+              <!-- Installation & Testing Guide: Desktop & Mobile -->
+              <div class="admin-card p-4 mb-4">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-3">
+                  <i class="bi bi-download text-warning"></i> Multi-Platform PWA Installation
+                </h5>
+
+                <div class="row g-3">
+                  <!-- Desktop Platform (Windows / macOS / Linux) -->
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column">
+                      <h6 class="text-white fw-bold d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-display text-info"></i> Desktop (Windows / Mac / Linux)
+                      </h6>
+                      <ol class="text-secondary small ps-3 mb-0" style="line-height: 1.8;">
+                        <li>Open <code class="text-white"><?php echo htmlspecialchars($app_url); ?></code> in <strong>Chrome</strong> or <strong>Edge</strong>.</li>
+                        <li>Look for the <strong>Install App icon (<i class="bi bi-laptop"></i>)</strong> in the right end of the address bar.</li>
+                        <li>Alternatively, click <strong>Menu (<i class="bi bi-three-dots-vertical"></i>)</strong> &rarr; <strong>Cast, save &amp; share</strong> &rarr; <strong>Install <?php echo htmlspecialchars($p_name); ?></strong>.</li>
+                        <li>Runs in a standalone window, pins to taskbar/dock, and uses the custom <code class="text-white">./icons/</code> artwork.</li>
+                      </ol>
+                    </div>
+                  </div>
+
+                  <!-- Android Mobile Platform -->
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column">
+                      <h6 class="text-white fw-bold d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-android2 text-success"></i> Android (Chrome / Brave / Edge)
+                      </h6>
+                      <ol class="text-secondary small ps-3 mb-0" style="line-height: 1.8;">
+                        <li>Open <code class="text-white"><?php echo htmlspecialchars($app_url); ?></code> on mobile.</li>
+                        <li>Tap the three-dots menu (<i class="bi bi-three-dots-vertical"></i>).</li>
+                        <li>Select <strong>Add to Home screen</strong> or <strong>Install app</strong>.</li>
+                        <li>Installs with native-like splash screen, maskable app icon, and full-screen playback.</li>
+                      </ol>
+                    </div>
+                  </div>
+
+                  <!-- iOS Apple Mobile Platform -->
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column">
+                      <h6 class="text-white fw-bold d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-apple text-white"></i> iOS (Safari)
+                      </h6>
+                      <ol class="text-secondary small ps-3 mb-0" style="line-height: 1.8;">
+                        <li>Open <code class="text-white"><?php echo htmlspecialchars($app_url); ?></code> in <strong>Safari</strong>.</li>
+                        <li>Tap the <strong>Share button (<i class="bi bi-box-arrow-up"></i>)</strong> on bottom toolbar.</li>
+                        <li>Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+                        <li>Confirm the short title (<code class="text-white"><?php echo htmlspecialchars($p_short); ?></code>) and tap <strong>Add</strong>.</li>
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Custom 1:1 Icon Crop Modal -->
+          <div class="modal fade" id="pwaIconCropModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.85);">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2">
+                    <i class="bi bi-crop text-danger"></i> Custom 1:1 Icon Crop
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-3 text-center">
+                  <p class="text-secondary small mb-2">Drag the square to position it. Drag corners to resize.</p>
+                  <div style="position: relative; display: inline-block; max-width: 100%; max-height: 52vh; overflow: hidden; border-radius: 12px; background: #000; box-shadow: 0 8px 24px rgba(0,0,0,0.8);">
+                    <canvas id="pwa_icon_crop_canvas" style="display: block; max-width: 100%; max-height: 52vh; cursor: crosshair; user-select: none;"></canvas>
+                  </div>
+                  <div class="d-flex justify-content-between align-items-center mt-3 pt-2 border-top border-secondary border-opacity-25">
+                    <button type="button" class="admin-btn-pill" id="btn-reset-icon-crop-center">
+                      <i class="bi bi-bullseye me-1"></i> Center Crop
+                    </button>
+                    <button type="button" class="admin-btn-pill admin-btn-primary px-3" id="btn-apply-custom-icon-crop">
+                      <i class="bi bi-check2 me-1"></i> Apply Custom Crop
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            (function initPwaIconCropper() {
+              const fileInput = document.getElementById('pwa_icon_file_input');
+              const previewBar = document.getElementById('pwa_icon_crop_preview_bar');
+              const thumbCanvas = document.getElementById('pwa_icon_thumb_canvas');
+              const statusText = document.getElementById('pwa_icon_crop_status_text');
+              const dimText = document.getElementById('pwa_icon_crop_dim_text');
+              const btnOpenCropper = document.getElementById('btn-open-icon-cropper');
+
+              const cropCanvas = document.getElementById('pwa_icon_crop_canvas');
+              const cropXInput = document.getElementById('pwa_icon_crop_x');
+              const cropYInput = document.getElementById('pwa_icon_crop_y');
+              const cropWInput = document.getElementById('pwa_icon_crop_w');
+              const cropHInput = document.getElementById('pwa_icon_crop_h');
+
+              const btnApplyCrop = document.getElementById('btn-apply-custom-icon-crop');
+              const btnResetCenter = document.getElementById('btn-reset-icon-crop-center');
+
+              if (!fileInput || !cropCanvas) return;
+
+              let origImg = new Image();
+              let isCustomCropped = false;
+
+              // Canvas Display & Crop Coordinates
+              let cropBox = { x: 0, y: 0, size: 100 };
+              let activeHandle = null;
+              let dragStart = { x: 0, y: 0 };
+              let initialBox = { x: 0, y: 0, size: 100 };
+              let scaleRatio = 1; // Display canvas vs original image size
+
+              const iconDropzone = document.getElementById('pwa-icon-dropzone');
+              const iconMainLabel = document.getElementById('pwa-icon-main-label');
+
+              if (iconDropzone) {
+                iconDropzone.onclick = () => fileInput.click();
+
+                ['dragenter', 'dragover'].forEach(evt => {
+                  iconDropzone.addEventListener(evt, e => {
+                    e.preventDefault();
+                    iconDropzone.style.borderColor = '#ff0044';
+                    iconDropzone.style.backgroundColor = 'rgba(255, 0, 68, 0.08)';
+                  });
+                });
+
+                ['dragleave', 'drop'].forEach(evt => {
+                  iconDropzone.addEventListener(evt, e => {
+                    e.preventDefault();
+                    iconDropzone.style.borderColor = '';
+                    iconDropzone.style.backgroundColor = '';
+                  });
+                });
+
+                iconDropzone.addEventListener('drop', e => {
+                  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                    fileInput.files = e.dataTransfer.files;
+                    handleFileChosen(e.dataTransfer.files[0]);
+                  }
+                });
+              }
+
+              fileInput.addEventListener('change', function(e) {
+                if (e.target.files && e.target.files[0]) {
+                  handleFileChosen(e.target.files[0]);
+                }
+              });
+
+              function handleFileChosen(file) {
+                if (iconMainLabel) iconMainLabel.textContent = file.name;
+                const reader = new FileReader();
+                reader.onload = function(evt) {
+                  origImg = new Image();
+                  origImg.onload = function() {
+                    isCustomCropped = false;
+                    resetCenterCropCoords();
+                    updateThumbPreview();
+                    previewBar.classList.remove('d-none');
+                    previewBar.classList.add('d-flex');
+                  };
+                  origImg.src = evt.target.result;
+                };
+                reader.readAsDataURL(file);
+              }
+
+              // Open Graph Banner Dropzone (Same Offline Patching Style)
+              const ogDropzone = document.getElementById('pwa-og-dropzone');
+              const ogInput = document.getElementById('pwa_og_file_input');
+              const ogMainLabel = document.getElementById('pwa-og-main-label');
+
+              if (ogDropzone && ogInput) {
+                ogDropzone.onclick = () => ogInput.click();
+
+                ['dragenter', 'dragover'].forEach(evt => {
+                  ogDropzone.addEventListener(evt, e => {
+                    e.preventDefault();
+                    ogDropzone.style.borderColor = '#38bdf8';
+                    ogDropzone.style.backgroundColor = 'rgba(56, 189, 248, 0.08)';
+                  });
+                });
+
+                ['dragleave', 'drop'].forEach(evt => {
+                  ogDropzone.addEventListener(evt, e => {
+                    e.preventDefault();
+                    ogDropzone.style.borderColor = '';
+                    ogDropzone.style.backgroundColor = '';
+                  });
+                });
+
+                ogDropzone.addEventListener('drop', e => {
+                  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                    ogInput.files = e.dataTransfer.files;
+                    if (ogMainLabel) ogMainLabel.textContent = e.dataTransfer.files[0].name;
+                  }
+                });
+
+                ogInput.addEventListener('change', e => {
+                  if (e.target.files && e.target.files[0] && ogMainLabel) {
+                    ogMainLabel.textContent = e.target.files[0].name;
+                  }
+                });
+              }
+
+              btnOpenCropper?.addEventListener('click', function() {
+                if (!origImg.src) return;
+                const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('pwaIconCropModal'));
+                modal.show();
+                setTimeout(initCropCanvas, 200);
+              });
+
+              function resetCenterCropCoords() {
+                cropXInput.value = '';
+                cropYInput.value = '';
+                cropWInput.value = '';
+                cropHInput.value = '';
+                statusText.textContent = 'Center Cropped (Auto)';
+                statusText.className = 'text-success fw-bold d-block';
+                const s = Math.min(origImg.naturalWidth, origImg.naturalHeight);
+                dimText.textContent = `${s}×${s} px (Centered)`;
+              }
+
+              function updateThumbPreview() {
+                if (!thumbCanvas || !origImg.src) return;
+                const ctx = thumbCanvas.getContext('2d');
+                ctx.clearRect(0, 0, 40, 40);
+
+                let sx, sy, sDim;
+                if (isCustomCropped && parseInt(cropWInput.value) > 0) {
+                  sx = parseInt(cropXInput.value);
+                  sy = parseInt(cropYInput.value);
+                  sDim = parseInt(cropWInput.value);
+                } else {
+                  sDim = Math.min(origImg.naturalWidth, origImg.naturalHeight);
+                  sx = (origImg.naturalWidth - sDim) / 2;
+                  sy = (origImg.naturalHeight - sDim) / 2;
+                }
+
+                ctx.drawImage(origImg, sx, sy, sDim, sDim, 0, 0, 40, 40);
+              }
+
+              function initCropCanvas() {
+                const maxW = Math.min(480, window.innerWidth - 60);
+                const maxH = Math.min(window.innerHeight * 0.52, 420);
+
+                let renderW = origImg.naturalWidth;
+                let renderH = origImg.naturalHeight;
+                const ratio = Math.min(maxW / renderW, maxH / renderH);
+
+                renderW = Math.round(renderW * ratio);
+                renderH = Math.round(renderH * ratio);
+
+                cropCanvas.width = renderW;
+                cropCanvas.height = renderH;
+                scaleRatio = origImg.naturalWidth / renderW;
+
+                if (isCustomCropped && parseInt(cropWInput.value) > 0) {
+                  cropBox.x = Math.round(parseInt(cropXInput.value) / scaleRatio);
+                  cropBox.y = Math.round(parseInt(cropYInput.value) / scaleRatio);
+                  cropBox.size = Math.round(parseInt(cropWInput.value) / scaleRatio);
+                } else {
+                  cropBox.size = Math.round(Math.min(renderW, renderH) * 0.8);
+                  cropBox.x = Math.round((renderW - cropBox.size) / 2);
+                  cropBox.y = Math.round((renderH - cropBox.size) / 2);
+                }
+
+                drawCropOverlay();
+              }
+
+              function drawCropOverlay() {
+                const ctx = cropCanvas.getContext('2d');
+                ctx.clearRect(0, 0, cropCanvas.width, cropCanvas.height);
+                ctx.drawImage(origImg, 0, 0, cropCanvas.width, cropCanvas.height);
+
+                // Darkened background outside crop box
+                ctx.save();
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+                ctx.fillRect(0, 0, cropCanvas.width, cropBox.y);
+                ctx.fillRect(0, cropBox.y + cropBox.size, cropCanvas.width, cropCanvas.height - (cropBox.y + cropBox.size));
+                ctx.fillRect(0, cropBox.y, cropBox.x, cropBox.size);
+                ctx.fillRect(cropBox.x + cropBox.size, cropBox.y, cropCanvas.width - (cropBox.x + cropBox.size), cropBox.size);
+
+                // 1:1 Border
+                ctx.strokeStyle = '#ff0044';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(cropBox.x, cropBox.y, cropBox.size, cropBox.size);
+
+                // Corner Handles
+                const hs = 12;
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#ff0044';
+                ctx.lineWidth = 2;
+
+                const corners = [
+                  [cropBox.x, cropBox.y],
+                  [cropBox.x + cropBox.size, cropBox.y],
+                  [cropBox.x, cropBox.y + cropBox.size],
+                  [cropBox.x + cropBox.size, cropBox.y + cropBox.size]
+                ];
+
+                corners.forEach(([cx, cy]) => {
+                  ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+                  ctx.strokeRect(cx - hs / 2, cy - hs / 2, hs, hs);
+                });
+                ctx.restore();
+              }
+
+              function getCanvasCoords(e) {
+                const rect = cropCanvas.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                return {
+                  x: Math.max(0, Math.min(cropCanvas.width, clientX - rect.left)),
+                  y: Math.max(0, Math.min(cropCanvas.height, clientY - rect.top))
+                };
+              }
+
+              function detectHitHandle(pt) {
+                const hs = 18;
+                const near = (hx, hy) => Math.hypot(pt.x - hx, pt.y - hy) < hs;
+
+                if (near(cropBox.x, cropBox.y)) return 'nw';
+                if (near(cropBox.x + cropBox.size, cropBox.y)) return 'ne';
+                if (near(cropBox.x, cropBox.y + cropBox.size)) return 'sw';
+                if (near(cropBox.x + cropBox.size, cropBox.y + cropBox.size)) return 'se';
+
+                if (pt.x >= cropBox.x && pt.x <= cropBox.x + cropBox.size && pt.y >= cropBox.y && pt.y <= cropBox.y + cropBox.size) {
+                  return 'move';
+                }
+                return null;
+              }
+
+              function handleStart(e) {
+                const pt = getCanvasCoords(e);
+                activeHandle = detectHitHandle(pt);
+                if (activeHandle) {
+                  dragStart = pt;
+                  initialBox = { ...cropBox };
+                  if (e.cancelable) e.preventDefault();
+                }
+              }
+
+              function handleMove(e) {
+                const pt = getCanvasCoords(e);
+                if (!activeHandle) {
+                  const h = detectHitHandle(pt);
+                  cropCanvas.style.cursor = h === 'move' ? 'move' : (h ? 'nwse-resize' : 'crosshair');
+                  return;
+                }
+
+                if (e.cancelable) e.preventDefault();
+                const dx = pt.x - dragStart.x;
+                const dy = pt.y - dragStart.y;
+
+                if (activeHandle === 'move') {
+                  cropBox.x = Math.max(0, Math.min(cropCanvas.width - cropBox.size, initialBox.x + dx));
+                  cropBox.y = Math.max(0, Math.min(cropCanvas.height - cropBox.size, initialBox.y + dy));
+                } else if (activeHandle === 'se') {
+                  const delta = Math.min(dx, dy);
+                  const newSize = Math.max(40, Math.min(cropCanvas.width - initialBox.x, cropCanvas.height - initialBox.y, initialBox.size + delta));
+                  cropBox.size = newSize;
+                } else if (activeHandle === 'nw') {
+                  const delta = Math.min(dx, dy);
+                  const newSize = Math.max(40, initialBox.size - delta);
+                  const newX = initialBox.x + (initialBox.size - newSize);
+                  const newY = initialBox.y + (initialBox.size - newSize);
+                  if (newX >= 0 && newY >= 0) {
+                    cropBox.x = newX;
+                    cropBox.y = newY;
+                    cropBox.size = newSize;
+                  }
+                } else if (activeHandle === 'ne') {
+                  const delta = Math.min(dx, -dy);
+                  const newSize = Math.max(40, Math.min(cropCanvas.width - initialBox.x, initialBox.size + delta));
+                  const newY = initialBox.y + (initialBox.size - newSize);
+                  if (newY >= 0 && initialBox.x + newSize <= cropCanvas.width) {
+                    cropBox.y = newY;
+                    cropBox.size = newSize;
+                  }
+                } else if (activeHandle === 'sw') {
+                  const delta = Math.min(-dx, dy);
+                  const newSize = Math.max(40, Math.min(cropCanvas.height - initialBox.y, initialBox.size + delta));
+                  const newX = initialBox.x + (initialBox.size - newSize);
+                  if (newX >= 0 && initialBox.y + newSize <= cropCanvas.height) {
+                    cropBox.x = newX;
+                    cropBox.size = newSize;
+                  }
+                }
+                drawCropOverlay();
+              }
+
+              function handleEnd() {
+                activeHandle = null;
+              }
+
+              cropCanvas.addEventListener('mousedown', handleStart);
+              window.addEventListener('mousemove', handleMove);
+              window.addEventListener('mouseup', handleEnd);
+
+              cropCanvas.addEventListener('touchstart', handleStart, { passive: false });
+              window.addEventListener('touchmove', handleMove, { passive: false });
+              window.addEventListener('touchend', handleEnd);
+
+              btnApplyCrop?.addEventListener('click', function() {
+                const origX = Math.round(cropBox.x * scaleRatio);
+                const origY = Math.round(cropBox.y * scaleRatio);
+                const origSize = Math.round(cropBox.size * scaleRatio);
+
+                cropXInput.value = origX;
+                cropYInput.value = origY;
+                cropWInput.value = origSize;
+                cropHInput.value = origSize;
+
+                isCustomCropped = true;
+                statusText.textContent = 'Custom Cropped (Active)';
+                statusText.className = 'text-info fw-bold d-block';
+                dimText.textContent = `${origSize}×${origSize} px`;
+
+                updateThumbPreview();
+                bootstrap.Modal.getInstance(document.getElementById('pwaIconCropModal')).hide();
+              });
+
+              btnResetCenter?.addEventListener('click', function() {
+                isCustomCropped = false;
+                resetCenterCropCoords();
+                initCropCanvas();
+                updateThumbPreview();
+                bootstrap.Modal.getInstance(document.getElementById('pwaIconCropModal')).hide();
+              });
+            })();
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'analytics'): ?>
           <?php
             $db = get_db();
@@ -37059,7 +38935,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $analytics_period = $_GET['period'] ?? '30';
             $analytics_filter_bot = isset($_GET['show_bots']) && $_GET['show_bots'] === '1';
             $analytics_search = trim($_GET['search'] ?? '');
+            $analytics_country = strtoupper(trim($_GET['country'] ?? ''));
             $analytics_page = max(1, (int)($_GET['p'] ?? 1));
+
+            // Fetch distinct countries list for dropdown
+            $all_logged_countries = [];
+            try {
+              $stmt_all_c = $db->query("SELECT DISTINCT country FROM site_analytics WHERE country IS NOT NULL AND country != '' AND country != 'XX' ORDER BY country ASC");
+              if ($stmt_all_c) $all_logged_countries = $stmt_all_c->fetchAll(PDO::FETCH_COLUMN);
+            } catch (\Throwable $e) {}
             $analytics_limit = 25;
             $analytics_offset = ($analytics_page - 1) * $analytics_limit;
 
@@ -37317,9 +39201,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $log_where = "WHERE {$date_where} AND {$bot_where}";
             $log_params = [];
 
+            if ($analytics_country !== '') {
+              $log_where .= " AND s.country = ?";
+              $log_params[] = $analytics_country;
+            }
+
             if ($analytics_search !== '') {
-              $log_where .= " AND (s.ip_address LIKE ? OR s.ip_hash LIKE ? OR s.browser LIKE ? OR s.os LIKE ? OR s.request_uri LIKE ?)";
-              $log_params = ["%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%"];
+              $log_where .= " AND (s.ip_address LIKE ? OR s.ip_hash LIKE ? OR s.browser LIKE ? OR s.os LIKE ? OR s.request_uri LIKE ? OR s.country LIKE ?)";
+              array_push($log_params, "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%", "%$analytics_search%");
             }
 
             $total_log_records = 0;
@@ -37362,6 +39251,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <option value="90" <?php echo $analytics_period === '90' ? 'selected' : ''; ?>>Last 90 Days</option>
                   <option value="365" <?php echo $analytics_period === '365' ? 'selected' : ''; ?>>Past 1 Year</option>
                   <option value="all" <?php echo $analytics_period === 'all' ? 'selected' : ''; ?>>All-Time History</option>
+                </select>
+                <select name="country" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="">All Countries</option>
+                  <?php foreach ($all_logged_countries as $c_code): ?>
+                    <option value="<?php echo htmlspecialchars($c_code); ?>" <?php echo $analytics_country === $c_code ? 'selected' : ''; ?>>
+                      <?php echo format_country_badge($c_code); ?> (<?php echo htmlspecialchars($c_code); ?>)
+                    </option>
+                  <?php endforeach; ?>
                 </select>
                 <div class="form-check form-switch m-0 ms-1 d-none d-sm-flex align-items-center gap-1">
                   <input class="form-check-input bg-dark border-secondary" type="checkbox" name="show_bots" value="1" id="show_bots_cb" <?php echo $analytics_filter_bot ? 'checked' : ''; ?> onchange="this.form.submit()">
@@ -37573,10 +39470,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="col-12 text-center text-secondary py-3 small">No geographic data logged for this period.</div>
                 <?php else: foreach ($stmt_countries as $c): ?>
                   <div class="col-12 col-sm-6 col-xl-3">
-                    <div class="p-2 px-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                    <a href="?access=admin&page=analytics&period=<?php echo urlencode($analytics_period); ?>&country=<?php echo urlencode($c['country_code']); ?>" class="p-2 px-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex justify-content-between align-items-center text-decoration-none transition-all hover-border-danger" title="Filter analytics by this country">
                       <span class="text-white small fw-bold text-truncate"><?php echo format_country_badge($c['country_code']); ?></span>
                       <span class="admin-badge admin-badge-info font-monospace"><?php echo number_format($c['count']); ?> hits</span>
-                    </div>
+                    </a>
                   </div>
                 <?php endforeach; endif; ?>
               </div>
@@ -42667,7 +44564,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.2';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.3';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -65515,6 +67412,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 </div>
                 <div class="col-12 col-md-6">
                   <div class="form-check form-switch">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="pwa" id="perm-pwa">
+                    <label class="form-check-label text-white fw-medium" for="perm-pwa">Progressive Web App</label>
+                  </div>
+                </div>
+                <div class="col-12 col-md-6">
+                  <div class="form-check form-switch">
                     <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="users" id="perm-users">
                     <label class="form-check-label text-white fw-medium" for="perm-users">User Management</label>
                   </div>
@@ -65895,14 +67798,41 @@ try {
         $bg_color = '#ff0000';
         $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="'.$bg_color.'"/><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-family="Arial, sans-serif" font-size="100" font-weight="bold" fill="#ffffff">' . htmlspecialchars($initial) . '</text></svg>';
         
-        $stmt = $db_setup->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, status, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'yes', 1, 'super_admin', ?, 'image/svg+xml')");
+        // Custom database name configuration (defaults to music.db if empty)
+        $custom_db = trim($data['db_name'] ?? '');
+        $db_filename = 'music.db';
+        if (!empty($custom_db)) {
+          $clean_db = preg_replace('/[^a-zA-Z0-9_\-\.]/', '', $custom_db);
+          if (!empty($clean_db)) {
+            if (!preg_match('/\.(db|sqlite|sqlite3)$/i', $clean_db)) {
+              $clean_db .= '.db';
+            }
+            $db_filename = $clean_db;
+          }
+        }
+        @file_put_contents(__DIR__ . '/.db_config.ini', $db_filename);
+
+        $target_db_file = __DIR__ . '/' . $db_filename;
+        $db_target = ($target_db_file === DB_FILE) ? $db_setup : new PDO('sqlite:' . $target_db_file, null, null, [PDO::ATTR_TIMEOUT => 15]);
+        $db_target->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        if (function_exists('init_db')) { init_db($db_target); }
+
+        $stmt = $db_target->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, status, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'yes', 1, 'super_admin', ?, 'image/svg+xml')");
         $stmt->execute([$email, $artist, $hash, $svg]);
+
+        if ($db_filename !== 'music.db' && file_exists(__DIR__ . '/music.db')) {
+          $old_cnt = (int)$db_setup->query("SELECT COUNT(*) FROM users")->fetchColumn();
+          if ($old_cnt === 0) {
+            $db_setup = null;
+            @unlink(__DIR__ . '/music.db');
+          }
+        }
         
-        $_SESSION['user_id'] = $db_setup->lastInsertId();
+        $_SESSION['user_id'] = $db_target->lastInsertId();
         $_SESSION['user_artist'] = $artist;
         
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['status' => 'success', 'message' => 'Super Admin Account Created!']);
+        echo json_encode(['status' => 'success', 'message' => "Super Admin Account Created on {$db_filename}!"]);
         exit;
       } else {
         header('Content-Type: application/json; charset=utf-8');
@@ -65944,9 +67874,17 @@ try {
                 <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">ADMIN EMAIL</label>
                 <input type="email" id="setup-email" class="form-control" required placeholder="admin@example.com">
               </div>
-              <div class="mb-4">
+              <div class="mb-3">
                 <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SECURE PASSWORD</label>
                 <input type="password" id="setup-password" class="form-control" required minlength="6" placeholder="Minimum 6 characters">
+              </div>
+              <div class="mb-4">
+                <label class="form-label text-secondary small fw-bold d-flex justify-content-between align-items-center" style="letter-spacing: 1px;">
+                  <span>DATABASE FILENAME</span>
+                  <span class="text-secondary fw-normal opacity-75" style="font-size: 0.72rem;">OPTIONAL</span>
+                </label>
+                <input type="text" id="setup-dbname" class="form-control font-monospace" placeholder="music.db (default)">
+                <small class="text-secondary d-block mt-1" style="font-size: 0.72rem;">Leave empty to default to <code class="text-info">music.db</code>.</small>
               </div>
               <button type="submit" id="setup-btn" class="btn btn-danger w-100 fw-bold py-3 rounded-pill shadow-lg">Initialize Server</button>
               <div class="text-center mt-3">
@@ -65970,7 +67908,8 @@ try {
                   body: JSON.stringify({
                     artist: document.getElementById('setup-artist').value,
                     email: document.getElementById('setup-email').value,
-                    password: document.getElementById('setup-password').value
+                    password: document.getElementById('setup-password').value,
+                    db_name: document.getElementById('setup-dbname')?.value.trim() || ''
                   })
                 });
                 const data = await res.json();
@@ -68057,11 +69996,23 @@ if (isset($_GET['action'])) {
       exit;
 
     case 'get_app_icon':
+      $size = intval($_GET['size'] ?? 192);
+      $target_png = __DIR__ . '/icons/icon-' . ($size >= 512 ? '512' : '192') . '.png';
+      if (!file_exists($target_png)) {
+        $target_png = __DIR__ . '/icons/icon-512.png';
+      }
+
+      if (file_exists($target_png)) {
+        header('Content-Type: image/png');
+        header('Cache-Control: public, max-age=86400');
+        readfile($target_png);
+        exit;
+      }
+
       header('Content-Type: image/svg+xml');
       header('Cache-Control: public, max-age=31536000, immutable');
       header('Pragma: cache');
       header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 31536000) . ' GMT');
-      $size = intval($_GET['size'] ?? 192);
       echo '<?xml version="1.0" encoding="utf-8"?><svg width="'.$size.'px" height="'.$size.'px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#0a0a0a"/><path d="M0 24L24 0V24H0Z" fill="#141414" clip-path="inset(0px round 6px)"/><path d="M4 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M16 10V13" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M7 7L7 16" stroke="#ff0044" stroke-width="1.7" stroke-linecap="round"/><path d="M13 7L13 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M19 7L19 16" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/><path d="M10 4L10 19" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round"/></svg>';
       exit;
 
