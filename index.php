@@ -1602,7 +1602,7 @@ if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
 
 if (!defined('MUSIC_DIR')) define('MUSIC_DIR', __DIR__);
 if (!defined('DB_FILE')) define('DB_FILE', __DIR__ . '/music.db');
-define('APP_VERSION', '12.1');
+define('APP_VERSION', '12.2');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -18853,6 +18853,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $where[] = "a.rating = 'all'";
       }
 
+      if (!empty($_GET['hide_ai']) && $_GET['hide_ai'] == '1') {
+        $where[] = "a.is_ai = 0";
+      }
+
+      $tag = trim($_GET['tag'] ?? '');
+      $character = trim($_GET['character'] ?? '');
+      $parody = trim($_GET['parody'] ?? '');
+      $sourceUrl = trim($_GET['source_url'] ?? '');
+
+      if ($tag !== '') {
+        $where[] = "EXISTS (SELECT 1 FROM tags t WHERE t.artwork_id = a.id AND t.tag_name = ?)";
+        $params[] = $tag;
+      }
+      if ($character !== '') {
+        $where[] = "a.characters LIKE ?";
+        $params[] = '%' . $character . '%';
+      }
+      if ($parody !== '') {
+        $where[] = "(a.parodies LIKE ? OR a.series_name LIKE ?)";
+        $params[] = '%' . $parody . '%';
+        $params[] = '%' . $parody . '%';
+      }
+      if ($sourceUrl !== '') {
+        $where[] = "a.source_url LIKE ?";
+        $params[] = '%' . $sourceUrl . '%';
+      }
+
       if ($q !== '') {
         $where[] = "(a.series_name LIKE ? OR a.title LIKE ? OR u.artist LIKE ? OR a.tags LIKE ?)";
         $term = "%{$q}%";
@@ -19154,6 +19181,336 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       ]);
     }
 
+    // 4. Novel Series Catalog (Grouped by Series Title & Author)
+    if ($action === 'novel_series_list') {
+      $sort = $_GET['sort'] ?? 'updated';
+      $rating = $_GET['rating'] ?? 'all';
+      $q = trim($_GET['q'] ?? '');
+      $page = max(1, (int)($_GET['page'] ?? 1));
+      $limit = 24;
+      $offset = ($page - 1) * $limit;
+
+      $where = ["a.type = 'novel'"];
+      $params = [];
+
+      if ($rating === 'r18') {
+        $where[] = "a.rating = 'r18'";
+      } elseif ($rating === 'safe') {
+        $where[] = "a.rating = 'all'";
+      }
+
+      if (!empty($_GET['hide_ai']) && $_GET['hide_ai'] == '1') {
+        $where[] = "a.is_ai = 0";
+      }
+
+      $tag = trim($_GET['tag'] ?? '');
+      $character = trim($_GET['character'] ?? '');
+      $parody = trim($_GET['parody'] ?? '');
+      $sourceUrl = trim($_GET['source_url'] ?? '');
+
+      if ($tag !== '') {
+        $where[] = "EXISTS (SELECT 1 FROM tags t WHERE t.artwork_id = a.id AND t.tag_name = ?)";
+        $params[] = $tag;
+      }
+      if ($character !== '') {
+        $where[] = "a.characters LIKE ?";
+        $params[] = '%' . $character . '%';
+      }
+      if ($parody !== '') {
+        $where[] = "(a.parodies LIKE ? OR a.series_name LIKE ?)";
+        $params[] = '%' . $parody . '%';
+        $params[] = '%' . $parody . '%';
+      }
+      if ($sourceUrl !== '') {
+        $where[] = "a.source_url LIKE ?";
+        $params[] = '%' . $sourceUrl . '%';
+      }
+
+      if ($q !== '') {
+        $where[] = "(a.series_name LIKE ? OR a.title LIKE ? OR u.artist LIKE ? OR a.tags LIKE ?)";
+        $term = "%{$q}%";
+        $params = array_merge($params, [$term, $term, $term, $term]);
+      }
+
+      $whereSql = implode(' AND ', $where);
+      $curUserId = $currentUser ? (int)$currentUser['id'] : 0;
+      $orderSql = "MAX(a.created_at) DESC";
+
+      if ($sort === 'my_favorites') {
+        $orderSql = ($curUserId > 0) ? "MAX(CASE WHEN a.id IN (SELECT artwork_id FROM likes WHERE user_id = {$curUserId}) THEN 1 ELSE 0 END) DESC, MAX(a.created_at) DESC" : "SUM(a.like_count) DESC, MAX(a.created_at) DESC";
+      } elseif ($sort === 'favorites') {
+        $orderSql = "SUM(a.like_count) DESC, MAX(a.created_at) DESC";
+      } elseif ($sort === 'chapters') {
+        $orderSql = "total_chapters DESC, MAX(a.created_at) DESC";
+      } elseif ($sort === 'popular') {
+        $orderSql = "SUM(a.like_count) DESC, SUM(a.view_count) DESC";
+      } elseif ($sort === 'title') {
+        $orderSql = "series_title COLLATE NOCASE ASC";
+      }
+
+      $countStmt = $db->prepare("
+        SELECT COUNT(*) FROM (
+          SELECT COALESCE(NULLIF(a.series_name, ''), a.title) as series_title, a.user_id 
+          FROM artworks a 
+          LEFT JOIN users u ON a.user_id = u.id 
+          WHERE {$whereSql} 
+          GROUP BY series_title, a.user_id
+        )
+      ");
+      $countStmt->execute($params);
+      $total = (int)$countStmt->fetchColumn();
+
+      $stmt = $db->prepare("
+        SELECT 
+          COALESCE(NULLIF(a.series_name, ''), a.title) as series_title,
+          a.user_id,
+          u.artist as artist_name,
+          u.email as artist_email,
+          MAX(a.created_at) as last_updated,
+          COUNT(a.id) as total_chapters,
+          SUM(a.view_count) as total_views,
+          SUM(a.like_count) as total_likes,
+          MAX(a.rating) as rating,
+          (
+            SELECT ai.file_name FROM artwork_images ai 
+            WHERE ai.artwork_id = (
+              SELECT a2.id FROM artworks a2 
+              WHERE COALESCE(NULLIF(a2.series_name, ''), a2.title) = COALESCE(NULLIF(a.series_name, ''), a.title) 
+                AND a2.user_id = a.user_id 
+              ORDER BY a2.chapter_number ASC, a2.id ASC LIMIT 1
+            ) 
+            ORDER BY ai.sort_order ASC LIMIT 1
+          ) as cover_file,
+          (
+            SELECT a3.id FROM artworks a3 
+            WHERE COALESCE(NULLIF(a3.series_name, ''), a3.title) = COALESCE(NULLIF(a.series_name, ''), a.title) 
+              AND a3.user_id = a.user_id 
+            ORDER BY a3.chapter_number ASC, a3.id ASC LIMIT 1
+          ) as first_chapter_id
+        FROM artworks a
+        LEFT JOIN users u ON a.user_id = u.id
+        WHERE {$whereSql}
+        GROUP BY series_title, a.user_id
+        ORDER BY {$orderSql}
+        LIMIT {$limit} OFFSET {$offset}
+      ");
+      $stmt->execute($params);
+      $series = $stmt->fetchAll();
+
+      jsonResponse([
+        'series' => $series,
+        'total'  => $total,
+        'page'   => $page,
+        'pages'  => max(1, ceil($total / $limit))
+      ]);
+    }
+
+    // 5. Novel Series Overview
+    if ($action === 'novel_series_get') {
+      $series_name = trim($_GET['series'] ?? '');
+      $author_id = (int)($_GET['uid'] ?? 0);
+
+      if (empty($series_name) || $author_id <= 0) {
+        jsonResponse(['error' => 'Missing series name or artist identifier.'], 400);
+      }
+
+      $stmtUser = $db->prepare("SELECT id, artist, email, bio, twitter, website FROM users WHERE id = ?");
+      $stmtUser->execute([$author_id]);
+      $author = $stmtUser->fetch();
+      if (!$author) jsonResponse(['error' => 'Author not found.'], 404);
+
+      $stmtChapters = $db->prepare("
+        SELECT 
+          a.*,
+          (SELECT ai.file_name FROM artwork_images ai WHERE ai.artwork_id = a.id ORDER BY ai.sort_order ASC LIMIT 1) as cover_file,
+          (SELECT COUNT(*) FROM artwork_images ai WHERE ai.artwork_id = a.id) as image_count
+        FROM artworks a
+        WHERE a.type = 'novel'
+          AND a.user_id = ?
+          AND (a.series_name = ? OR a.title = ?)
+        ORDER BY a.chapter_number ASC, a.created_at ASC
+      ");
+      $stmtChapters->execute([$author_id, $series_name, $series_name]);
+      $chapters = $stmtChapters->fetchAll();
+
+      if (empty($chapters)) {
+        jsonResponse(['error' => 'Novel series not found.'], 404);
+      }
+
+      $firstCover = $chapters[0]['cover_file'] ?? '';
+      $latestCover = $chapters[count($chapters) - 1]['cover_file'] ?? $firstCover;
+
+      $totalViews = array_sum(array_column($chapters, 'view_count'));
+      $totalLikes = array_sum(array_column($chapters, 'like_count'));
+      $totalWords = 0;
+      foreach ($chapters as $ch) {
+        $totalWords += mb_strlen(strip_tags($ch['description'] ?? ''));
+      }
+
+      $allTags = [];
+      foreach ($chapters as $ch) {
+        if (!empty($ch['tags'])) {
+          foreach (explode(',', $ch['tags']) as $t) {
+            $trimmed = trim($t);
+            if ($trimmed !== '') $allTags[$trimmed] = true;
+          }
+        }
+      }
+
+      $stmtArtistCount = $db->prepare("SELECT COUNT(DISTINCT COALESCE(NULLIF(series_name, ''), title)) FROM artworks WHERE type = 'novel' AND user_id = ?");
+      $stmtArtistCount->execute([$author_id]);
+      $artistWorksCount = (int)$stmtArtistCount->fetchColumn();
+
+      $tagsWithCounts = [];
+      $stmtTagCounts = $db->prepare("SELECT COUNT(DISTINCT artwork_id) FROM tags WHERE tag_name = ?");
+      foreach (array_keys($allTags) as $tagName) {
+        $stmtTagCounts->execute([$tagName]);
+        $tagsWithCounts[] = [
+          'name'  => $tagName,
+          'count' => max(1, (int)$stmtTagCounts->fetchColumn())
+        ];
+      }
+
+      $parodiesWithCounts = [];
+      if (!empty($chapters[0]['parodies'])) {
+        foreach (preg_split('/[,，、]+/u', $chapters[0]['parodies'], -1, PREG_SPLIT_NO_EMPTY) as $pName) {
+          $pClean = trim($pName);
+          if ($pClean === '') continue;
+          $stP = $db->prepare("SELECT COUNT(*) FROM artworks WHERE type = 'novel' AND parodies LIKE ?");
+          $stP->execute(['%' . $pClean . '%']);
+          $parodiesWithCounts[] = ['name' => $pClean, 'count' => max(1, (int)$stP->fetchColumn())];
+        }
+      }
+
+      $charactersWithCounts = [];
+      if (!empty($chapters[0]['characters'])) {
+        foreach (preg_split('/[,，、]+/u', $chapters[0]['characters'], -1, PREG_SPLIT_NO_EMPTY) as $cName) {
+          $cClean = trim($cName);
+          if ($cClean === '') continue;
+          $stC = $db->prepare("SELECT COUNT(*) FROM artworks WHERE type = 'novel' AND characters LIKE ?");
+          $stC->execute(['%' . $cClean . '%']);
+          $charactersWithCounts[] = ['name' => $cClean, 'count' => max(1, (int)$stC->fetchColumn())];
+        }
+      }
+
+      $curUserId = $currentUser ? (int)$currentUser['id'] : 0;
+      $userLiked = false;
+      $firstChapterId = !empty($chapters[0]['id']) ? (int)$chapters[0]['id'] : 0;
+      if ($firstChapterId > 0) {
+        if ($curUserId > 0) {
+          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = ?");
+          $stLikeCheck->execute([$firstChapterId, $curUserId]);
+        } else {
+          $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = 0 AND ip = ?");
+          $stLikeCheck->execute([$firstChapterId, $ip]);
+        }
+        $userLiked = (bool)$stLikeCheck->fetchColumn();
+      }
+
+      jsonResponse([
+        'series_title'       => $series_name,
+        'user_liked'         => $userLiked,
+        'author'             => $author,
+        'artist_works_count' => $artistWorksCount,
+        'description'        => $chapters[0]['description'] ?? '',
+        'source_url'         => $chapters[0]['source_url'] ?? '',
+        'parodies'           => $parodiesWithCounts,
+        'characters'         => $charactersWithCounts,
+        'cover_file'         => $firstCover ?: $latestCover,
+        'total_chapters'     => count($chapters),
+        'total_words'        => $totalWords,
+        'total_views'        => $totalViews,
+        'total_likes'        => $totalLikes,
+        'rating'             => $chapters[0]['rating'] ?? 'all',
+        'tags'               => $tagsWithCounts,
+        'date_formatted'     => !empty($chapters[0]['created_at']) ? date('l, d F, Y', $chapters[0]['created_at']) : date('l, d F, Y'),
+        'chapters'           => $chapters,
+        'first_chapter_id'   => $chapters[0]['id'],
+        'last_chapter_id'    => $chapters[count($chapters) - 1]['id']
+      ]);
+    }
+
+    // 6. Novel Reader Chapter Details
+    if ($action === 'novel_chapter_get') {
+      $chapter_id = (int)($_GET['id'] ?? 0);
+      $series_name = trim($_GET['series'] ?? '');
+      $user_id = (int)($_GET['uid'] ?? 0);
+      $chapter_num = isset($_GET['chapter']) ? (float)$_GET['chapter'] : null;
+
+      if ($chapter_id <= 0 && $series_name !== '' && $user_id > 0) {
+        if ($chapter_num !== null) {
+          $stResolve = $db->prepare("
+            SELECT id FROM artworks 
+            WHERE type = 'novel' AND user_id = ? AND (series_name = ? OR title = ?) AND chapter_number = ?
+            ORDER BY id ASC LIMIT 1
+          ");
+          $stResolve->execute([$user_id, $series_name, $series_name, $chapter_num]);
+          $chapter_id = (int)($stResolve->fetchColumn() ?: 0);
+        }
+        if ($chapter_id <= 0) {
+          $stResolve2 = $db->prepare("
+            SELECT id FROM artworks 
+            WHERE type = 'novel' AND user_id = ? AND (series_name = ? OR title = ?)
+            ORDER BY chapter_number ASC, id ASC LIMIT 1
+          ");
+          $stResolve2->execute([$user_id, $series_name, $series_name]);
+          $chapter_id = (int)($stResolve2->fetchColumn() ?: 0);
+        }
+      }
+
+      if ($chapter_id <= 0) jsonResponse(['error' => 'Novel chapter not found.'], 400);
+
+      $stmt = $db->prepare("
+        SELECT a.*, u.artist as artist_name, u.email as artist_email 
+        FROM artworks a
+        JOIN users u ON a.user_id = u.id
+        WHERE a.id = ? AND a.type = 'novel'
+      ");
+      $stmt->execute([$chapter_id]);
+      $chapter = $stmt->fetch();
+      if (!$chapter) jsonResponse(['error' => 'Chapter not found.'], 404);
+
+      $db->prepare("UPDATE artworks SET view_count = view_count + 1 WHERE id = ?")->execute([$chapter_id]);
+      $chapter['view_count']++;
+
+      // Fetch attached illustrations and cover image
+      $stmtImages = $db->prepare("SELECT * FROM artwork_images WHERE artwork_id = ? ORDER BY sort_order ASC, id ASC");
+      $stmtImages->execute([$chapter_id]);
+      $chapter['images'] = $stmtImages->fetchAll();
+
+      $seriesTitle = !empty($chapter['series_name']) ? $chapter['series_name'] : $chapter['title'];
+      $stmtSiblings = $db->prepare("
+        SELECT id, title, chapter_number, created_at,
+          (SELECT COUNT(*) FROM artwork_images WHERE artwork_id = artworks.id) as image_count
+        FROM artworks 
+        WHERE type = 'novel' AND user_id = ? AND (series_name = ? OR title = ?)
+        ORDER BY chapter_number ASC, created_at ASC
+      ");
+      $stmtSiblings->execute([$chapter['user_id'], $seriesTitle, $seriesTitle]);
+      $allChapters = $stmtSiblings->fetchAll();
+
+      $currIndex = 0;
+      foreach ($allChapters as $idx => $sc) {
+        if ($sc['id'] == $chapter_id) {
+          $currIndex = $idx;
+          break;
+        }
+      }
+
+      $prevChapter = $currIndex > 0 ? $allChapters[$currIndex - 1] : null;
+      $nextChapter = $currIndex < (count($allChapters) - 1) ? $allChapters[$currIndex + 1] : null;
+
+      jsonResponse([
+        'chapter'      => $chapter,
+        'series_title' => $seriesTitle,
+        'all_chapters' => $allChapters,
+        'curr_index'   => $currIndex,
+        'prev_chapter' => $prevChapter,
+        'next_chapter' => $nextChapter
+      ]);
+    }
+
     if ($action === 'check_url') {
       $rawUrls = trim($_GET['url'] ?? '');
       $urls = preg_split('/[\r\n,\s]+/u', $rawUrls, -1, PREG_SPLIT_NO_EMPTY);
@@ -19345,16 +19702,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $artworkId = intval($_POST['id'] ?? 0);
       $title = trim($_POST['title'] ?? '');
       $seriesName = trim($_POST['series_name'] ?? '');
-      $type = in_array($_POST['type'] ?? '', ['illust', 'video', 'manga']) ? $_POST['type'] : 'illust';
+      $type = in_array($_POST['type'] ?? '', ['illust', 'video', 'manga', 'novel']) ? $_POST['type'] : 'illust';
 
-      // Auto-assign series name and auto-increment next chapter number for manga
-      if ($type === 'manga') {
+      // Auto-assign series name and auto-increment next chapter number for manga and novel
+      if ($type === 'manga' || $type === 'novel') {
         if ($seriesName === '') {
           $seriesName = $title;
         }
         if (!isset($_POST['chapter_number']) || $_POST['chapter_number'] === '') {
-          $stCh = $db->prepare("SELECT MAX(chapter_number) FROM artworks WHERE user_id = ? AND type = 'manga' AND (series_name = ? OR title = ?)");
-          $stCh->execute([$user['id'], $seriesName, $seriesName]);
+          $stCh = $db->prepare("SELECT MAX(chapter_number) FROM artworks WHERE user_id = ? AND type = ? AND (series_name = ? OR title = ?)");
+          $stCh->execute([$user['id'], $type, $seriesName, $seriesName]);
           $maxChapter = $stCh->fetchColumn();
           $chapterNum = ($maxChapter !== false && $maxChapter !== null) ? ((float)$maxChapter + 1.0) : 1.0;
         } else {
@@ -19398,8 +19755,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       if (empty($title)) {
         jsonResponse(['error' => 'Title is required.'], 400);
       }
-      if (!is_array($images) || empty($images)) {
-        jsonResponse(['error' => 'At least one media file is required.'], 400);
+      if (!is_array($images)) {
+        $images = [];
+      }
+      // Novels require text in description or at least one cover/illustration
+      if ($type === 'novel') {
+        if (empty($description) && empty($images)) {
+          jsonResponse(['error' => 'Please provide chapter text or attach a cover illustration for this novel.'], 400);
+        }
+      } else {
+        if (empty($images)) {
+          jsonResponse(['error' => 'At least one media file is required.'], 400);
+        }
       }
   
       // Rule 1: Dynamic maximum images per post
@@ -19412,13 +19779,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         jsonResponse(['error' => 'Video uploads are currently disabled by the administrator.'], 400);
       }
 
-      // Rule 1b: Disallow video files in Manga series
-      if ($type === 'manga') {
+      // Rule 1b: Disallow video files in Manga & Novel works
+      if ($type === 'manga' || $type === 'novel') {
         foreach ($images as $img) {
           $fName = $img['file_name'] ?? ($img['file_key'] ?? '');
           $mime = $img['mime_type'] ?? '';
           if (!empty($img['is_video']) || strpos($mime, 'video/') === 0 || preg_match('/\.(mp4|webm|mov|mkv|ogg)$/i', $fName)) {
-            jsonResponse(['error' => 'Videos are not allowed for Manga series. Please upload image files only.'], 400);
+            jsonResponse(['error' => 'Videos are not allowed for this category. Please upload image files only.'], 400);
           }
         }
       }
@@ -19709,9 +20076,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
       if ($feed === 'manga') {
         $where[] = "a.type = 'manga'";
-      } elseif ($type === 'artworks') {
-        $where[] = "a.type != 'manga'";
-      } elseif ($type !== 'all' && in_array($type, ['illust', 'video', 'manga'])) {
+      } elseif ($feed === 'novel') {
+        $where[] = "a.type = 'novel'";
+      } elseif ($feed === 'artworks' || $type === 'artworks') {
+        $where[] = "a.type NOT IN ('manga', 'novel')";
+      } elseif ($type !== 'all' && in_array($type, ['illust', 'video', 'manga', 'novel'])) {
         $where[] = "a.type = ?";
         $params[] = $type;
       }
@@ -19720,6 +20089,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $where[] = "a.rating = 'r18'";
       } elseif ($rating === 'safe') {
         $where[] = "a.rating = 'all'";
+      }
+
+      if (!empty($_GET['hide_ai']) && $_GET['hide_ai'] == '1') {
+        $where[] = "a.is_ai = 0";
       }
   
       if ($tag !== '') {
@@ -20062,11 +20435,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $nextStmt->execute([$id]);
       $art['next_id'] = $nextStmt->fetchColumn() ?: null;
 
-      if ($art['type'] === 'manga') {
+      if ($art['type'] === 'manga' || $art['type'] === 'novel') {
         $parodyTrim = trim($art['parodies'] ?? '');
         $seriesTrim = trim($art['series_name'] ?? '');
-        $seriesWhere = "a.user_id = ? AND a.type = 'manga'";
-        $seriesParams = [(int)$art['user_id']];
+        $seriesWhere = "a.user_id = ? AND a.type = ?";
+        $seriesParams = [(int)$art['user_id'], $art['type']];
         if ($seriesTrim !== '') {
           $seriesWhere .= " AND (a.series_name = ? OR a.title = ?)";
           $seriesParams[] = $seriesTrim;
@@ -20094,8 +20467,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           }
         }
 
+        $defaultTitle = ($art['type'] === 'novel') ? 'Novel Series' : 'Manga Series';
         $art['manga_series'] = $seriesList;
-        $art['series_title'] = $seriesTrim !== '' ? $seriesTrim : ($parodyTrim !== '' ? $parodyTrim : 'Manga Series');
+        $art['series_title'] = $seriesTrim !== '' ? $seriesTrim : ($parodyTrim !== '' ? $parodyTrim : $defaultTitle);
         $art['series_index'] = $currIdx + 1;
         $art['series_total'] = count($seriesList);
         $art['series_prev'] = ($currIdx > 0) ? $seriesList[$currIdx - 1] : null;
@@ -20253,7 +20627,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $seriesName = trim($art['series_name'] ?? '');
       $chapterNum = (float)($art['chapter_number'] ?? 1);
       $description = trim($art['description'] ?? '');
-      $type = in_array($art['type'] ?? '', ['illust', 'video', 'manga']) ? $art['type'] : 'illust';
+      $type = in_array($art['type'] ?? '', ['illust', 'video', 'manga', 'novel']) ? $art['type'] : 'illust';
       $rating = in_array($art['rating'] ?? '', ['all', 'r18']) ? $art['rating'] : 'all';
       $isAi = !empty($art['is_ai']) ? 1 : 0;
       $isOriginal = isset($art['is_original']) ? (!empty($art['is_original']) ? 1 : 0) : 1;
@@ -21713,6 +22087,41 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           font-weight: 800;
           letter-spacing: 0.5px;
         }
+        .badge-flag.novel {
+          background: rgba(16, 185, 129, 0.95);
+          color: #000000;
+          backdrop-filter: blur(6px);
+          font-weight: 800;
+          letter-spacing: 0.5px;
+        }
+        .novel-text-content {
+          font-size: 1.08rem;
+          line-height: 1.88;
+          color: #e4e4e7;
+          word-break: break-word;
+          white-space: pre-wrap;
+          font-family: inherit;
+        }
+        .novel-text-content p {
+          margin-bottom: 1.35rem;
+          text-indent: 1.8rem;
+        }
+        .novel-text-content img {
+          display: block;
+          max-width: 100%;
+          height: auto;
+          margin: 1.8rem auto;
+          border-radius: 12px;
+          box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        .novel-reader-viewport {
+          max-width: 820px;
+          margin: 0 auto;
+          width: 100%;
+          padding: 70px 1.25rem 90px 1.25rem;
+          min-height: 100dvh;
+          box-sizing: border-box;
+        }
 
         /* Manga Series Component */
         .manga-series-card {
@@ -23166,7 +23575,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           </div>
     
           <div class="nav-item active" data-nav="/"><svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg> Home Feed</div>
+          <div class="nav-item" data-nav="/artworks"><svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg> Artworks</div>
           <div class="nav-item" data-nav="/manga"><svg viewBox="0 0 24 24"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg> Manga</div>
+          <div class="nav-item" data-nav="/novel"><svg viewBox="0 0 24 24"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg> Novels</div>
           <div class="nav-item" data-nav="/rankings"><svg viewBox="0 0 24 24"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg> Rankings</div>
           <div class="r18-toggle-row">
             <span style="display:flex; align-items:center; gap:0.45rem;">
@@ -23185,6 +23596,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             </span>
             <label class="r18-switch" title="Blur sensitive R-18 content until clicked">
               <input type="checkbox" id="sidebar-safeblur-toggle" onchange="app.toggleSafeBlur(this.checked)">
+              <span class="r18-slider"></span>
+            </label>
+          </div>
+          <div class="r18-toggle-row" id="sidebar-hideai-row">
+            <span style="display:flex; align-items:center; gap:0.45rem;">
+              <svg viewBox="0 0 24 24" style="width:16px; height:16px; color:#a855f7;"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2zM7.5 13a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm9 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg>
+              <span>Hide AI Works</span>
+            </span>
+            <label class="r18-switch" title="Automatically hide AI-generated content">
+              <input type="checkbox" id="sidebar-hideai-toggle" onchange="app.toggleHideAI(this.checked)" checked>
               <span class="r18-slider"></span>
             </label>
           </div>
@@ -23229,6 +23650,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.theme = localStorage.getItem('hd_theme') || 'dark';
             this.r18Enabled = localStorage.getItem('r18_enabled') !== '0';
             this.safeBlurEnabled = localStorage.getItem('safeblur_enabled') !== '0';
+            this.hideAI = localStorage.getItem('hide_ai') !== '0'; // Defaults to TRUE (hidden) unless explicitly toggled off
             this.r18Policy = <?= json_encode($config['r18_policy'] ?? 'allow') ?>;
             this.allowVideo = <?= json_encode((bool)($config['allow_video'] ?? true)) ?>;
             this.chunkSize = <?= (int)$config['max_chunk_size'] ?>;
@@ -23242,6 +23664,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.adminState = { tab: 'users', page: 1, q: '', sort: 'id_asc' };
             this.initTheme();
             this.initR18Toggle();
+            this.initHideAIToggle();
             this.bindEvents();
             this.renderUserSlot();
             if (!this.needsSetup) {
@@ -23302,6 +23725,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.safeBlurEnabled = !!enabled;
             localStorage.setItem('safeblur_enabled', this.safeBlurEnabled ? '1' : '0');
             this.toast(this.safeBlurEnabled ? 'Safe Blur turned ON' : 'Safe Blur turned OFF');
+            this.handleRoute();
+          }
+
+          initHideAIToggle() {
+            const toggle = document.getElementById('sidebar-hideai-toggle');
+            if (toggle) toggle.checked = this.hideAI;
+          }
+
+          toggleHideAI(enabled) {
+            this.hideAI = !!enabled;
+            localStorage.setItem('hide_ai', this.hideAI ? '1' : '0');
+            this.initHideAIToggle();
+            this.toast(this.hideAI ? 'AI-generated works hidden' : 'AI-generated works shown');
             this.handleRoute();
           }
     
@@ -23474,9 +23910,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const [routePath, queryStr] = rawHash.replace(/^#/, '').split('?');
             const params = new URLSearchParams(queryStr || '');
 
-            // Automatically hide sidebar & top header in manga reading view
-            const isMangaReading = routePath.startsWith('/manga/read/') || (routePath.startsWith('/manga/series/') && routePath.includes('/read/chapter/'));
-            document.body.classList.toggle('manga-cinema-active', isMangaReading);
+            // Automatically hide sidebar & top header in manga or novel reading view
+            const isReadingView = routePath.startsWith('/manga/read/') || (routePath.startsWith('/manga/series/') && routePath.includes('/read/chapter/')) ||
+                                  routePath.startsWith('/novel/read/') || (routePath.startsWith('/novel/series/') && routePath.includes('/read/chapter/'));
+            document.body.classList.toggle('manga-cinema-active', isReadingView);
   
             if (this.needsSetup) {
               await this.renderSetupPage();
@@ -23499,8 +23936,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     
             if (routePath === '/' || routePath === '') {
             await this.renderFeedPage('home', params);
+          } else if (routePath === '/artworks') {
+            await this.renderFeedPage('artworks', params);
           } else if (routePath === '/manga') {
             await this.renderMangaCatalog(params);
+          } else if (routePath === '/novel') {
+            await this.renderNovelCatalog(params);
+          } else if (routePath.startsWith('/novel/series/')) {
+            if (routePath.includes('/read/chapter/')) {
+              const parts = routePath.split('/');
+              const seriesIdx = parts.indexOf('series');
+              const userIdx = parts.indexOf('userid');
+              const chIdx = parts.indexOf('chapter');
+              const seriesTitle = decodeURIComponent(parts[seriesIdx + 1] || '');
+              const uid = parseInt(parts[userIdx + 1] || '0', 10);
+              const chapterNum = parseFloat(parts[chIdx + 1] || '1');
+              await this.renderNovelReader({ series: seriesTitle, uid, chapter: chapterNum });
+            } else if (routePath.includes('/userid/')) {
+              const parts = routePath.split('/');
+              const seriesIdx = parts.indexOf('series');
+              const userIdx = parts.indexOf('userid');
+              const seriesTitle = decodeURIComponent(parts[seriesIdx + 1] || '');
+              const uid = decodeURIComponent(parts[userIdx + 1] || '0');
+              await this.renderNovelSeriesView(seriesTitle, uid);
+            } else {
+              await this.renderNovelCatalog(params);
+            }
+          } else if (routePath.startsWith('/novel/read/')) {
+            const chapterId = routePath.split('/')[3] || '0';
+            await this.renderNovelReader({ id: chapterId });
           } else if (routePath.startsWith('/manga/series/')) {
               if (routePath.includes('/read/chapter/')) {
                 // #/manga/series/{series}/userid/{uid}/read/chapter/{ch}/page/{page}
@@ -23841,7 +24305,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 sort: sort,
                 period: period,
                 page: page,
-                limit: 24
+                limit: 24,
+                hide_ai: this.hideAI ? 1 : 0
               };
               if (query) reqData.q = query;
               if (tag) reqData.tag = tag;
@@ -23852,6 +24317,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const res = await this.api('artworks_list', reqData);
   
               let heading = 'Discover Artworks & Illustrations';
+              if (feedType === 'artworks') heading = 'Illustrations & Visual Artworks';
               if (feedType === 'manga') heading = 'Manga & Comic Series';
               if (feedType === 'rankings') heading = 'Hall of Fame & Top Rankings';
               if (feedType === 'r18') heading = 'R-18 Mature Creations';
@@ -23932,6 +24398,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
                   const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
                   const isManga = art.type === 'manga';
+                  const isNovel = art.type === 'novel';
                   const pageCount = Number(art.page_count || 1);
                   const viewCount = Number(art.view_count || 0);
                   const likeCount = Number(art.like_count || 0);
@@ -23953,6 +24420,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         ${pageCount > 1 ? `<div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</div>` : ''}
                         ${isVid ? `<div class="badge-flag video">VIDEO</div>` : ''}
                         ${isManga ? `<div class="badge-flag manga">MANGA</div>` : ''}
+                        ${isNovel ? `<div class="badge-flag novel">NOVEL</div>` : ''}
                         ${art.rating === 'r18' ? `<div class="badge-flag">R-18</div>` : ''}
                         ${art.is_ai ? `<div class="badge-flag ai">AI</div>` : ''}
                       </div>
@@ -24012,19 +24480,355 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           toggleMangaStudioFields(type) {
             const seriesGroup = document.getElementById('manga-series-input-group');
             const chapterGroup = document.getElementById('manga-chapter-input-group');
+            const novelTextNote = document.getElementById('studio-novel-text-note');
+            const descLabel = document.getElementById('studio-description-label');
             const fileInput = document.getElementById('studio-file-input');
 
-            if (seriesGroup) seriesGroup.style.display = (type === 'manga') ? 'flex' : 'none';
-            if (chapterGroup) chapterGroup.style.display = (type === 'manga') ? 'flex' : 'none';
-            if (fileInput) fileInput.accept = (type === 'manga') ? 'image/*' : 'image/*,video/*';
+            const isSequential = (type === 'manga' || type === 'novel');
+            if (seriesGroup) seriesGroup.style.display = isSequential ? 'flex' : 'none';
+            if (chapterGroup) chapterGroup.style.display = isSequential ? 'flex' : 'none';
+            if (fileInput) fileInput.accept = isSequential ? 'image/*' : 'image/*,video/*';
 
-            if (type === 'manga') {
+            if (descLabel) {
+              descLabel.textContent = (type === 'novel') ? 'Chapter Text & Story Content * (Markdown Supported)' : 'Caption / Description (Markdown enabled)';
+            }
+            if (novelTextNote) {
+              novelTextNote.style.display = (type === 'novel') ? 'block' : 'none';
+            }
+
+            if (isSequential) {
               const beforeCount = this.uploadQueue.length;
               this.uploadQueue = this.uploadQueue.filter(item => !item.is_video && !/\.(mp4|webm|mov|mkv|ogg)$/i.test(item.file_name || ''));
               if (this.uploadQueue.length !== beforeCount) {
-                this.toast('Removed video files: Videos are not allowed for Manga.');
+                this.toast('Removed video files: Videos are not allowed in this category.');
                 this.renderStudioPreviews();
               }
+            }
+          }
+
+          // Novel Series Directory Catalog
+          async renderNovelCatalog(params) {
+            this.setTitle('Novel Series Directory');
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            const query = params.get('q') || '';
+            const tag = params.get('tag') || '';
+            const character = params.get('character') || '';
+            const parody = params.get('parody') || '';
+            const sourceUrl = params.get('source_url') || '';
+            const rating = this.r18Enabled ? (params.get('rating') || 'all') : 'safe';
+            const sort = params.get('sort') || 'updated';
+            const page = Math.max(1, parseInt(params.get('page') || '1', 10));
+
+            try {
+              const reqPayload = { q: query, rating, sort, page, hide_ai: this.hideAI ? 1 : 0 };
+              if (tag) reqPayload.tag = tag;
+              if (character) reqPayload.character = character;
+              if (parody) reqPayload.parody = parody;
+              if (sourceUrl) reqPayload.source_url = sourceUrl;
+
+              const res = await this.api('novel_series_list', reqPayload);
+              let html = `
+                <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
+                  <div>
+                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px;"><svg viewBox="0 0 24 24" style="width:24px;height:24px;fill:currentColor;color:#10b981;margin-right:6px;vertical-align:text-bottom;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>Novels &amp; Web Series</h1>
+                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem;">${res.total} series available</p>
+                  </div>
+                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                    <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
+                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                      <span>Advanced Search</span>
+                    </button>
+                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
+                      <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
+                      <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
+                      <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
+                      <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                      <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
+                      <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
+                    </select>
+                    ${this.r18Enabled ? `
+                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                        <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                        <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
+                        <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                      </select>
+                    ` : ''}
+                  </div>
+                </div>
+
+                <div id="adv-search-panel" style="display:${(tag || character || parody || sourceUrl) ? 'block' : 'none'}; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:1.2rem; margin-bottom:1.4rem;">
+                  <div style="font-weight:700; font-size:0.95rem; margin-bottom:0.8rem;">Advanced Novel Query Filter</div>
+                  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:0.8rem;">
+                    <input type="text" id="adv-tags" class="form-input" placeholder="General Tags" value="${this.escape(tag || query)}">
+                    <input type="text" id="adv-char" class="form-input" placeholder="Character Depicted" value="${this.escape(character)}">
+                    <input type="text" id="adv-parody" class="form-input" placeholder="Series / Parody" value="${this.escape(parody)}">
+                    <input type="text" id="adv-url" class="form-input" placeholder="Source URL Link" value="${this.escape(sourceUrl)}">
+                  </div>
+                  <div style="display:flex; justify-content:flex-end; gap:0.6rem; margin-top:0.9rem;">
+                    <button type="button" class="btn-subtle" onclick="app.clearAdvSearch()">Reset Filters</button>
+                    <button type="button" class="btn-primary" onclick="app.executeAdvSearch()">Apply Filter</button>
+                  </div>
+                </div>
+              `;
+
+              if (!res.series || !res.series.length) {
+                html += '<div class="center-msg">No novel series published yet.</div>';
+              } else {
+                html += '<div class="art-grid">';
+                res.series.forEach(item => {
+                  const coverUrl = item.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}` : '';
+                  const seriesUrl = `#/novel/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
+                  const isSafeBlurNovel = (item.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
+                  html += `
+                    <div class="art-card manga-card ratio-9-16" onclick="app.nav('${seriesUrl}')">
+                      <div class="art-thumb-wrap position-relative" style="aspect-ratio: 9 / 16 !important;">
+                        ${isSafeBlurNovel ? `
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
+                          </div>
+                        ` : ''}
+                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurNovel ? 'safe-blur-target' : ''}" alt="" loading="lazy">` : '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-muted);gap:0.4rem;"><svg viewBox="0 0 24 24" style="width:36px;height:36px;opacity:0.4;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg><span>Book Cover</span></div>'}
+                        <div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:12px;height:12px;margin-right:2px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>${item.total_chapters} Ch.</div>
+                        <div class="badge-flag novel">NOVEL</div>
+                        ${item.rating === 'r18' ? '<div class="badge-flag" style="top:32px;">R-18</div>' : '<div class="badge-flag" style="top:32px;background:rgba(34,197,94,0.9);">SAFE</div>'}
+                      </div>
+                      <div class="art-card-info">
+                        <div class="art-card-title">${this.escape(item.series_title)}</div>
+                        <div class="art-card-author"><span>By ${this.escape(item.artist_name)}</span></div>
+                        <div class="art-card-stats">
+                          <span>${(item.total_views || 0).toLocaleString()} views</span>
+                          <span class="text-danger fw-bold"><svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;margin-right:2px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>${item.total_likes || 0}</span>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                });
+                html += '</div>';
+              }
+              container.innerHTML = html;
+            } catch (err) {
+              container.innerHTML = `<div class="center-msg">${this.escape(err.message)}</div>`;
+            }
+          }
+
+          // Novel Series Overview
+          async renderNovelSeriesView(seriesTitle, authorId) {
+            this.setTitle(`${seriesTitle} - Novel Series`);
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            try {
+              const res = await this.api('novel_series_get', { series: seriesTitle, uid: authorId });
+              if (res.rating === 'r18' && !this.r18Enabled) {
+                container.innerHTML = `
+                  <div class="center-msg" style="max-width:480px; margin:4rem auto; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:2rem;">
+                    <h2 style="font-size:1.25rem; font-weight:800; color:var(--r18); margin-bottom:0.6rem;">R-18 Novel Series</h2>
+                    <p style="color:var(--text-muted); font-size:0.85rem; line-height:1.5; margin-bottom:1.4rem;">This novel series is rated R-18. Enable R-18 in the sidebar to view.</p>
+                    <button type="button" class="btn-primary" onclick="app.toggleR18(true)">Enable R-18 Content</button>
+                  </div>
+                `;
+                return;
+              }
+              const coverUrl = res.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(res.cover_file)}` : '';
+              const firstChapterNum = (res.chapters && res.chapters[0]) ? (res.chapters[0].chapter_number || 1) : 1;
+              const firstChapterUrl = `#/novel/series/${encodeURIComponent(res.series_title)}/userid/${res.author.id}/read/chapter/${firstChapterNum}`;
+              const isOwner = this.user && (this.user.id == res.author.id || Number(this.user.is_admin) >= 1);
+              const addChapterUrl = `#/submit?type=novel&series=${encodeURIComponent(res.series_title)}`;
+
+              let html = `
+                <div style="max-width: 1300px; margin: 0 auto; width: 100%;">
+                  <div class="spotify-series-wrap">
+                    <div class="manga-hero-container">
+                      <div class="manga-hero-backdrop" style="background-image: url('${coverUrl}');"></div>
+                      <div class="manga-hero-content">
+                        <div class="manga-cover-card position-relative">
+                          ${coverUrl ? `<img src="${coverUrl}" alt="${this.escape(res.series_title)}">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-weight:700;">No Cover</div>'}
+                          <div class="badge-flag novel" style="font-size:0.75rem; padding:0.25rem 0.6rem;">NOVEL</div>
+                        </div>
+
+                        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.8rem;">
+                          <div style="font-size: 0.75rem; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #10b981;">
+                            Novel Series
+                          </div>
+                          <h1 style="font-size: 2.2rem; font-weight: 800; letter-spacing: -0.6px; margin: 0; color: var(--text-primary); line-height: 1.15;">
+                            ${this.escape(res.series_title)}
+                          </h1>
+
+                          <div style="display: flex; align-items: center; gap: 0.6rem;">
+                            <img src="?action=get_profile_picture&id=${res.author.id}" style="width: 26px; height: 26px; border-radius: 50%; object-fit: cover; border: 1.5px solid var(--accent);" onerror="app.handleAvatarError(this, '${this.escape(res.author.artist)}')">
+                            <a href="#/user/${res.author.id}" style="font-weight: 700; font-size: 0.92rem; color: var(--text-primary); text-decoration: none;">
+                              ${this.escape(res.author.artist)}
+                            </a>
+                            <span style="font-size: 0.78rem; color: var(--text-muted);">&bull; ${res.artist_works_count || 1} Series</span>
+                          </div>
+
+                          ${res.description ? `
+                            <div style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5; background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06); max-height: 120px; overflow-y: auto;">
+                              ${this.escape(res.description)}
+                            </div>
+                          ` : ''}
+
+                          <div style="display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-muted); align-items: center;">
+                            ${res.rating === 'r18' ? '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;">R-18</span>' : '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;background:rgba(34,197,94,0.9);">ALL AGES</span>'}
+                            <span><strong style="color:var(--text-primary);">${res.total_chapters}</strong> Chapters</span>
+                            <span><strong style="color:var(--text-primary);">${res.total_words.toLocaleString()}</strong> Words</span>
+                            <span><strong style="color:var(--text-primary);">${res.total_views.toLocaleString()}</strong> Views</span>
+                            <span><strong style="color:var(--text-primary);">${res.total_likes.toLocaleString()}</strong> Likes</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="spotify-series-actions">
+                      <a href="${firstChapterUrl}" class="btn-primary" style="height: 42px; padding: 0 1.6rem; border-radius: 22px; font-weight: 700; font-size: 0.92rem; gap: 0.5rem;">
+                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M8 5v14l11-7z"/></svg>
+                        <span>Start Reading</span>
+                      </a>
+                      ${isOwner ? `
+                        <a href="${addChapterUrl}" class="btn-subtle" style="height: 38px; font-size: 0.82rem; gap: 0.4rem; border-radius: 20px;">
+                          <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                          <span>Add Chapter</span>
+                        </a>
+                      ` : ''}
+                    </div>
+
+                    <div class="spotify-chapter-list">
+                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border-subtle); margin-bottom: 0.4rem;">
+                        <span style="font-size: 0.82rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;"># Chapter Title</span>
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">${res.total_chapters} total</span>
+                      </div>
+
+                      ${res.chapters.map(ch => {
+                        const chNum = ch.chapter_number || 1;
+                        const readUrl = `#/novel/series/${encodeURIComponent(res.series_title)}/userid/${res.author.id}/read/chapter/${chNum}`;
+                        const postDate = ch.created_at ? new Date(ch.created_at * 1000).toLocaleDateString() : '';
+                        const wordCount = (ch.description || '').length;
+                        return `
+                          <div class="manga-chapter-row" onclick="app.nav('${readUrl}')">
+                            <div style="display: flex; align-items: center; gap: 0.85rem; min-width: 0;">
+                              <div style="display: flex; flex-direction: column; min-width: 0; gap: 0.15rem;">
+                                <span class="ch-title">${this.escape(ch.title)}</span>
+                                <span style="font-size: 0.76rem; color: #10b981; font-weight: 700;">Chapter ${ch.chapter_number || 1} &bull; ${wordCount.toLocaleString()} words</span>
+                              </div>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0;">
+                              <span style="font-size: 0.8rem; color: var(--text-muted);" class="desktop-only">${postDate}</span>
+                              <a href="${readUrl}" class="btn-subtle" style="height: 32px; padding: 0 0.9rem; font-size: 0.8rem; font-weight: 700; border-radius: 8px;" onclick="event.stopPropagation()">
+                                Read
+                              </a>
+                            </div>
+                          </div>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+                </div>
+              `;
+              container.innerHTML = html;
+            } catch (err) {
+              container.innerHTML = `<div class="center-msg">${this.escape(err.message)}</div>`;
+            }
+          }
+
+          // Novel Text Reader
+          async renderNovelReader(target) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            try {
+              const reqData = typeof target === 'object' ? target : { id: target };
+              const res = await this.api('novel_chapter_get', reqData);
+              const ch = res.chapter;
+              const chapterNum = ch.chapter_number || 1;
+              const seriesTitle = res.series_title;
+              const authorId = ch.user_id;
+              const allChapters = res.all_chapters || [];
+
+              this.setTitle(`${seriesTitle} - Ch. ${chapterNum}`);
+
+              const makeUrl = (cNum) => `#/novel/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}/read/chapter/${cNum}`;
+              const seriesBackUrl = `#/novel/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}`;
+              const prevHref = res.prev_chapter ? makeUrl(res.prev_chapter.chapter_number || 1) : null;
+              const nextHref = res.next_chapter ? makeUrl(res.next_chapter.chapter_number || 1) : null;
+
+              // Parse story content
+              let renderedBody = '';
+              const rawStory = ch.description || '';
+              if (rawStory) {
+                try {
+                  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+                    renderedBody = DOMPurify.sanitize(marked.parse(rawStory));
+                  } else {
+                    renderedBody = this.escape(rawStory).replace(/\n/g, '<br>');
+                  }
+                } catch(e) {
+                  renderedBody = this.escape(rawStory).replace(/\n/g, '<br>');
+                }
+              } else {
+                renderedBody = '<p style="color:var(--text-muted);text-align:center;">No chapter text available.</p>';
+              }
+
+              // Embedded illustrations
+              const illustrations = ch.images || [];
+
+              let html = `
+                <div style="min-height: 100dvh; background: #08080a; color: #f4f4f5; position: relative;">
+                  <!-- Reader Header Bar -->
+                  <div style="position: fixed; top: 0; left: 0; right: 0; height: 54px; background: rgba(14, 14, 18, 0.95); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; z-index: 100;">
+                    <div style="display: flex; align-items: center; gap: 0.6rem; min-width: 0;">
+                      <a href="${seriesBackUrl}" class="btn-subtle" style="height: 32px; width: 32px; padding: 0; border-radius: 8px; justify-content: center;" title="Back to Series">
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                      </a>
+                      <span class="text-truncate fw-bold" style="font-size: 0.9rem; max-width: 200px;">${this.escape(seriesTitle)}</span>
+                      <span class="badge-flag novel" style="position:static; font-size: 0.7rem;">Ch. ${chapterNum}</span>
+                    </div>
+
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                      ${prevHref ? `
+                        <a href="${prevHref}" class="btn-subtle" style="height: 32px; padding: 0 0.8rem; font-size: 0.78rem;">&larr; Prev</a>
+                      ` : ''}
+                      ${nextHref ? `
+                        <a href="${nextHref}" class="btn-primary" style="height: 32px; padding: 0 0.8rem; font-size: 0.78rem;">Next &rarr;</a>
+                      ` : ''}
+                    </div>
+                  </div>
+
+                  <!-- Story Viewport -->
+                  <div class="novel-reader-viewport">
+                    <div style="border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 1.5rem; margin-bottom: 2rem; text-align: center;">
+                      <h1 style="font-size: 1.8rem; font-weight: 800; margin-bottom: 0.4rem;">${this.escape(ch.title)}</h1>
+                      <div style="color: var(--text-muted); font-size: 0.85rem;">By ${this.escape(ch.artist_name)} &bull; Chapter ${chapterNum}</div>
+                    </div>
+
+                    ${illustrations.length > 0 ? `
+                      <div style="margin-bottom: 2rem; text-align: center;">
+                        <img src="?access=artwork&action=raw&f=${encodeURIComponent(illustrations[0].file_name)}" style="max-width: 100%; max-height: 480px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.7);" alt="Illustration">
+                      </div>
+                    ` : ''}
+
+                    <div class="novel-text-content" id="novel-body-text">
+                      ${renderedBody}
+                    </div>
+
+                    <!-- Bottom Nav -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid rgba(255,255,255,0.08); gap: 1rem;">
+                      ${prevHref ? `
+                        <a href="${prevHref}" class="btn-subtle" style="height: 40px; padding: 0 1.2rem;">&larr; Previous Chapter</a>
+                      ` : '<div style="flex:1;"></div>'}
+                      <a href="${seriesBackUrl}" class="btn-subtle" style="height: 40px; padding: 0 1.2rem;">Series Overview</a>
+                      ${nextHref ? `
+                        <a href="${nextHref}" class="btn-primary" style="height: 40px; padding: 0 1.4rem;">Next Chapter &rarr;</a>
+                      ` : '<div style="flex:1;"></div>'}
+                    </div>
+                  </div>
+                </div>
+              `;
+              container.innerHTML = html;
+            } catch (err) {
+              container.innerHTML = `<div class="center-msg">${this.escape(err.message)}</div>`;
             }
           }
 
@@ -24035,19 +24839,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             container.innerHTML = '<div class="spinner"></div>';
 
             const query = params.get('q') || '';
+            const tag = params.get('tag') || '';
+            const character = params.get('character') || '';
+            const parody = params.get('parody') || '';
+            const sourceUrl = params.get('source_url') || '';
             const rating = this.r18Enabled ? (params.get('rating') || 'all') : 'safe';
             const sort = params.get('sort') || 'updated';
             const page = Math.max(1, parseInt(params.get('page') || '1', 10));
 
             try {
-              const res = await this.api('manga_series_list', { q: query, rating, sort, page });
+              const reqPayload = { q: query, rating, sort, page, hide_ai: this.hideAI ? 1 : 0 };
+              if (tag) reqPayload.tag = tag;
+              if (character) reqPayload.character = character;
+              if (parody) reqPayload.parody = parody;
+              if (sourceUrl) reqPayload.source_url = sourceUrl;
+
+              const res = await this.api('manga_series_list', reqPayload);
               let html = `
                 <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
                   <div>
                     <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px;"><i class="bi bi-book-half text-warning me-2"></i>Manga &amp; Comic Series</h1>
                     <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem;">${res.total} series available</p>
                   </div>
-                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center;">
+                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                    <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
+                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                      <span>Advanced Search</span>
+                    </button>
                     <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
                       <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
                       <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
@@ -24056,6 +24874,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
                       <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
                     </select>
+                    ${this.r18Enabled ? `
+                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                        <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                        <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
+                        <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                      </select>
+                    ` : ''}
+                  </div>
+                </div>
+
+                <div id="adv-search-panel" style="display:${(tag || character || parody || sourceUrl) ? 'block' : 'none'}; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:1.2rem; margin-bottom:1.4rem;">
+                  <div style="font-weight:700; font-size:0.95rem; margin-bottom:0.8rem;">Advanced Manga Query Filter</div>
+                  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:0.8rem;">
+                    <input type="text" id="adv-tags" class="form-input" placeholder="General Tags" value="${this.escape(tag || query)}">
+                    <input type="text" id="adv-char" class="form-input" placeholder="Character Depicted" value="${this.escape(character)}">
+                    <input type="text" id="adv-parody" class="form-input" placeholder="Series / Parody" value="${this.escape(parody)}">
+                    <input type="text" id="adv-url" class="form-input" placeholder="Source URL Link" value="${this.escape(sourceUrl)}">
+                  </div>
+                  <div style="display:flex; justify-content:flex-end; gap:0.6rem; margin-top:0.9rem;">
+                    <button type="button" class="btn-subtle" onclick="app.clearAdvSearch()">Reset Filters</button>
+                    <button type="button" class="btn-primary" onclick="app.executeAdvSearch()">Apply Filter</button>
                   </div>
                 </div>
               `;
@@ -24079,7 +24918,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         ` : ''}
                         ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurManga ? 'safe-blur-target' : ''}" alt="" loading="lazy">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">No Cover</div>'}
                         <div class="badge-page-count"><i class="bi bi-journal-text me-1"></i>${item.total_chapters} Ch.</div>
-                        ${item.rating === 'r18' ? '<div class="badge-flag">R-18</div>' : ''}
+                        ${item.rating === 'r18' ? '<div class="badge-flag">R-18</div>' : '<div class="badge-flag" style="background:rgba(34,197,94,0.9);">SAFE</div>'}
                       </div>
                       <div class="art-card-info">
                         <div class="art-card-title">${this.escape(item.series_title)}</div>
@@ -24197,7 +25036,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           </div>
 
                           <!-- Stats Bar -->
-                          <div style="display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-muted);">
+                          <div style="display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-muted); align-items: center;">
+                            ${res.rating === 'r18' ? '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;">R-18</span>' : '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;background:rgba(34,197,94,0.9);">ALL AGES</span>'}
                             <span><strong style="color:var(--text-primary);">${res.total_chapters}</strong> Chapters</span>
                             <span><strong style="color:var(--text-primary);">${res.total_pages}</strong> Pages</span>
                             <span><strong style="color:var(--text-primary);">${res.total_views.toLocaleString()}</strong> Views</span>
@@ -25053,22 +25893,29 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           }
     
           executeAdvSearch() {
-            const tag = document.getElementById('adv-tags').value.trim();
-            const char = document.getElementById('adv-char').value.trim();
-            const parody = document.getElementById('adv-parody').value.trim();
-            const url = document.getElementById('adv-url').value.trim();
-    
+            const tag = document.getElementById('adv-tags')?.value.trim() || '';
+            const char = document.getElementById('adv-char')?.value.trim() || '';
+            const parody = document.getElementById('adv-parody')?.value.trim() || '';
+            const url = document.getElementById('adv-url')?.value.trim() || '';
+
+            const currentHash = window.location.hash || '#/';
+            const [base] = currentHash.split('?');
+            const targetBase = ['#/', '#/artworks', '#/manga', '#/novel', '#/explore'].includes(base) ? base : '#/explore';
+
             const params = new URLSearchParams();
             if (tag) params.set('tag', tag);
             if (char) params.set('character', char);
             if (parody) params.set('parody', parody);
             if (url) params.set('source_url', url);
-    
-            this.nav(`#/explore?${params.toString()}`);
+
+            this.nav(`${targetBase}?${params.toString()}`);
           }
-    
+
           clearAdvSearch() {
-            this.nav('#/explore');
+            const currentHash = window.location.hash || '#/';
+            const [base] = currentHash.split('?');
+            const targetBase = ['#/', '#/artworks', '#/manga', '#/novel', '#/explore'].includes(base) ? base : '#/explore';
+            this.nav(targetBase);
           }
 
           toggleProfAdvSearch() {
@@ -25106,6 +25953,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             p.set('tab', tabName);
             p.delete('page');
             this.nav(`${base}?${p.toString()}`);
+          }
+
+          toggleProfileFavMenu(btn, e) {
+            e.stopPropagation();
+            const menu = document.getElementById('profile-fav-dropdown-menu');
+            if (!menu) return;
+            const isShown = menu.style.display === 'flex';
+            if (isShown) {
+              menu.style.display = 'none';
+            } else {
+              const rect = btn.getBoundingClientRect();
+              menu.style.top = `${rect.bottom + 6}px`;
+              menu.style.left = `${Math.max(10, Math.min(rect.left, window.innerWidth - 220))}px`;
+              menu.style.display = 'flex';
+              const dismiss = (ev) => {
+                if (!menu.contains(ev.target) && ev.target !== btn) {
+                  menu.style.display = 'none';
+                  window.removeEventListener('click', dismiss);
+                }
+              };
+              setTimeout(() => window.addEventListener('click', dismiss), 50);
+            }
           }
     
           updateParam(key, val) {
@@ -25852,6 +26721,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const images = art.images || [];
               const leadImg = images[0] || {};
               const isLeadVid = art.type === 'video' || (leadImg.mime_type && leadImg.mime_type.startsWith('video/'));
+              const isSafeBlurPost = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
     
               // Previous/next post IDs (supports series chaining for manga)
               const prevPostId = (art.type === 'manga' && art.series_prev) ? art.series_prev.id : (art.prev_id || null);
@@ -25881,7 +26751,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <div id="single-page-preview-box" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
                       <div id="preview-media-inner" style="display:flex; justify-content:center; position:relative; align-items:center; width:100%; background:#08080a; ${firstIsVid ? '' : 'cursor:pointer;'}" data-file="${this.escape(leadImg.file_name || '')}" ${firstIsVid ? '' : 'onclick="app.toggleHdOriginal(this)"'}>
                         ${(art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user)) ? `
-                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); document.getElementById('artwork-media-container')?.classList.toggle('safe-blur-revealed'); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
                             <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                             <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
                             <span style="font-size:0.75rem; opacity:0.8;">Click this card to unblur and view</span>
@@ -25908,7 +26778,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <div class="thumb-reel" id="thumb-reel-strip">
                       ${images.map((img, idx) => `
                         <div class="thumb-reel-item ${idx === 0 ? 'active' : ''}" onclick="app.switchLeadImage(${idx})" id="reel-item-${idx}">
-                          <img src="?access=artwork&action=thumb&f=${encodeURIComponent(img.file_name)}" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(img.file_name)}'">
+                          <img src="?access=artwork&action=thumb&f=${encodeURIComponent(img.file_name)}" class="${isSafeBlurPost ? 'safe-blur-target' : ''}" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(img.file_name)}'">
                           <div class="thumb-eye-overlay">
                             <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                           </div>
@@ -25942,8 +26812,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 `;
               } else if (isLeadVid) {
                 mediaHtml = `
-                  <div class="viewer-media-wrap" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
-                    <video controls autoplay loop playsinline style="width:100%; height:auto; display:block; background:#000;">
+                  <div class="viewer-media-wrap position-relative" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
+                    ${art.rating === 'r18' ? `<div class="badge-flag" style="z-index:10;">R-18</div>` : ''}
+                    ${isSafeBlurPost ? `
+                      <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                        <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                        <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
+                        <span style="font-size:0.75rem; opacity:0.8;">Click to unblur and view video</span>
+                      </div>
+                    ` : ''}
+                    <video controls autoplay loop playsinline class="${isSafeBlurPost ? 'safe-blur-target' : ''}" style="width:100%; height:auto; display:block; background:#000;">
                       <source src="?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name)}" type="${leadImg.mime_type || 'video/mp4'}">
                       Your browser does not support HTML5 video playback.
                     </video>
@@ -25951,10 +26829,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 `;
               } else {
                 mediaHtml = `
-                  <div class="viewer-media-wrap" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
+                  <div class="viewer-media-wrap position-relative" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
+                    ${art.rating === 'r18' ? `<div class="badge-flag" style="z-index:10;">R-18</div>` : ''}
                     <div style="display:flex; justify-content:center; position:relative; align-items:center; width:100%; background:#08080a; cursor:pointer;" data-file="${this.escape(leadImg.file_name || '')}" onclick="app.toggleHdOriginal(this)">
+                      ${isSafeBlurPost ? `
+                        <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                          <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                          <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
+                          <span style="font-size:0.75rem; opacity:0.8;">Click to unblur and view image</span>
+                        </div>
+                      ` : ''}
                       <div class="spinner" id="preview-loading-spinner" style="position:absolute; margin:auto; display:none;"></div>
-                      <img id="main-artwork-display" src="?access=artwork&action=thumb&f=${encodeURIComponent(leadImg.file_name || '')}"
+                      <img id="main-artwork-display" class="${isSafeBlurPost ? 'safe-blur-target' : ''}" src="?access=artwork&action=thumb&f=${encodeURIComponent(leadImg.file_name || '')}"
                            data-raw="?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}"
                            data-loaded="0"
                            onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}';"
@@ -26040,7 +26926,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <div class="viewer-info-card" style="background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:14px; padding:1.4rem; display:flex; flex-direction:column; gap:0.9rem;">
                       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:0.8rem; flex-wrap:wrap;">
                         <div style="min-width:0; flex:1;">
-                          <h1 style="font-size:1.5rem; font-weight:800; letter-spacing:-0.5px;">${this.escape(art.title)}</h1>
+                          <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                            <h1 style="font-size:1.5rem; font-weight:800; letter-spacing:-0.5px; margin:0;">${this.escape(art.title)}</h1>
+                            ${art.rating === 'r18' ? `<span class="badge-flag" style="position:static; font-size:0.75rem; padding:0.2rem 0.55rem;">R-18</span>` : ''}
+                            ${art.is_ai ? `<span class="badge-flag ai" style="position:static; font-size:0.75rem; padding:0.2rem 0.55rem;">AI</span>` : ''}
+                          </div>
                           <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.3rem;">
                             Posted ${new Date(art.created_at * 1000).toLocaleDateString()} &bull; ${(art.view_count || 0).toLocaleString()} views &bull; ${art.like_count || 0} likes
                           </div>
@@ -26208,12 +27098,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const isV = (imgObj.mime_type && imgObj.mime_type.startsWith('video/')) || /\.(mp4|webm|mov|mkv|ogg)$/i.test(imgObj.file_name);
   
             if (previewInner) {
+              const isSafeBlurActive = (this.currentArt && this.currentArt.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
+              const isRevealed = previewInner.classList.contains('safe-blur-revealed');
+              const targetClass = (isSafeBlurActive && !isRevealed) ? 'safe-blur-target' : '';
+
               previewInner.dataset.file = imgObj.file_name || '';
               if (isV) {
                 previewInner.onclick = null;
                 previewInner.style.cursor = 'default';
                 previewInner.innerHTML = `
-                  <video controls autoplay loop playsinline style="width:100%; height:auto; display:block; background:#000;">
+                  ${(isSafeBlurActive && !isRevealed) ? `
+                    <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                      <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                      <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
+                      <span style="font-size:0.75rem; opacity:0.8;">Click this card to unblur and view</span>
+                    </div>
+                  ` : ''}
+                  <video controls autoplay loop playsinline class="${targetClass}" style="width:100%; height:auto; display:block; background:#000;">
                     <source src="?access=artwork&action=raw&f=${encodeURIComponent(imgObj.file_name)}" type="${imgObj.mime_type || 'video/mp4'}">
                   </video>
                 `;
@@ -26221,8 +27122,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 previewInner.onclick = () => this.toggleHdOriginal(previewInner);
                 previewInner.style.cursor = 'pointer';
                 previewInner.innerHTML = `
+                  ${(isSafeBlurActive && !isRevealed) ? `
+                    <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                      <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                      <span style="font-size:0.95rem; font-weight:800; letter-spacing:0.5px;">R-18 SENSITIVE WORK</span>
+                      <span style="font-size:0.75rem; opacity:0.8;">Click this card to unblur and view</span>
+                    </div>
+                  ` : ''}
                   <div class="spinner" id="preview-loading-spinner" style="position:absolute; margin:auto; display:none;"></div>
-                  <img id="main-artwork-display" src="?access=artwork&action=thumb&f=${encodeURIComponent(imgObj.file_name)}"
+                  <img id="main-artwork-display" class="${targetClass}" src="?access=artwork&action=thumb&f=${encodeURIComponent(imgObj.file_name)}"
                        data-raw="?access=artwork&action=raw&f=${encodeURIComponent(imgObj.file_name)}"
                        data-loaded="0"
                        style="width:100%; height:auto; display:block; opacity:1; transition:opacity 0.2s ease-in-out;"
@@ -26724,10 +27632,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const isFavAll = activeTab === 'favorites_all' || activeTab === 'favorites';
               const isFavArtworks = activeTab === 'favorites_artworks';
               const isFavManga = activeTab === 'favorites_manga';
-              const isFavTab = isFavAll || isFavArtworks || isFavManga;
+              const isFavNovel = activeTab === 'favorites_novel';
+              const isFavTab = isFavAll || isFavArtworks || isFavManga || isFavNovel;
 
               let favLabel = 'Favorites';
               if (isFavManga) favLabel = 'Fav: Manga';
+              else if (isFavNovel) favLabel = 'Fav: Novels';
               else if (isFavArtworks) favLabel = 'Fav: Artworks';
               else if (isFavAll && activeTab !== 'favorites') favLabel = 'Fav: All';
 
@@ -26756,7 +27666,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const bannerStyle = `background-image: url('?action=get_profile_background&id=${prof.id}'); background-size: cover; background-position: center;`;
 
               let profRating = this.r18Enabled ? (profParams.get('rating') || 'all') : 'safe';
-              const reqData = { limit: 24, page: profPage };
+              const reqData = { limit: 24, page: profPage, hide_ai: this.hideAI ? 1 : 0 };
               if (profQ) reqData.q = profQ;
               if (profSort) reqData.sort = profSort;
               reqData.rating = profRating;
@@ -26767,6 +27677,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (isFavManga) {
                 reqData.feed = 'favorites';
                 reqData.type = 'manga';
+                reqData.user_id = prof.id;
+              } else if (isFavNovel) {
+                reqData.feed = 'favorites';
+                reqData.type = 'novel';
                 reqData.user_id = prof.id;
               } else if (isFavArtworks) {
                 reqData.feed = 'favorites';
@@ -26779,6 +27693,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else if (activeTab === 'manga') {
                 reqData.user_id = prof.id;
                 reqData.type = 'manga';
+              } else if (activeTab === 'novel') {
+                reqData.user_id = prof.id;
+                reqData.type = 'novel';
               } else if (activeTab === 'artworks') {
                 reqData.user_id = prof.id;
                 reqData.type = 'artworks';
@@ -26832,21 +27749,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6M10 4.25C10 3.56 9.44 3 8.75 3S7.5 3.56 7.5 4.25 8.06 5.5 8.75 5.5 10 4.94 10 4.25Z"/></svg>
                     <span>Manga</span>
                   </button>
-                  <div style="position:relative; display:inline-flex; flex-shrink:0;" onmouseleave="const m = this.querySelector('.dropdown-menu-list'); if (m) m.style.display = 'none';">
-                    <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${isFavTab ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${isFavTab ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="const m = this.nextElementSibling; m.style.display = m.style.display === 'flex' ? 'none' : 'flex';">
+                  <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${activeTab === 'novel' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'novel' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none; flex-shrink:0;" onclick="app.switchProfileTab('novel')">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>
+                    <span>Novels</span>
+                  </button>
+                  <div style="position:relative; display:inline-flex; flex-shrink:0;">
+                    <button type="button" role="tab" id="profile-fav-tab-btn" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${isFavTab ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${isFavTab ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="app.toggleProfileFavMenu(this, event)">
                       <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                       <span>${favLabel}</span>
                       <svg viewBox="0 0 24 24" style="width:13px;height:13px;margin-left:1px;"><path d="M7 10l5 5 5-5z"/></svg>
                     </button>
-                    <div class="dropdown-menu-list" style="display:none; position:absolute; top:calc(100% + 4px); right:0; min-width:180px; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:10px; box-shadow:var(--shadow-md); z-index:100; padding:0.35rem; flex-direction:column; gap:0.2rem;">
-                      <div class="nav-item ${isFavAll ? 'active' : ''}" style="padding:0.45rem 0.75rem; font-size:12px; border-radius:6px; cursor:pointer;" onclick="app.switchProfileTab('favorites_all')">
+                    <div id="profile-fav-dropdown-menu" style="display:none; position:fixed; background:#18181c; border:1px solid var(--border-strong); border-radius:12px; box-shadow:var(--shadow-lg); z-index:9999; padding:0.4rem; min-width:200px; flex-direction:column; gap:0.25rem;">
+                      <div class="nav-item ${isFavAll ? 'active' : ''}" style="padding:0.5rem 0.8rem; font-size:13px; border-radius:8px; cursor:pointer;" onclick="app.switchProfileTab('favorites_all'); document.getElementById('profile-fav-dropdown-menu').style.display='none';">
                         All Favorites
                       </div>
-                      <div class="nav-item ${isFavArtworks ? 'active' : ''}" style="padding:0.45rem 0.75rem; font-size:12px; border-radius:6px; cursor:pointer;" onclick="app.switchProfileTab('favorites_artworks')">
+                      <div class="nav-item ${isFavArtworks ? 'active' : ''}" style="padding:0.5rem 0.8rem; font-size:13px; border-radius:8px; cursor:pointer;" onclick="app.switchProfileTab('favorites_artworks'); document.getElementById('profile-fav-dropdown-menu').style.display='none';">
                         Artworks (Illust &amp; Video)
                       </div>
-                      <div class="nav-item ${isFavManga ? 'active' : ''}" style="padding:0.45rem 0.75rem; font-size:12px; border-radius:6px; cursor:pointer;" onclick="app.switchProfileTab('favorites_manga')">
+                      <div class="nav-item ${isFavManga ? 'active' : ''}" style="padding:0.5rem 0.8rem; font-size:13px; border-radius:8px; cursor:pointer;" onclick="app.switchProfileTab('favorites_manga'); document.getElementById('profile-fav-dropdown-menu').style.display='none';">
                         Manga
+                      </div>
+                      <div class="nav-item ${isFavNovel ? 'active' : ''}" style="padding:0.5rem 0.8rem; font-size:13px; border-radius:8px; cursor:pointer;" onclick="app.switchProfileTab('favorites_novel'); document.getElementById('profile-fav-dropdown-menu').style.display='none';">
+                        Novels
                       </div>
                     </div>
                   </div>
@@ -26903,25 +27827,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else {
                 html += `<div class="art-grid">`;
                 const isMangaTab = (activeTab === 'manga' || activeTab === 'favorites_manga');
+                const isNovelTab = (activeTab === 'novel' || activeTab === 'favorites_novel');
 
                 arts.artworks.forEach(art => {
                   const coverFileName = art.cover_file || '';
                   const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
                   const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
                   const isManga = art.type === 'manga';
+                  const isNovel = art.type === 'novel';
                   const pageCount = Number(art.page_count || 1);
                   const viewCount = Number(art.view_count || 0);
                   const likeCount = Number(art.like_count || 0);
 
-                  // In Manga tab, click opens view manga. In non-Manga tabs, click opens view post.
                   const seriesTitle = art.series_name || art.title;
                   const authorUid = art.user_id || prof.id;
-                  const cardTarget = isMangaTab
-                    ? `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`
-                    : `#/artwork/${art.id}`;
+                  let cardTarget = `#/artwork/${art.id}`;
+                  if (isMangaTab || (activeTab === 'all' && isManga)) {
+                    cardTarget = `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`;
+                  } else if (isNovelTab || (activeTab === 'all' && isNovel)) {
+                    cardTarget = `#/novel/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`;
+                  }
 
-                  // 9:16 aspect ratio only in Manga tab; 1:1 in non-Manga tabs
-                  const ratioClass = isMangaTab ? 'manga-card ratio-9-16' : '';
+                  const ratioClass = (isMangaTab || isNovelTab) ? 'manga-card ratio-9-16' : '';
 
                   const isSafeBlurProf = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
                   html += `
@@ -26947,6 +27874,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
                         <div style="position:absolute; top:8px; left:8px; display:flex; flex-direction:column; gap:4px; align-items:flex-start; z-index:3;">
                           ${isManga ? `<div class="badge-flag manga" style="position:static;">MANGA</div>` : ''}
+                          ${isNovel ? `<div class="badge-flag novel" style="position:static;">NOVEL</div>` : ''}
                           ${isVid ? `<div class="badge-flag video" style="position:static;">VIDEO</div>` : ''}
                           ${art.rating === 'r18' ? `<div class="badge-flag" style="position:static;">R-18</div>` : ''}
                           ${art.is_ai ? `<div class="badge-flag ai" style="position:static;">AI</div>` : ''}
@@ -27311,8 +28239,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
     
                   <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Caption / Description (Markdown enabled)</label>
-                    <textarea name="description" class="form-textarea" placeholder="Describe the lore, brushes used, or artist commentary...">${this.escape(artData.description)}</textarea>
+                    <label class="form-label" id="studio-description-label">Caption / Description (Markdown enabled)</label>
+                    <div id="studio-novel-text-note" style="display:${artData.type === 'novel' ? 'block' : 'none'}; font-size:0.8rem; color:#10b981; margin-bottom:0.4rem;">
+                      Write your chapter story content below. Full Markdown formatting is supported.
+                    </div>
+                    <textarea name="description" class="form-textarea" style="min-height:140px;" placeholder="Write story content, lore, or description...">${this.escape(artData.description)}</textarea>
                   </div>
     
                   <div class="form-grid-2" style="margin-top:1.2rem;">
@@ -27321,6 +28252,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <select name="type" class="form-select custom-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
                         <option value="illust" ${artData.type === 'illust' ? 'selected' : ''}>Illustration / Picture</option>
                         <option value="manga" ${artData.type === 'manga' ? 'selected' : ''}>Manga / Comic Series</option>
+                        <option value="novel" ${artData.type === 'novel' ? 'selected' : ''}>Light Novel / Web Novel</option>
                         ${this.allowVideo ? `<option value="video" ${artData.type === 'video' ? 'selected' : ''}>Animation / Video Clip</option>` : ''}
                       </select>
                     </div>
@@ -27720,6 +28652,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 const targetSeries = seriesName || res.series_name || fd.get('title') || 'manga';
                 this.toast('Manga updated successfully!');
                 this.nav(`#/manga/series/${encodeURIComponent(targetSeries)}/userid/${authorId}`);
+              } else if (selectedType === 'novel' || res.type === 'novel') {
+                const authorId = res.user_id || this.user.id;
+                const targetSeries = seriesName || res.series_name || fd.get('title') || 'novel';
+                this.toast('Novel updated successfully!');
+                this.nav(`#/novel/series/${encodeURIComponent(targetSeries)}/userid/${authorId}`);
               } else {
                 this.toast('Artwork published successfully!');
                 this.nav(`#/artwork/${res.artwork_id}`);
@@ -28022,7 +28959,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (loading || !hasMore) return;
               loading = true;
               try {
-                const res = await this.api('artworks_list', { user_id: artistUserId, limit: 25, page: page });
+                const res = await this.api('artworks_list', {
+                  user_id: artistUserId,
+                  limit: 25,
+                  page: page,
+                  rating: this.r18Enabled ? 'all' : 'safe',
+                  hide_ai: this.hideAI ? 1 : 0
+                });
                 if (page === 1) track.innerHTML = '';
                 if (!res.artworks || !res.artworks.length) {
                   if (page === 1) track.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem; padding:1rem;">No other works found.</div>';
@@ -28033,6 +28976,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 res.artworks.forEach(item => {
                   if (document.getElementById(`carousel-item-${item.id}`)) return;
                   const isCurrent = (item.id == currentArtId);
+                  const isSafeBlurCarousel = (item.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
                   const el = document.createElement('div');
                   el.id = `carousel-item-${item.id}`;
                   el.style.cssText = `flex:0 0 110px; aspect-ratio:1/1; border-radius:8px; overflow:hidden; position:relative; cursor:pointer; border:2px solid ${isCurrent ? 'var(--accent)' : 'var(--border-subtle)'}; background:#08080a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 50'%3E%3Ccircle cx='25' cy='25' r='18' fill='none' stroke='%230096fa' stroke-width='3.5' stroke-linecap='round' stroke-dasharray='75' stroke-dashoffset='25'%3E%3CanimateTransform attributeName='transform' type='rotate' from='0 25 25' to='360 25 25' dur='0.8s' repeatCount='indefinite'/%3E%3C/circle%3E%3C/svg%3E") no-repeat center center; background-size:24px 24px;`;
@@ -28042,9 +28986,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     if (vp) vp.scrollTop = 0;
                   };
                   el.innerHTML = `
-                    <img src="?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}" style="width:100%; height:100%; object-fit:cover; display:block;" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(item.cover_file)}'">
-                    <div style="position:absolute; bottom:0; left:0; right:0; padding:0.25rem 0.35rem; background:linear-gradient(transparent, rgba(0,0,0,0.85)); font-size:0.68rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${this.escape(item.title)}</div>
-                    ${isCurrent ? `<div style="position:absolute; top:4px; left:4px; background:var(--accent); color:#fff; font-size:0.62rem; font-weight:800; padding:0.1rem 0.35rem; border-radius:4px;">CURRENT</div>` : ''}
+                    ${isSafeBlurCarousel ? `
+                      <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal" style="padding:4px;">
+                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                        <span style="font-size:0.6rem; font-weight:800;">R-18</span>
+                      </div>
+                    ` : ''}
+                    <img src="?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}" class="${isSafeBlurCarousel ? 'safe-blur-target' : ''}" style="width:100%; height:100%; object-fit:cover; display:block;" alt="" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(item.cover_file)}'">
+                    <div style="position:absolute; bottom:0; left:0; right:0; padding:0.25rem 0.35rem; background:linear-gradient(transparent, rgba(0,0,0,0.85)); font-size:0.68rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; z-index:3;">${this.escape(item.title)}</div>
+                    ${isCurrent ? `<div style="position:absolute; top:4px; left:4px; background:var(--accent); color:#fff; font-size:0.62rem; font-weight:800; padding:0.1rem 0.35rem; border-radius:4px; z-index:4;">CURRENT</div>` : ''}
+                    ${item.rating === 'r18' ? `<div style="position:absolute; top:4px; right:4px; background:var(--r18); color:#fff; font-size:0.62rem; font-weight:800; padding:0.1rem 0.35rem; border-radius:4px; z-index:4;">R-18</div>` : ''}
                   `;
                   track.appendChild(el);
                 });
@@ -35701,7 +36652,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.1'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.2'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -39554,6 +40505,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $total_artworks = (int)($db->query("SELECT COUNT(id) FROM artworks")->fetchColumn() ?: 0);
             $total_illustrations = (int)($db->query("SELECT COUNT(id) FROM artworks WHERE type = 'illust'")->fetchColumn() ?: 0);
             $total_videos = (int)($db->query("SELECT COUNT(id) FROM artworks WHERE type = 'video'")->fetchColumn() ?: 0);
+            $total_novels = (int)($db->query("SELECT COUNT(id) FROM artworks WHERE type = 'novel'")->fetchColumn() ?: 0);
             $total_r18 = (int)($db->query("SELECT COUNT(id) FROM artworks WHERE rating = 'r18'")->fetchColumn() ?: 0);
 
             $where_clauses = ["1=1"];
@@ -39628,6 +40580,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <select name="type" class="admin-pill-select" onchange="this.form.submit()">
                   <option value="" <?php echo $type_filter === '' ? 'selected' : ''; ?>>All Formats</option>
                   <option value="illust" <?php echo $type_filter === 'illust' ? 'selected' : ''; ?>>Illustrations</option>
+                  <option value="manga" <?php echo $type_filter === 'manga' ? 'selected' : ''; ?>>Manga</option>
+                  <option value="novel" <?php echo $type_filter === 'novel' ? 'selected' : ''; ?>>Novels</option>
                   <option value="video" <?php echo $type_filter === 'video' ? 'selected' : ''; ?>>Videos</option>
                 </select>
                 <select name="rating" class="admin-pill-select" onchange="this.form.submit()">
@@ -39757,11 +40711,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="col-12 col-sm-6 col-xl-3">
                   <div class="admin-card p-3 h-100">
                     <div class="d-flex justify-content-between align-items-center mb-1">
-                      <span class="text-secondary small fw-bold text-uppercase">Animations</span>
-                      <span class="text-warning"><i class="bi bi-camera-reels fs-5"></i></span>
+                      <span class="text-secondary small fw-bold text-uppercase">Novels &amp; Books</span>
+                      <span class="text-success"><i class="bi bi-book-half fs-5"></i></span>
                     </div>
-                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_videos); ?></div>
-                    <small class="text-secondary">Video &amp; clips</small>
+                    <div class="fs-3 fw-bold text-white"><?php echo number_format($total_novels); ?></div>
+                    <small class="text-secondary">Web &amp; light novels</small>
                   </div>
                 </div>
 
@@ -39832,7 +40786,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                               <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo (int)$art['page_count']; ?> page(s) &bull; <?php echo htmlspecialchars($art['tags'] ?: 'No tags'); ?></small>
                             </td>
                             <td>
-                              <span class="admin-badge <?php echo $art['type'] === 'video' ? 'admin-badge-warning' : 'admin-badge-info'; ?>">
+                              <span class="admin-badge <?php echo $art['type'] === 'novel' ? 'admin-badge-success' : ($art['type'] === 'video' ? 'admin-badge-warning' : 'admin-badge-info'); ?>">
                                 <?php echo strtoupper(htmlspecialchars($art['type'])); ?>
                               </span>
                             </td>
@@ -39913,6 +40867,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         <label class="form-label text-secondary small fw-bold mb-1">TYPE</label>
                         <select name="type" id="edit-art-type" class="admin-pill-select w-100">
                           <option value="illust">Illustration</option>
+                          <option value="manga">Manga</option>
+                          <option value="novel">Novel</option>
                           <option value="video">Video</option>
                         </select>
                       </div>
@@ -41711,7 +42667,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.1';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.2';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -128138,7 +129094,6 @@ SOFTWARE.</div>
                  toolbarTop = (wRect.height / 2) - (toolbarHeight / 2);
               }
             }
-
             qToolbar.style.left = `${toolbarLeft}px`;
             qToolbar.style.top = `${toolbarTop}px`;
           }
@@ -128948,11 +129903,13 @@ SOFTWARE.</div>
               initialY = e.clientY - yOffset;
               if (e.target === header || header.contains(e.target)) isDragging = true;
             }
+
             function dragEnd() {
               initialX = currentX;
               initialY = currentY;
               isDragging = false;
             }
+
             function drag(e) {
               if (isDragging) {
                 e.preventDefault();
