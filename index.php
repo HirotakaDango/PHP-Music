@@ -1698,7 +1698,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.3');
+define('APP_VERSION', '12.4');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -34316,11 +34316,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if ($cfg_repo && trim($cfg_repo) !== '') $repo = trim($cfg_repo);
       } catch (\Throwable $e) {}
 
-      // Prioritize raw GitHub file directly; use CDN as resilient secondary fallback
+      // Prioritize raw GitHub file directly; use CDN as resilient secondary fallback (Cache-Busted)
+      $ts = time();
       $endpoints = [
-        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php",
-        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php",
-        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php"
+        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php?t={$ts}",
+        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}",
+        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}"
       ];
       $remote_code = false;
 
@@ -34400,7 +34401,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       // Atomic File Overwrite using Temporary Buffer
       $tmp_swap = __FILE__ . '.tmp_' . uniqid();
       if (@file_put_contents($tmp_swap, $remote_code) !== false) {
-        if (@rename($tmp_swap, __FILE__)) {
+        if (@rename($tmp_swap, __FILE__) || (@copy($tmp_swap, __FILE__) && @unlink($tmp_swap))) {
+          if (function_exists('opcache_invalidate')) { @opcache_invalidate(__FILE__, true); }
           if (function_exists('opcache_reset')) { @opcache_reset(); }
           if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
 
@@ -34521,10 +34523,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if ($cfg_repo && trim($cfg_repo) !== '') $repo = trim($cfg_repo);
       } catch (\Throwable $e) {}
 
+      $ts = time();
       $endpoints = [
-        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php",
-        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php",
-        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php"
+        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php?t={$ts}",
+        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}",
+        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}"
       ];
       $remote_code = false;
 
@@ -34603,7 +34606,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       // 2. Atomic Overwrite using Temporary Buffer
       $tmp_swap = __FILE__ . '.tmp_' . uniqid();
       if (@file_put_contents($tmp_swap, $remote_code) !== false) {
-        if (@rename($tmp_swap, __FILE__)) {
+        if (@rename($tmp_swap, __FILE__) || (@copy($tmp_swap, __FILE__) && @unlink($tmp_swap))) {
+          if (function_exists('opcache_invalidate')) { @opcache_invalidate(__FILE__, true); }
           if (function_exists('opcache_reset')) { @opcache_reset(); }
           if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
           log_admin_activity(get_db(), $_SESSION['admin_email'], "Executed Smart Update from branch '{$branch}' (Backup: " . basename($backup_file) . ")", 0);
@@ -37576,7 +37580,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.3'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.4'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -44564,7 +44568,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.3';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.4';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -44599,10 +44603,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $remote_version = $cached_probe['remote_version'] ?? 'Unknown';
               $ping_latency_ms = (float)($cached_probe['ping_latency_ms'] ?? 0);
             } else {
+              $ts = time();
               $endpoints = [
-                "https://cdn.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php",
-                "https://raw.githubusercontent.com/{$active_repo}/{$target_branch}/index.php"
+                "https://raw.githubusercontent.com/{$active_repo}/{$target_branch}/index.php?t={$ts}",
+                "https://cdn.jsdelivr.net/gh/{$active_repo}@{$target_branch}/index.php?t={$ts}"
               ];
+
+              $remote_code = false;
 
               $remote_code = false;
               $remote_available = false;
@@ -45231,6 +45238,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   const statusDiv = document.getElementById('dropzone-file-status');
                   const mainLabel = document.getElementById('dropzone-main-label');
                   const submitBtn = document.getElementById('btn-submit-manual-patch');
+                  const patchForm = document.getElementById('offline-patch-form');
 
                   if (!dropzone || !fileInput) return;
 
@@ -45297,6 +45305,115 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                       validateAndSetFile(e.dataTransfer.files[0]);
                     }
                   });
+
+                  // Smooth AJAX Deployment Integration
+                  if (patchForm) {
+                    patchForm.addEventListener('submit', async (e) => {
+                      e.preventDefault();
+
+                      const modalEl = document.getElementById('updateProgressModal');
+                      const progressBar = document.getElementById('update-progress-bar');
+                      const pctLabel = document.getElementById('update-percentage-label');
+                      const stageLabel = document.getElementById('update-stage-label');
+                      const consoleBox = document.getElementById('update-live-console');
+                      const spinner = document.getElementById('update-spinner');
+                      const closeBtn = document.getElementById('update-modal-close-btn');
+                      const footer = document.getElementById('update-action-footer');
+                      const title = document.getElementById('update-modal-title');
+
+                      if (modalEl) {
+                        progressBar.style.width = '10%';
+                        progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-danger';
+                        pctLabel.textContent = '10%';
+                        stageLabel.textContent = 'UPLOADING MANUAL PATCH...';
+                        consoleBox.textContent = `[${new Date().toLocaleTimeString()}] Starting offline patch deployment...\n`;
+                        spinner.classList.remove('d-none');
+                        closeBtn.classList.add('d-none');
+                        footer.classList.add('d-none');
+                        footer.classList.remove('d-flex');
+                        title.textContent = 'Deploying Manual Patch';
+
+                        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+                      }
+
+                      try {
+                        const fd = new FormData(patchForm);
+                        fd.append('upload_manual_patch', '1');
+
+                        if (consoleBox) {
+                          consoleBox.textContent += `[${new Date().toLocaleTimeString()}] Uploading file to server and validating checksums...\n`;
+                        }
+
+                        const res = await fetch(patchForm.action, {
+                          method: 'POST',
+                          body: fd,
+                          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                        });
+
+                        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+
+                        // The backend returns a redirect, so fetch yields the HTML of the resulting page.
+                        // We parse it to extract the flash status message and refresh the DOM.
+                        const htmlText = await res.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(htmlText, 'text/html');
+
+                        const flashMsgEl = doc.querySelector('.alert-success, .alert-danger');
+                        let flashMsg = '';
+                        let isError = false;
+                        if (flashMsgEl) {
+                          flashMsg = flashMsgEl.textContent.trim();
+                          if (flashMsgEl.classList.contains('alert-danger')) isError = true;
+                        }
+
+                        if (isError) {
+                          throw new Error(flashMsg || 'Validation or deployment failed.');
+                        }
+
+                        if (consoleBox) {
+                          progressBar.style.width = '100%';
+                          progressBar.className = 'progress-bar bg-success';
+                          pctLabel.textContent = '100%';
+                          stageLabel.textContent = 'COMPLETE: SYSTEM UPGRADED';
+                          consoleBox.textContent += `[${new Date().toLocaleTimeString()}] SUCCESS: ${flashMsg || 'Patch deployed successfully.'}\n`;
+                          
+                          spinner.classList.add('d-none');
+                          closeBtn.classList.remove('d-none');
+                          footer.classList.remove('d-none');
+                          footer.classList.add('d-flex');
+                          title.textContent = 'Patch Installation Complete';
+                        }
+                        
+                        // Smoothly inject the new DOM state exactly like the global interceptor
+                        const newContent = doc.querySelector('#admin-dynamic-content');
+                        const currentContent = document.getElementById('admin-dynamic-content');
+                        if (newContent && currentContent) {
+                          currentContent.innerHTML = newContent.innerHTML;
+                          if (doc.title) document.title = doc.title;
+                          currentContent.querySelectorAll('script').forEach(oldScript => {
+                            const newScript = document.createElement('script');
+                            Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+                            newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+                            oldScript.parentNode.replaceChild(newScript, oldScript);
+                          });
+                        }
+                      } catch (err) {
+                        if (consoleBox) {
+                          progressBar.className = 'progress-bar bg-danger';
+                          progressBar.style.width = '100%';
+                          pctLabel.textContent = 'ERR';
+                          stageLabel.textContent = 'DEPLOYMENT FAILED';
+                          consoleBox.textContent += `\n-- [FATAL ERROR]: ${err.message}\n`;
+                          
+                          spinner.classList.add('d-none');
+                          closeBtn.classList.remove('d-none');
+                          footer.classList.remove('d-none');
+                          footer.classList.add('d-flex');
+                          title.textContent = 'Deployment Encountered an Error';
+                        }
+                      }
+                    });
+                  }
                 })();
               </script>
 
@@ -46440,10 +46557,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
               try {
                 const activeRepo = '<?php echo htmlspecialchars($active_repo); ?>';
+                const ts = Date.now();
                 const endpoints = [
-                  `https://raw.githubusercontent.com/${activeRepo}/<?php echo htmlspecialchars($target_branch); ?>/index.php`,
-                  `https://cdn.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`,
-                  `https://fastly.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php`
+                  `https://raw.githubusercontent.com/${activeRepo}/<?php echo htmlspecialchars($target_branch); ?>/index.php?t=${ts}`,
+                  `https://cdn.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php?t=${ts}`,
+                  `https://fastly.jsdelivr.net/gh/${activeRepo}@<?php echo htmlspecialchars($target_branch); ?>/index.php?t=${ts}`
                 ];
 
                 let code = null;
@@ -46543,9 +46661,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const targetBranch = '<?php echo htmlspecialchars($target_branch); ?>';
 
               try {
+                const ts = Date.now();
                 const [localRes, remoteRes] = await Promise.allSettled([
                   fetch('?access=admin&page=drive&action=read_text&f=index.php', { cache: 'no-store' }),
-                  fetch(`https://cdn.jsdelivr.net/gh/${activeRepo}@${targetBranch}/index.php`, { cache: 'no-store' })
+                  fetch(`https://cdn.jsdelivr.net/gh/${activeRepo}@${targetBranch}/index.php?t=${ts}`, { cache: 'no-store' })
                 ]);
 
                 let localCode = '';
@@ -46559,7 +46678,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   remoteCode = await remoteRes.value.text();
                 } else {
                   // Secondary direct GitHub fallback
-                  const rawFallback = await fetch(`https://raw.githubusercontent.com/${activeRepo}/${targetBranch}/index.php`, { cache: 'no-store' });
+                  const rawFallback = await fetch(`https://raw.githubusercontent.com/${activeRepo}/${targetBranch}/index.php?t=${ts}`, { cache: 'no-store' });
                   if (rawFallback.ok) remoteCode = await rawFallback.text();
                 }
 
