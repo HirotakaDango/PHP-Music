@@ -1698,7 +1698,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.4');
+define('APP_VERSION', '12.5');
 define('PAGE_SIZE', 25);
 define('ADMIN_PAGE_SIZE', 20);
 
@@ -1745,6 +1745,82 @@ $phpboard_categories = [
   'Adult (18+)' => ['s', 'd', 'gif', 'hr', 'r', 'wsr', 'y', '3', 'aco', 'hc', 'hm', 'cm'],
   'Random & Community' => ['b', 'r9k', 's4s', 'vip', 'qa', 'adv', 'an', 'bant', 'int', 'news', 'news2', 'pol', 'soc', 'his', 'hist2', 'phil', 'eco', 'biz', 'lgbt', 'pw', 'qst', 'wsg', 'x', 'meta', 'desk'],
 ];
+
+function get_phpboard_channels_data($db) {
+  static $cached = null;
+  if ($cached !== null) return $cached;
+
+  try {
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS phpboard_channels (
+        code TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT DEFAULT 'Random & Community',
+        is_nsfw INTEGER DEFAULT 0,
+        is_default INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_pboard_chan_cat ON phpboard_channels(category);
+    ");
+
+    $count = (int)$db->query("SELECT COUNT(*) FROM phpboard_channels")->fetchColumn();
+    if ($count === 0) {
+      global $phpboard_categories;
+      $cat_lookup = [];
+      foreach ($phpboard_categories as $cat => $codes) {
+        foreach ($codes as $c) {
+          $cat_lookup[$c] = $cat;
+        }
+      }
+
+      $db->beginTransaction();
+      $stmt = $db->prepare("INSERT OR IGNORE INTO phpboard_channels (code, name, category, is_nsfw, is_default) VALUES (?, ?, ?, ?, 1)");
+      foreach (PHPBOARD_ALLOWED_CHANNELS as $ch) {
+        $name = PHPBOARD_CHANNEL_NAMES[$ch] ?? strtoupper($ch);
+        $cat = $cat_lookup[$ch] ?? 'Random & Community';
+        $is_nsfw = in_array($ch, PHPBOARD_NSFW_CHANNELS) ? 1 : 0;
+        $stmt->execute([$ch, $name, $cat, $is_nsfw]);
+      }
+      $db->commit();
+    }
+
+    $rows = $db->query("SELECT code, name, category, is_nsfw, is_default FROM phpboard_channels ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+    $allowed = [];
+    $names = [];
+    $nsfw = [];
+    $cats = [];
+    $raw_list = [];
+
+    foreach ($rows as $r) {
+      $c = $r['code'];
+      $allowed[] = $c;
+      $names[$c] = $r['name'];
+      if ((int)$r['is_nsfw'] === 1) $nsfw[] = $c;
+      $cat = $r['category'] ?: 'Random & Community';
+      if (!isset($cats[$cat])) $cats[$cat] = [];
+      $cats[$cat][] = $c;
+      $raw_list[$c] = $r;
+    }
+
+    $cached = [
+      'allowed' => $allowed,
+      'names' => $names,
+      'nsfw' => $nsfw,
+      'categories' => $cats,
+      'channels' => $raw_list
+    ];
+    return $cached;
+  } catch (\Throwable $e) {
+    global $phpboard_categories;
+    return [
+      'allowed' => PHPBOARD_ALLOWED_CHANNELS,
+      'names' => PHPBOARD_CHANNEL_NAMES,
+      'nsfw' => PHPBOARD_NSFW_CHANNELS,
+      'categories' => $phpboard_categories,
+      'channels' => []
+    ];
+  }
+}
 
 function get_db() {
   static $db = null;
@@ -19842,7 +19918,42 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $cleanSourceUrls[] = $u;
         }
       }
-      $sourceUrl = implode("\n", array_unique($cleanSourceUrls));
+      $cleanSourceUrls = array_values(array_unique($cleanSourceUrls));
+
+      // Strictly limit to a maximum of 5 raw URLs
+      if (count($cleanSourceUrls) > 5) {
+        jsonResponse(['error' => 'You can provide a maximum of 5 source / raw image URLs per post.'], 400);
+      }
+
+      // Auto-cache thumbnails for raw image URLs
+      foreach ($cleanSourceUrls as $rawImgUrl) {
+        $pathOnly = parse_url($rawImgUrl, PHP_URL_PATH);
+        $ext = strtolower(pathinfo($pathOnly, PATHINFO_EXTENSION));
+        if (in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'])) {
+          $cachedThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'url_' . md5($rawImgUrl) . '.jpg';
+          if (!file_exists($cachedThumb)) {
+            $tmpRaw = tempnam(sys_get_temp_dir(), 'raw_url_');
+            if (function_exists('curl_init')) {
+              $ch = curl_init($rawImgUrl);
+              curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 8,
+                CURLOPT_CONNECTTIMEOUT => 4,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHPMusicPost'
+              ]);
+              $dlData = curl_exec($ch);
+              curl_close($ch);
+              if ($dlData && strlen($dlData) > 500) {
+                file_put_contents($tmpRaw, $dlData);
+                artworkCreateThumbnail($tmpRaw, $cachedThumb, $config['thumb_width'], $config['thumb_quality']);
+              }
+            }
+            @unlink($tmpRaw);
+          }
+        }
+      }
+      $sourceUrl = implode("\n", $cleanSourceUrls);
       $rawTags = trim($_POST['tags'] ?? '');
       $postMode = trim($_POST['post_mode'] ?? 'single');
       $imagesJson = $_POST['images'] ?? '[]';
@@ -19851,13 +19962,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       if (empty($title)) {
         jsonResponse(['error' => 'Title is required.'], 400);
       }
+      if (mb_strlen($title, 'UTF-8') > 100) {
+        jsonResponse(['error' => 'Title exceeds the maximum limit of 100 characters.'], 400);
+      }
+      if (mb_strlen($seriesName, 'UTF-8') > 100) {
+        jsonResponse(['error' => 'Series title exceeds the maximum limit of 100 characters.'], 400);
+      }
+      if (mb_strlen($description, 'UTF-8') > 50000) {
+        jsonResponse(['error' => 'Chapter story text exceeds the limit of 50,000 characters.'], 400);
+      }
+      if (mb_strlen($rawTags, 'UTF-8') > 200) {
+        jsonResponse(['error' => 'Tags exceed the maximum limit of 200 characters.'], 400);
+      }
+      if (mb_strlen($characters, 'UTF-8') > 200) {
+        jsonResponse(['error' => 'Characters field exceeds the maximum limit of 200 characters.'], 400);
+      }
+      if (mb_strlen($parodies, 'UTF-8') > 200) {
+        jsonResponse(['error' => 'Series / Parody field exceeds the maximum limit of 200 characters.'], 400);
+      }
+      if (mb_strlen($tools, 'UTF-8') > 100) {
+        jsonResponse(['error' => 'Tools field exceeds the maximum limit of 100 characters.'], 400);
+      }
+
       if (!is_array($images)) {
         $images = [];
       }
-      // Novels require text in description or at least one cover/illustration
+      // Novels are primarily text; require chapter text
       if ($type === 'novel') {
-        if (empty($description) && empty($images)) {
-          jsonResponse(['error' => 'Please provide chapter text or attach a cover illustration for this novel.'], 400);
+        if (empty($description)) {
+          jsonResponse(['error' => 'Please provide chapter text for this novel.'], 400);
         }
       } else {
         if (empty($images)) {
@@ -21571,8 +21704,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       <link rel="preconnect" href="https://fonts.googleapis.com">
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
       <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
       <style>
         :root,
         :root[data-theme="dark"] {
@@ -21625,6 +21759,155 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           background: transparent;
         }
   
+        /* Unified Editor Container */
+        .unified-editor-box {
+          border: 1px solid rgba(255, 255, 255, 0.15) !important;
+          border-radius: 12px !important;
+          overflow: hidden !important;
+          background: var(--bg-surface-elevated) !important;
+          display: flex !important;
+          flex-direction: column !important;
+          transition: border-color 0.2s ease !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+        .unified-editor-box:focus-within {
+          border-color: #ff0044 !important;
+          box-shadow: 0 0 0 1px #ff0044 !important;
+        }
+
+        .editor-tab-header {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          flex-wrap: wrap !important;
+          gap: 8px !important;
+          background: #18181c !important;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+          padding: 6px 12px !important;
+        }
+
+        .editor-tab-btn {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+          padding: 5px 14px !important;
+          border-radius: 8px !important;
+          font-size: 0.78rem !important;
+          font-weight: 700 !important;
+          color: #9494a8 !important;
+          background: transparent !important;
+          border: 1px solid transparent !important;
+          cursor: pointer !important;
+          transition: all 0.15s ease !important;
+          user-select: none !important;
+        }
+        .editor-tab-btn:hover:not(.active) {
+          color: #ffffff !important;
+          background: rgba(255, 255, 255, 0.05) !important;
+        }
+        .editor-tab-btn.active {
+          background: #ff0044 !important;
+          color: #ffffff !important;
+          border-color: #ff0044 !important;
+        }
+
+        .editor-char-counter {
+          font-family: 'JetBrains Mono', monospace !important;
+          font-size: 0.72rem !important;
+          font-weight: 600 !important;
+        }
+
+        /* Merged Rich Text Toolbar */
+        .editor-toolbar {
+          display: flex !important;
+          flex-direction: row !important;
+          flex-wrap: nowrap !important;
+          align-items: center !important;
+          overflow-x: auto !important;
+          overflow-y: hidden !important;
+          white-space: nowrap !important;
+          -webkit-overflow-scrolling: touch !important;
+          scrollbar-width: thin !important;
+          scrollbar-color: rgba(255, 0, 68, 0.35) transparent !important;
+          width: 100% !important;
+          box-sizing: border-box !important;
+          padding: 6px 10px !important;
+          gap: 4px !important;
+          background: transparent !important;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+          border-top: none !important;
+          border-left: none !important;
+          border-right: none !important;
+          border-radius: 0 !important;
+          margin: 0 !important;
+        }
+        .editor-toolbar::-webkit-scrollbar {
+          height: 5px !important;
+        }
+        .editor-toolbar::-webkit-scrollbar-track {
+          background: rgba(255, 255, 255, 0.03) !important;
+          border-radius: 10px !important;
+        }
+        .editor-toolbar::-webkit-scrollbar-thumb {
+          background: rgba(255, 255, 255, 0.2) !important;
+          border-radius: 10px !important;
+        }
+        .editor-toolbar::-webkit-scrollbar-thumb:hover {
+          background: #ff0044 !important;
+        }
+        .editor-toolbar .btn-tool-item {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          width: 34px !important;
+          height: 34px !important;
+          min-width: 34px !important;
+          max-width: 34px !important;
+          flex-shrink: 0 !important;
+          border-radius: 9px !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          color: #a0a0b2 !important;
+          background: rgba(255, 255, 255, 0.03) !important;
+          border: 1px solid rgba(255, 255, 255, 0.05) !important;
+          transition: all 0.15s ease !important;
+          cursor: pointer !important;
+        }
+        .editor-toolbar .btn-tool-item:hover {
+          background: rgba(255, 255, 255, 0.12) !important;
+          color: #ffffff !important;
+          border-color: rgba(255, 255, 255, 0.2) !important;
+          transform: translateY(-1px);
+        }
+        .editor-toolbar .btn-tool-item:active {
+          transform: scale(0.94);
+        }
+        .editor-toolbar .toolbar-separator {
+          width: 1px !important;
+          height: 20px !important;
+          min-width: 1px !important;
+          background: rgba(255, 255, 255, 0.12) !important;
+          margin: 0 4px !important;
+          flex-shrink: 0 !important;
+        }
+        .spoiler-blur {
+          background: #33333e;
+          color: transparent !important;
+          border-radius: 4px;
+          cursor: pointer;
+          user-select: none;
+          padding: 1px 6px;
+          transition: all 0.2s ease;
+        }
+        .spoiler-blur:hover,
+        .spoiler-blur.revealed {
+          background: rgba(255, 255, 255, 0.14);
+          color: inherit !important;
+          user-select: auto;
+        }
+
         *, *::before, *::after {
           box-sizing: border-box;
           margin: 0;
@@ -22190,25 +22473,109 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           font-weight: 800;
           letter-spacing: 0.5px;
         }
+        .rich-text-content,
         .novel-text-content {
-          font-size: 1.08rem;
-          line-height: 1.88;
+          font-size: 1.02rem;
+          line-height: 1.8;
           color: #e4e4e7;
           word-break: break-word;
-          white-space: pre-wrap;
           font-family: inherit;
         }
+        .rich-text-content p,
         .novel-text-content p {
-          margin-bottom: 1.35rem;
-          text-indent: 1.8rem;
+          margin-bottom: 1.15rem;
         }
+        .rich-text-content h1, .rich-text-content h2, .rich-text-content h3,
+        .novel-text-content h1, .novel-text-content h2, .novel-text-content h3 {
+          margin: 1.5rem 0 0.8rem 0;
+          font-weight: 700;
+          color: #ffffff;
+        }
+        .rich-text-content blockquote,
+        .novel-text-content blockquote {
+          margin: 1rem 0;
+          padding: 0.6rem 1rem;
+          border-left: 3px solid #ff0044;
+          background: rgba(255, 255, 255, 0.03);
+          border-radius: 0 8px 8px 0;
+          color: #a0a0b2;
+        }
+        .rich-text-content ul, .rich-text-content ol,
+        .novel-text-content ul, .novel-text-content ol {
+          margin: 0.8rem 0 1rem 1.4rem;
+        }
+        .rich-text-content li,
+        .novel-text-content li {
+          margin-bottom: 0.35rem;
+        }
+        .rich-text-content table,
+        .novel-text-content table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 1.2rem 0;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 8px;
+          overflow: hidden;
+        }
+        .rich-text-content th, .rich-text-content td,
+        .novel-text-content th, .novel-text-content td {
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          padding: 0.55rem 0.85rem;
+          text-align: left;
+        }
+        .rich-text-content th,
+        .novel-text-content th {
+          background: rgba(255, 255, 255, 0.06);
+          color: #ffffff;
+          font-weight: 700;
+        }
+        .rich-text-content pre,
+        .novel-text-content pre {
+          background: #0d0d12;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 10px;
+          padding: 0.85rem 1rem;
+          overflow-x: auto;
+          margin: 1rem 0;
+        }
+        .rich-text-content pre code,
+        .novel-text-content pre code {
+          color: #f1f1f5;
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 0.88rem;
+        }
+        .rich-text-content img,
         .novel-text-content img {
           display: block;
           max-width: 100%;
           height: auto;
-          margin: 1.8rem auto;
+          margin: 1.4rem auto;
           border-radius: 12px;
-          box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+        }
+        .rich-text-content video,
+        .novel-text-content video {
+          display: block;
+          max-width: 100%;
+          height: auto;
+          margin: 1.4rem auto;
+          border-radius: 12px;
+          background: #000;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+        }
+        .rich-text-content a,
+        .novel-text-content a {
+          color: var(--accent);
+          text-decoration: underline;
+        }
+        div[align="center"] {
+          text-align: center;
+        }
+        div[align="right"] {
+          text-align: right;
+        }
+        div[align="left"] {
+          text-align: left;
         }
         .novel-reader-viewport {
           max-width: 820px;
@@ -23625,6 +23992,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             height: 52px !important;
           }
         }
+
+        /* Textareas merged under the toolbar */
+        .editor-toolbar + textarea,
+        .editor-toolbar + .form-textarea,
+        #studio-desc-edit-pane textarea {
+          border-top-left-radius: 0 !important;
+          border-top-right-radius: 0 !important;
+          border-bottom-left-radius: 14px !important;
+          border-bottom-right-radius: 14px !important;
+          border-top: 1px solid rgba(255, 255, 255, 0.05) !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
       </style>
     </head>
     <body>
@@ -23774,8 +24155,323 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           setTitle(pageTitle) {
             document.title = pageTitle ? `${pageTitle} \u2013 ${this.appName}` : `${this.appName} \u2013 Creative Studio`;
           }
+
+          renderEditorToolbarHtml() {
+            return `
+              <input type="file" class="editor-inline-file-input" accept="image/*" multiple style="display:none;" onchange="app.handleInlineFileInputChange(this)">
+              <div class="editor-toolbar" onclick="app.handleToolbarClick(event)" onwheel="if(event.deltaY!==0){this.scrollLeft+=event.deltaY;event.preventDefault();}">
+                <button type="button" class="btn-tool-item" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
+                <div class="toolbar-separator"></div>
+                <button type="button" class="btn-tool-item" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
+                <div class="toolbar-separator"></div>
+                <button type="button" class="btn-tool-item" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
+                <div class="toolbar-separator"></div>
+                <button type="button" class="btn-tool-item" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
+                <div class="toolbar-separator"></div>
+                <button type="button" class="btn-tool-item" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
+                <div class="toolbar-separator"></div>
+                <button type="button" class="btn-tool-item" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
+                <button type="button" class="btn-tool-item" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+              </div>
+            `;
+          }
+
+          handleToolbarClick(event) {
+            const btn = event.target.closest('button[data-md]');
+            if (!btn) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const action = btn.getAttribute('data-md');
+            const toolbar = btn.closest('.editor-toolbar');
+            const form = toolbar ? (toolbar.closest('form') || toolbar.parentElement) : null;
+            const textarea = form ? form.querySelector('textarea') : null;
+
+            // Wattpad-style: Clicking image button opens device photo picker
+            if (action === 'image' && textarea) {
+              const fileInput = (form ? form.querySelector('.editor-inline-file-input') : null) || document.getElementById('novel-inline-file-input');
+              if (fileInput) {
+                fileInput._targetTextarea = textarea;
+                fileInput.click();
+                return;
+              }
+            }
+
+            if (textarea) {
+              this.applyMarkdownSyntax(action, textarea);
+            }
+          }
+
+          async handleInlineFileInputChange(input) {
+            const textarea = input._targetTextarea || input.closest('form')?.querySelector('textarea') || document.getElementById('studio-description-textarea');
+            if (input.files && input.files.length && textarea) {
+              await this.handleNovelInlineImageDrop(Array.from(input.files), textarea);
+              input.value = '';
+            }
+          }
+
+          applyMarkdownSyntax(action, textarea) {
+            if (!textarea) return;
+            textarea.focus();
+            const start = textarea.selectionStart || 0;
+            const end = textarea.selectionEnd || 0;
+            const text = textarea.value;
+            const selected = text.substring(start, end);
+            let replace = '';
+            let selectStart = start;
+            let selectEnd = end;
+
+            switch (action) {
+              case 'bold':
+                replace = `**${selected || 'bold text'}**`;
+                selectStart = start + 2;
+                selectEnd = selectStart + (selected ? selected.length : 9);
+                break;
+              case 'italic':
+                replace = `*${selected || 'italic text'}*`;
+                selectStart = start + 1;
+                selectEnd = selectStart + (selected ? selected.length : 11);
+                break;
+              case 'strikethrough':
+                replace = `~~${selected || 'strikethrough'}~~`;
+                selectStart = start + 2;
+                selectEnd = selectStart + (selected ? selected.length : 13);
+                break;
+              case 'spoiler':
+                replace = `||${selected || 'spoiler text'}||`;
+                selectStart = start + 2;
+                selectEnd = selectStart + (selected ? selected.length : 12);
+                break;
+              case 'heading':
+                replace = `\n### ${selected || 'Heading'}\n`;
+                selectStart = start + 5;
+                selectEnd = selectStart + (selected ? selected.length : 7);
+                break;
+              case 'ul':
+                replace = `\n- ${selected || 'List item'}\n`;
+                selectStart = start + 3;
+                selectEnd = selectStart + (selected ? selected.length : 9);
+                break;
+              case 'ol':
+                replace = `\n1. ${selected || 'Numbered item'}\n`;
+                selectStart = start + 4;
+                selectEnd = selectStart + (selected ? selected.length : 13);
+                break;
+              case 'task':
+                replace = `\n- [ ] ${selected || 'Task item'}\n`;
+                selectStart = start + 7;
+                selectEnd = selectStart + (selected ? selected.length : 9);
+                break;
+              case 'quote':
+                replace = `\n> ${selected || 'Blockquote'}\n`;
+                selectStart = start + 3;
+                selectEnd = selectStart + (selected ? selected.length : 10);
+                break;
+              case 'code':
+                replace = `\n\`\`\`\n${selected || 'code here'}\n\`\`\`\n`;
+                selectStart = start + 5;
+                selectEnd = selectStart + (selected ? selected.length : 9);
+                break;
+              case 'table':
+                replace = `\n| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |\n`;
+                selectStart = start + replace.length;
+                selectEnd = selectStart;
+                break;
+              case 'align-left':
+                replace = `\n<div align="left">\n\n${selected || 'Left aligned text'}\n\n</div>\n`;
+                selectStart = start + 18;
+                selectEnd = selectStart + (selected ? selected.length : 17);
+                break;
+              case 'align-center':
+                replace = `\n<div align="center">\n\n${selected || 'Centered text'}\n\n</div>\n`;
+                selectStart = start + 20;
+                selectEnd = selectStart + (selected ? selected.length : 13);
+                break;
+              case 'align-right':
+                replace = `\n<div align="right">\n\n${selected || 'Right aligned text'}\n\n</div>\n`;
+                selectStart = start + 19;
+                selectEnd = selectStart + (selected ? selected.length : 18);
+                break;
+              case 'link':
+                replace = `[${selected || 'Link Title'}](https://example.com)`;
+                selectStart = start + (selected ? selected.length + 3 : 1);
+                selectEnd = start + replace.length - 1;
+                break;
+              case 'image':
+                replace = `![${selected || 'Image Alt'}](https://example.com/image.jpg)`;
+                selectStart = start + (selected ? selected.length + 4 : 2);
+                selectEnd = start + replace.length - 1;
+                break;
+              case 'video':
+                replace = `\n<video controls src="https://example.com/video.mp4"></video>\n`;
+                selectStart = start + 21;
+                selectEnd = start + 50;
+                break;
+              default:
+                return;
+            }
+
+            if (!document.execCommand || !document.execCommand('insertText', false, replace)) {
+              textarea.setRangeText(replace, start, end, 'end');
+            }
+            textarea.setSelectionRange(selectStart, selectEnd);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+
+          updateCharCount(input, counterId, maxLen) {
+            const counter = document.getElementById(counterId);
+            if (counter && input) {
+              const current = input.value.length;
+              counter.textContent = `${current.toLocaleString()} / ${maxLen.toLocaleString()}`;
+              counter.style.color = current >= maxLen ? 'var(--r18)' : 'var(--text-muted)';
+            }
+          }
+
+          switchCommentTab(btn, tab) {
+            const container = btn.closest('.unified-editor-box');
+            if (!container) return;
+            const editPane = container.querySelector('.comment-edit-pane');
+            const prevPane = container.querySelector('.comment-preview-pane');
+            const textarea = container.querySelector('textarea');
+            const btns = container.querySelectorAll('.editor-tab-btn');
+
+            btns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            if (tab === 'preview') {
+              const text = textarea ? textarea.value.trim() : '';
+              if (prevPane) {
+                prevPane.innerHTML = text 
+                  ? this.renderRichContent(text) 
+                  : '<p class="fst-italic m-0" style="color:var(--text-muted);">Nothing to preview.</p>';
+                editPane.style.display = 'none';
+                prevPane.style.display = 'block';
+              }
+            } else {
+              editPane.style.display = 'flex';
+              prevPane.style.display = 'none';
+              if (textarea) textarea.focus();
+            }
+          }
+
+          switchStudioDescTab(tab) {
+            const editPane = document.getElementById('studio-desc-edit-pane');
+            const prevPane = document.getElementById('studio-desc-preview-pane');
+            const prevContent = document.getElementById('studio-desc-preview-content');
+            const btnEdit = document.getElementById('btn-tab-desc-edit');
+            const btnPrev = document.getElementById('btn-tab-desc-preview');
+            const textarea = document.getElementById('studio-description-textarea');
+
+            if (!editPane || !prevPane) return;
+
+            if (tab === 'preview') {
+              const text = textarea ? textarea.value.trim() : '';
+              if (prevContent) {
+                prevContent.innerHTML = text 
+                  ? this.renderRichContent(text) 
+                  : '<p class="fst-italic m-0" style="color:var(--text-muted);">Nothing to preview yet. Write some story content or description in the Edit tab.</p>';
+              }
+              editPane.style.display = 'none';
+              prevPane.style.display = 'block';
+              if (btnEdit) btnEdit.className = 'editor-tab-btn';
+              if (btnPrev) btnPrev.className = 'editor-tab-btn active';
+            } else {
+              editPane.style.display = 'flex';
+              prevPane.style.display = 'none';
+              if (btnEdit) btnEdit.className = 'editor-tab-btn active';
+              if (btnPrev) btnPrev.className = 'editor-tab-btn';
+              if (textarea) textarea.focus();
+            }
+          }
+
+          async handleNovelInlineImageDrop(files, textarea) {
+            if (!files || !files.length || !textarea) return;
+            this.toast('Uploading illustration...');
+            for (const file of files) {
+              if (!file.type.startsWith('image/')) continue;
+              const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+              const totalChunks = Math.max(1, Math.ceil(file.size / this.chunkSize));
+              let fileRes = null;
+
+              for (let c = 0; c < totalChunks; c++) {
+                const start = c * this.chunkSize;
+                const end = Math.min(file.size, start + this.chunkSize);
+                const chunkBlob = file.slice(start, end);
+
+                const fd = new FormData();
+                fd.append('action', 'upload_chunk');
+                fd.append('upload_id', uploadId);
+                fd.append('chunk_index', c);
+                fd.append('total_chunks', totalChunks);
+                fd.append('file_name', file.name);
+                fd.append('chunk', chunkBlob, file.name);
+
+                const res = await this.api('upload_chunk', fd, 'POST');
+                if (res.completed) fileRes = res;
+              }
+
+              if (fileRes) {
+                this.uploadQueue.push({
+                  file_name: fileRes.file_name,
+                  original: fileRes.original || file.name,
+                  thumb_name: fileRes.thumb_name,
+                  mime_type: fileRes.mime_type,
+                  phash: fileRes.phash,
+                  is_video: false,
+                  width: fileRes.width,
+                  height: fileRes.height,
+                  size: fileRes.file_size
+                });
+
+                const mdImg = `\n\n![${file.name}](?access=artwork&action=raw&f=${encodeURIComponent(fileRes.file_name)})\n\n`;
+                const startPos = textarea.selectionStart || textarea.value.length;
+                textarea.setRangeText(mdImg, startPos, startPos, 'end');
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                this.updateCharCount(textarea, 'counter-description', 50000);
+                this.renderStudioPreviews();
+                this.toast(`Embedded image: ${file.name}`);
+              }
+            }
+          }
+
+          renderRichContent(rawText) {
+            if (!rawText) return '';
+            let text = rawText;
+
+            // Convert ||spoiler|| into interactive blur span
+            text = text.replace(/\|\|(.*?)\|\|/g, '<span class="spoiler-blur" onclick="this.classList.toggle(\'revealed\')">$1</span>');
+
+            try {
+              if (typeof marked !== 'undefined') {
+                marked.setOptions({
+                  gfm: true,
+                  breaks: true
+                });
+                const rawHtml = marked.parse(text);
+
+                if (typeof DOMPurify !== 'undefined') {
+                  return DOMPurify.sanitize(rawHtml, {
+                    ADD_TAGS: ['span', 'iframe', 'video', 'source', 'div', 'mark', 'u', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'details', 'summary', 'input'],
+                    ADD_ATTR: ['class', 'onclick', 'target', 'rel', 'controls', 'src', 'style', 'align', 'type', 'checked', 'disabled', 'width', 'height', 'playsinline', 'loop', 'autoplay']
+                  });
+                }
+                return rawHtml;
+              }
+            } catch (e) {}
+
+            return this.escape(text).replace(/\n/g, '<br>');
+          }
   
-                    initTheme() {
+          initTheme() {
             document.documentElement.setAttribute('data-theme', this.theme);
             const updateLabel = () => {
               const lbl = document.getElementById('theme-toggle-label');
@@ -24576,20 +25272,39 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           toggleMangaStudioFields(type) {
             const seriesGroup = document.getElementById('manga-series-input-group');
             const chapterGroup = document.getElementById('manga-chapter-input-group');
+            const seriesLabel = document.getElementById('studio-series-label');
             const novelTextNote = document.getElementById('studio-novel-text-note');
             const descLabel = document.getElementById('studio-description-label');
             const fileInput = document.getElementById('studio-file-input');
+            const mediaUploadGroup = document.getElementById('studio-media-upload-group');
+            const modeConfigGroup = document.getElementById('studio-mode-config-group');
+            const descTextarea = document.getElementById('studio-description-textarea');
 
             const isSequential = (type === 'manga' || type === 'novel');
+            const isNovel = (type === 'novel');
+
             if (seriesGroup) seriesGroup.style.display = isSequential ? 'flex' : 'none';
             if (chapterGroup) chapterGroup.style.display = isSequential ? 'flex' : 'none';
+            if (seriesLabel) seriesLabel.textContent = isNovel ? 'Novel Series Title *' : 'Manga Series Title *';
+
+            // Automatically hide multi-media drag-and-drop & batch selector for novels
+            if (mediaUploadGroup) mediaUploadGroup.style.display = isNovel ? 'none' : 'flex';
+            if (modeConfigGroup) modeConfigGroup.style.display = isNovel ? 'none' : 'flex';
             if (fileInput) fileInput.accept = isSequential ? 'image/*' : 'image/*,video/*';
 
             if (descLabel) {
-              descLabel.textContent = (type === 'novel') ? 'Chapter Text & Story Content * (Markdown Supported)' : 'Caption / Description (Markdown enabled)';
+              descLabel.textContent = isNovel ? 'Chapter Story Content * (Markdown Supported)' : 'Caption / Description (Markdown enabled)';
             }
             if (novelTextNote) {
-              novelTextNote.style.display = (type === 'novel') ? 'block' : 'none';
+              novelTextNote.style.display = isNovel ? 'block' : 'none';
+            }
+            if (descTextarea) {
+              descTextarea.style.minHeight = isNovel ? '380px' : '140px';
+              descTextarea.placeholder = isNovel ? 'Write your novel chapter text here... You can also drag and drop illustrations directly into this text area to embed them.' : 'Write story content, lore, or description...';
+            }
+            const prevPane = document.getElementById('studio-desc-preview-pane');
+            if (prevPane) {
+              prevPane.style.minHeight = isNovel ? '380px' : '140px';
             }
 
             if (isSequential) {
@@ -24762,8 +25477,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           </div>
 
                           ${res.description ? `
-                            <div style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5; background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06); max-height: 120px; overflow-y: auto;">
-                              ${this.escape(res.description)}
+                            <div class="rich-text-content" style="font-size: 0.88rem; line-height: 1.6; background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06); max-height: 140px; overflow-y: auto;">
+                              ${this.renderRichContent(res.description)}
                             </div>
                           ` : ''}
 
@@ -24850,22 +25565,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               const prevHref = res.prev_chapter ? makeUrl(res.prev_chapter.chapter_number || 1) : null;
               const nextHref = res.next_chapter ? makeUrl(res.next_chapter.chapter_number || 1) : null;
 
-              // Parse story content
-              let renderedBody = '';
+              // Parse story content using unified rich text renderer
               const rawStory = ch.description || '';
-              if (rawStory) {
-                try {
-                  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-                    renderedBody = DOMPurify.sanitize(marked.parse(rawStory));
-                  } else {
-                    renderedBody = this.escape(rawStory).replace(/\n/g, '<br>');
-                  }
-                } catch(e) {
-                  renderedBody = this.escape(rawStory).replace(/\n/g, '<br>');
-                }
-              } else {
-                renderedBody = '<p style="color:var(--text-muted);text-align:center;">No chapter text available.</p>';
-              }
+              const renderedBody = rawStory ? this.renderRichContent(rawStory) : '<p style="color:var(--text-muted);text-align:center;">No chapter text available.</p>';
 
               // Embedded illustrations
               const illustrations = ch.images || [];
@@ -25118,8 +25820,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           </div>
 
                           ${res.description ? `
-                            <div style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5; background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06); max-height: 100px; overflow-y: auto;">
-                              ${this.escape(res.description)}
+                            <div class="rich-text-content" style="font-size: 0.88rem; line-height: 1.6; background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06); max-height: 140px; overflow-y: auto;">
+                              ${this.renderRichContent(res.description)}
                             </div>
                           ` : ''}
 
@@ -26950,18 +27652,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 `;
               }
     
-              let renderedDescription = '';
-              if (art.description) {
-                try {
-                  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-                    renderedDescription = DOMPurify.sanitize(marked.parse(art.description));
-                  } else {
-                    renderedDescription = this.escape(art.description).replace(/\n/g, '<br>');
-                  }
-                } catch (e) {
-                  renderedDescription = this.escape(art.description).replace(/\n/g, '<br>');
-                }
-              }
+              const renderedDescription = art.description ? this.renderRichContent(art.description) : '';
 
               const seriesTitle = (art.series_name || art.series_title || art.title || '').trim();
               const chapterNum = art.chapter_number || 1;
@@ -27059,7 +27750,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         `;
                       })() : ''}
   
-                      ${renderedDescription ? `<div style="font-size:0.92rem; line-height:1.6; color:var(--text-primary);">${renderedDescription}</div>` : ''}
+                      ${renderedDescription ? `<div class="rich-text-content" style="font-size:0.92rem; line-height:1.7;">${renderedDescription}</div>` : ''}
   
                       <div class="tag-cloud">
                         ${parodyArr.map(p => `
@@ -27119,7 +27810,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <h3 style="font-size:1.1rem; font-weight:700;">Artist Commentary &amp; Responses (${art.raw_comments_count || 0})</h3>
                       ${this.user ? `
                         <form onsubmit="app.handleCommentSubmit(event, ${art.id}, 0)" style="display:flex; flex-direction:column; gap:0.6rem;">
-                          <textarea name="comment" class="form-textarea" placeholder="Leave constructive praise and thoughts for the artist..." required></textarea>
+                          <div class="unified-editor-box">
+                            <div class="editor-tab-header">
+                              <div class="d-flex align-items-center gap-1">
+                                <button type="button" class="editor-tab-btn active" onclick="app.switchCommentTab(this, 'edit')">
+                                  <i class="bi bi-pencil-square"></i> Edit
+                                </button>
+                                <button type="button" class="editor-tab-btn" onclick="app.switchCommentTab(this, 'preview')">
+                                  <i class="bi bi-eye"></i> Preview
+                                </button>
+                              </div>
+                            </div>
+                            <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                              ${this.renderEditorToolbarHtml()}
+                              <textarea name="comment" class="form-textarea" placeholder="Leave constructive praise and thoughts for the artist..." required style="min-height:100px; border:none !important; border-radius:0 !important; background:transparent !important; box-shadow:none !important;"></textarea>
+                            </div>
+                            <div class="comment-preview-pane rich-text-content" style="display:none; min-height:100px; padding:1.2rem; background:transparent; overflow-y:auto; border-radius:0 !important;"></div>
+                          </div>
                           <div style="display:flex; justify-content:flex-end;">
                             <button type="submit" class="btn-primary">Post Response</button>
                           </div>
@@ -27606,12 +28313,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             return `
               <div class="comment-tree-node" id="comm-${c.id}">
                 <img src="${cAvatar}" style="width:36px; height:36px; border-radius:50%; object-fit:cover; background:var(--bg-surface-elevated);" alt="" data-artist-name="${this.escape(c.artist_name)}" onerror="app.handleAvatarError(this)">
-                <div style="flex:1;">
+                <div style="flex:1; min-width:0;">
                   <div style="display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700; font-size:0.85rem; cursor:pointer;" onclick="app.nav('#/user/${c.user_id}')">${this.escape(c.artist_name)}</span>
                     <span style="font-size:0.75rem; color:var(--text-muted);">${new Date(c.created_at * 1000).toLocaleDateString()}</span>
                   </div>
-                  <p style="font-size:0.85rem; margin-top:0.25rem; color:var(--text-primary); white-space:pre-wrap;" id="comm-text-${c.id}">${this.escape(c.comment)}</p>
+                  <div style="font-size:0.85rem; margin-top:0.25rem; color:var(--text-primary); line-height:1.6;" id="comm-text-${c.id}">${this.renderRichContent(c.comment)}</div>
     
                   <div style="display:flex; gap:0.6rem; margin-top:0.4rem; font-size:0.75rem; color:var(--text-secondary);">
                     ${this.user ? `<a href="javascript:;" style="color:var(--accent);" onclick="app.toggleReplyBox(${c.id})">Reply</a>` : ''}
@@ -27623,7 +28330,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     
                   <div id="reply-box-${c.id}" style="display:none; margin-top:0.6rem;">
                     <form onsubmit="app.handleCommentSubmit(event, ${artId}, ${c.id})" style="display:flex; flex-direction:column; gap:0.4rem;">
-                      <textarea name="comment" class="form-textarea" placeholder="Write reply..." style="min-height:60px;" required></textarea>
+                      <div class="unified-editor-box">
+                        <div class="editor-tab-header">
+                          <div class="d-flex align-items-center gap-1">
+                            <button type="button" class="editor-tab-btn active" onclick="app.switchCommentTab(this, 'edit')">
+                              <i class="bi bi-pencil-square"></i> Edit
+                            </button>
+                            <button type="button" class="editor-tab-btn" onclick="app.switchCommentTab(this, 'preview')">
+                              <i class="bi bi-eye"></i> Preview
+                            </button>
+                          </div>
+                        </div>
+                        <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                          ${this.renderEditorToolbarHtml()}
+                          <textarea name="comment" class="form-textarea" placeholder="Write reply..." required style="min-height:60px; border:none !important; border-radius:0 !important; background:transparent !important; box-shadow:none !important;"></textarea>
+                        </div>
+                        <div class="comment-preview-pane rich-text-content" style="display:none; min-height:60px; padding:0.8rem; background:transparent; overflow-y:auto; border-radius:0 !important;"></div>
+                      </div>
                       <div style="display:flex; justify-content:flex-end; gap:0.4rem;">
                         <button type="button" class="btn-subtle" style="height:28px; font-size:0.75rem;" onclick="app.toggleReplyBox(${c.id})">Cancel</button>
                         <button type="submit" class="btn-primary" style="height:28px; font-size:0.75rem;">Reply</button>
@@ -27671,7 +28394,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               <form onsubmit="app.handleCommentEdit(event, ${commentId})">
                 <div class="modal-body">
                   <div class="form-group">
-                    <textarea name="comment" class="form-textarea" required>${this.escape(text)}</textarea>
+                    <div class="unified-editor-box">
+                      <div class="editor-tab-header">
+                        <div class="d-flex align-items-center gap-1">
+                          <button type="button" class="editor-tab-btn active" onclick="app.switchCommentTab(this, 'edit')">
+                            <i class="bi bi-pencil-square"></i> Edit
+                          </button>
+                          <button type="button" class="editor-tab-btn" onclick="app.switchCommentTab(this, 'preview')">
+                            <i class="bi bi-eye"></i> Preview
+                          </button>
+                        </div>
+                      </div>
+                      <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                        ${this.renderEditorToolbarHtml()}
+                        <textarea name="comment" class="form-textarea" required style="min-height:120px; border:none !important; border-radius:0 !important; background:transparent !important; box-shadow:none !important;">${this.escape(text)}</textarea>
+                      </div>
+                      <div class="comment-preview-pane rich-text-content" style="display:none; min-height:120px; padding:1.2rem; background:transparent; overflow-y:auto; border-radius:0 !important;"></div>
+                    </div>
                   </div>
                 </div>
                 <div class="modal-footer">
@@ -28273,7 +29012,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <input type="hidden" name="id" value="${artData.id || 0}">
     
                   ${!editId ? `
-                    <div class="form-group" style="margin-bottom:1.2rem;">
+                    <div class="form-group" id="studio-mode-config-group" style="margin-bottom:1.2rem; display:${artData.type === 'novel' ? 'none' : 'flex'};">
                       <label class="form-label">Upload Mode Configuration</label>
                       <div class="mode-card-grid">
                         <label class="mode-card selected" id="label-mode-single">
@@ -28300,8 +29039,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       </div>
                     </div>
                   ` : ''}
-    
-                  <div class="form-group">
+
+                  <!-- Media Upload Box (Hidden for Novels) -->
+                  <div class="form-group" id="studio-media-upload-group" style="display:${artData.type === 'novel' ? 'none' : 'flex'}; flex-direction:column;">
                     <label class="form-label">Upload Media</label>
                     <div class="upload-zone" id="studio-dropzone" onclick="document.getElementById('studio-file-input').click()">
                       <svg viewBox="0 0 24 24" style="width:40px; height:40px; color:var(--accent);"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
@@ -28309,7 +29049,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <span style="font-size:0.75rem; color:var(--text-muted);">Max <?= (int)($config['max_images_per_post'] ?? 500) ?> images per post &bull; <?= (int)($config['daily_limit'] ?? 10) ?> images/day for separate individual posts</span>
                     </div>
                     <input type="file" id="studio-file-input" multiple style="display:none;" accept="${this.allowVideo ? 'image/*,video/*' : 'image/*'}" onchange="app.handleStudioFiles(this.files)">
-  
+
                     <div id="studio-upload-progress" style="display:none; margin-top:0.85rem; background:var(--bg-surface-elevated); border:1px solid var(--border-subtle); border-radius:12px; padding:0.85rem 1rem;">
                       <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.82rem; font-weight:600; margin-bottom:0.45rem;">
                         <span id="upload-status-text" style="color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:80%;">Preparing upload...</span>
@@ -28319,30 +29059,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         <div id="upload-progress-bar" style="width:0%; height:100%; background:var(--accent); border-radius:3px; transition:width 0.15s ease;"></div>
                       </div>
                     </div>
-  
+
                     <div class="upload-preview-grid" id="studio-preview-grid"></div>
                   </div>
-    
-                  <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Original Source URLs (Optional - multiple URLs allowed, one per line or separated by space)</label>
-                    <textarea name="source_url" id="studio-source-url" class="form-textarea" style="min-height:56px; font-family:'JetBrains Mono',monospace; font-size:0.82rem;" placeholder="https://x.com/...&#10;https://pixiv.net/..." oninput="app.checkDuplicateUrl(this.value)">${this.escape(artData.source_url || '')}</textarea>
-                    <div id="source-check-status" style="font-size:0.78rem; margin-top:0.25rem;"></div>
-                  </div>
-    
-                  <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Artwork Title *</label>
-                    <input type="text" name="title" class="form-input" placeholder="Give your creation an evocative title" value="${this.escape(artData.title)}" required>
-                  </div>
-    
-                  <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label" id="studio-description-label">Caption / Description (Markdown enabled)</label>
-                    <div id="studio-novel-text-note" style="display:${artData.type === 'novel' ? 'block' : 'none'}; font-size:0.8rem; color:#10b981; margin-bottom:0.4rem;">
-                      Write your chapter story content below. Full Markdown formatting is supported.
-                    </div>
-                    <textarea name="description" class="form-textarea" style="min-height:140px;" placeholder="Write story content, lore, or description...">${this.escape(artData.description)}</textarea>
-                  </div>
-    
-                  <div class="form-grid-2" style="margin-top:1.2rem;">
+
+                  <div class="form-grid-2" style="margin-top:1rem;">
                     <div class="form-group">
                       <label class="form-label">Category</label>
                       <select name="type" class="form-select custom-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
@@ -28359,36 +29080,106 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         <option value="r18" ${artData.rating === 'r18' ? 'selected' : ''}>R-18 (Mature / NSFW)</option>
                       </select>
                     </div>
-                    <div class="form-group" id="manga-series-input-group" style="${artData.type === 'manga' ? 'display:flex;' : 'display:none;'}">
-                      <label class="form-label">Manga Series Title *</label>
-                      <input type="text" name="series_name" class="form-input" placeholder="e.g. My Heroic Adventure" value="${this.escape(artData.series_name || artData.title || '')}">
+                    <div class="form-group" id="manga-series-input-group" style="${(artData.type === 'manga' || artData.type === 'novel') ? 'display:flex;' : 'display:none;'}">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label m-0" id="studio-series-label">${artData.type === 'novel' ? 'Novel Series Title *' : 'Manga Series Title *'}</label>
+                        <span class="small text-secondary font-monospace" id="counter-series">0 / 100</span>
+                      </div>
+                      <input type="text" name="series_name" id="studio-series-input" class="form-input" maxlength="100" placeholder="e.g. My Heroic Adventure" value="${this.escape(artData.series_name || artData.title || '')}" oninput="app.updateCharCount(this, 'counter-series', 100)">
                     </div>
-                    <div class="form-group" id="manga-chapter-input-group" style="${artData.type === 'manga' ? 'display:flex;' : 'display:none;'}">
+                    <div class="form-group" id="manga-chapter-input-group" style="${(artData.type === 'manga' || artData.type === 'novel') ? 'display:flex;' : 'display:none;'}">
                       <label class="form-label">Chapter Number</label>
                       <input type="number" step="any" min="0" name="chapter_number" class="form-input" placeholder="1" value="${Math.max(0, artData.chapter_number || 1)}" oninput="if(this.value < 0) this.value = 0;">
                     </div>
                   </div>
-  
+
                   <div class="form-group" style="margin-top:1.2rem;">
-                    <label class="form-label">Tags (comma separated &bull; spaces allowed inside names)</label>
-                    <input type="text" name="tags" class="form-input" placeholder="Wuthering Waves, Anime, Fantasy Landscape" value="${this.escape(artData.tags)}">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label m-0">Title *</label>
+                      <span class="small text-secondary font-monospace" id="counter-title">0 / 100</span>
+                    </div>
+                    <input type="text" name="title" id="studio-title-input" class="form-input" maxlength="100" placeholder="Give your chapter / creation an evocative title" value="${this.escape(artData.title)}" required oninput="app.updateCharCount(this, 'counter-title', 100)">
                   </div>
-  
+
+                  <!-- Description & Novel Editor -->
+                  <div class="form-group" style="margin-top:1.2rem;">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label m-0" id="studio-description-label">${artData.type === 'novel' ? 'Chapter Story Content (Max 50,000 chars) *' : 'Caption / Description (Markdown enabled)'}</label>
+                    </div>
+
+                    <div id="studio-novel-text-note" style="display:${artData.type === 'novel' ? 'flex' : 'none'}; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; font-size:0.8rem; color:#10b981; margin-bottom:0.6rem;">
+                      <span><i class="bi bi-info-circle me-1"></i> Paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>) or drag &amp; drop images directly into the text to embed.</span>
+                      <button type="button" class="btn btn-sm btn-outline-success d-inline-flex align-items-center gap-1 rounded-pill px-3 py-1 font-monospace fw-bold" style="font-size:0.75rem; border-color:rgba(16,185,129,0.4);" onclick="document.getElementById('novel-inline-file-input').click();">
+                        <i class="bi bi-camera-fill"></i> + Add Photo / Illustration
+                      </button>
+                    </div>
+
+                    <div class="unified-editor-box">
+                      <div class="editor-tab-header">
+                        <div class="d-flex align-items-center gap-1">
+                          <button type="button" class="editor-tab-btn active" id="btn-tab-desc-edit" onclick="app.switchStudioDescTab('edit')">
+                            <i class="bi bi-pencil-square"></i> Edit
+                          </button>
+                          <button type="button" class="editor-tab-btn" id="btn-tab-desc-preview" onclick="app.switchStudioDescTab('preview')">
+                            <i class="bi bi-eye"></i> Preview
+                          </button>
+                        </div>
+                        <span class="editor-char-counter text-secondary" id="counter-description">0 / 50,000</span>
+                      </div>
+
+                      <div id="studio-desc-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                        <input type="file" id="novel-inline-file-input" accept="image/*" multiple style="display:none;" onchange="app.handleInlineFileInputChange(this)">
+                        ${this.renderEditorToolbarHtml()}
+                        <textarea name="description" id="studio-description-textarea" class="form-textarea" maxlength="50000" style="min-height:${artData.type === 'novel' ? '380px' : '140px'}; border:none !important; border-radius:0 !important; background:transparent !important; box-shadow:none !important;" placeholder="Write chapter content, lore, or description..." oninput="app.updateCharCount(this, 'counter-description', 50000)">${this.escape(artData.description)}</textarea>
+                      </div>
+
+                      <div id="studio-desc-preview-pane" class="rich-text-content" style="display:none; min-height:${artData.type === 'novel' ? '380px' : '140px'}; padding:1.2rem; background:transparent; overflow-y:auto; border-radius:0 !important;">
+                        <div id="studio-desc-preview-content"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="form-group" style="margin-top:1.2rem;">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label m-0">Original Source / Raw Image URLs (Max 5 URLs)</label>
+                      <span class="small text-secondary font-monospace" id="counter-source-urls">0 / 5 URLs</span>
+                    </div>
+                    <textarea name="source_url" id="studio-source-url" class="form-textarea" style="min-height:56px; font-family:'JetBrains Mono',monospace; font-size:0.82rem;" placeholder="https://x.com/...&#10;https://i.pixiv.net/... (1 per line or space separated)" oninput="app.checkDuplicateUrl(this.value)">${this.escape(artData.source_url || '')}</textarea>
+                    <div id="source-check-status" style="font-size:0.78rem; margin-top:0.25rem;"></div>
+                  </div>
+
+                  <div class="form-group" style="margin-top:1.2rem;">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label m-0">Tags (comma separated)</label>
+                      <span class="small text-secondary font-monospace" id="counter-tags">0 / 200</span>
+                    </div>
+                    <input type="text" name="tags" id="studio-tags-input" class="form-input" maxlength="200" placeholder="Anime, Fantasy, Action" value="${this.escape(artData.tags)}" oninput="app.updateCharCount(this, 'counter-tags', 200)">
+                  </div>
+
                   <div class="form-grid-2" style="margin-top:1.2rem;">
                     <div class="form-group">
-                      <label class="form-label">Characters Depicted (comma separated &bull; spaces allowed)</label>
-                      <input type="text" name="characters" class="form-input" placeholder="Hatsune Miku, Rover, Yangyang" value="${this.escape(artData.characters)}">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label m-0">Characters Depicted</label>
+                        <span class="small text-secondary font-monospace" id="counter-characters">0 / 200</span>
+                      </div>
+                      <input type="text" name="characters" id="studio-characters-input" class="form-input" maxlength="200" placeholder="Hatsune Miku, Rover" value="${this.escape(artData.characters)}" oninput="app.updateCharCount(this, 'counter-characters', 200)">
                     </div>
                     <div class="form-group">
-                      <label class="form-label">Series / Parody (comma separated &bull; spaces allowed)</label>
-                      <input type="text" name="parodies" class="form-input" placeholder="Wuthering Waves, Genshin Impact" value="${this.escape(artData.parodies)}">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label m-0">Series / Parody</label>
+                        <span class="small text-secondary font-monospace" id="counter-parodies">0 / 200</span>
+                      </div>
+                      <input type="text" name="parodies" id="studio-parodies-input" class="form-input" maxlength="200" placeholder="Original, Genshin Impact" value="${this.escape(artData.parodies)}" oninput="app.updateCharCount(this, 'counter-parodies', 200)">
                     </div>
                   </div>
-  
+
                   <div class="form-grid-2" style="margin-top:1.2rem; align-items:flex-end;">
                     <div class="form-group">
-                      <label class="form-label">Tools Used (comma separated)</label>
-                      <input type="text" name="tools" class="form-input" placeholder="Clip Studio Paint, Photoshop, Blender" value="${this.escape(artData.tools)}">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label m-0">Tools Used</label>
+                        <span class="small text-secondary font-monospace" id="counter-tools">0 / 100</span>
+                      </div>
+                      <input type="text" name="tools" id="studio-tools-input" class="form-input" maxlength="100" placeholder="Clip Studio Paint, Photoshop, Scrivener" value="${this.escape(artData.tools)}" oninput="app.updateCharCount(this, 'counter-tools', 100)">
                     </div>
                     <div class="form-group" style="min-height:38px; justify-content:center;">
                       <label style="display:inline-flex; align-items:center; gap:0.55rem; cursor:pointer; font-size:0.88rem; font-weight:600; margin:0;">
@@ -28410,20 +29201,87 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.renderStudioPreviews();
     
             const dropzone = document.getElementById('studio-dropzone');
-            dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
-            dropzone.ondragleave = () => dropzone.classList.remove('dragover');
-            dropzone.ondrop = (e) => {
-              e.preventDefault();
-              dropzone.classList.remove('dragover');
-              if (e.dataTransfer.files.length) this.handleStudioFiles(e.dataTransfer.files);
-            };
+            if (dropzone) {
+              dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
+              dropzone.ondragleave = () => dropzone.classList.remove('dragover');
+              dropzone.ondrop = (e) => {
+                e.preventDefault();
+                dropzone.classList.remove('dragover');
+                if (e.dataTransfer.files.length) this.handleStudioFiles(e.dataTransfer.files);
+              };
+            }
+
+            // Direct Drag, Drop & Clipboard Paste on the Textarea for Novels and Posts
+            const descTextarea = document.getElementById('studio-description-textarea');
+            if (descTextarea) {
+              descTextarea.addEventListener('dragover', (e) => {
+                if (e.dataTransfer && e.dataTransfer.types.includes('Files')) {
+                  e.preventDefault();
+                  descTextarea.style.borderColor = '#10b981';
+                  descTextarea.style.backgroundColor = 'rgba(16, 185, 129, 0.06)';
+                }
+              });
+              descTextarea.addEventListener('dragleave', () => {
+                descTextarea.style.borderColor = '';
+                descTextarea.style.backgroundColor = '';
+              });
+              descTextarea.addEventListener('drop', async (e) => {
+                if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+                  const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+                  if (imageFiles.length) {
+                    e.preventDefault();
+                    descTextarea.style.borderColor = '';
+                    descTextarea.style.backgroundColor = '';
+                    await this.handleNovelInlineImageDrop(imageFiles, descTextarea);
+                  }
+                }
+              });
+
+              // Wattpad-style Clipboard Image Paste (Ctrl+V / Cmd+V)
+              descTextarea.addEventListener('paste', async (e) => {
+                const items = e.clipboardData && e.clipboardData.items;
+                if (!items) return;
+                const imageFiles = [];
+                for (let i = 0; i < items.length; i++) {
+                  if (items[i].type && items[i].type.startsWith('image/')) {
+                    const file = items[i].getAsFile();
+                    if (file) imageFiles.push(file);
+                  }
+                }
+                if (imageFiles.length > 0) {
+                  e.preventDefault();
+                  await this.handleNovelInlineImageDrop(imageFiles, descTextarea);
+                }
+              });
+            }
+
+            // Populate Initial Character Counters
+            this.updateCharCount(document.getElementById('studio-title-input'), 'counter-title', 100);
+            this.updateCharCount(document.getElementById('studio-series-input'), 'counter-series', 100);
+            this.updateCharCount(document.getElementById('studio-description-textarea'), 'counter-description', 50000);
+            this.updateCharCount(document.getElementById('studio-tags-input'), 'counter-tags', 200);
+            this.updateCharCount(document.getElementById('studio-characters-input'), 'counter-characters', 200);
+            this.updateCharCount(document.getElementById('studio-parodies-input'), 'counter-parodies', 200);
+            this.updateCharCount(document.getElementById('studio-tools-input'), 'counter-tools', 100);
           }
     
           checkDuplicateUrl(val) {
             clearTimeout(this.dupCheckTimer);
             const statusBox = document.getElementById('source-check-status');
+            const countBox = document.getElementById('counter-source-urls');
             if (!statusBox) return;
-    
+
+            const urlList = val.trim().split(/[\r\n,\s]+/).filter(u => u.trim().length > 0);
+            if (countBox) {
+              countBox.textContent = `${urlList.length} / 5 URLs`;
+              countBox.style.color = urlList.length > 5 ? 'var(--r18)' : 'var(--text-muted)';
+            }
+
+            if (urlList.length > 5) {
+              statusBox.innerHTML = `<span style="color:var(--r18); font-weight:700;"><i class="bi bi-exclamation-triangle-fill me-1"></i> Limit exceeded: Only up to 5 URLs are allowed (${urlList.length}/5 entered).</span>`;
+              return;
+            }
+
             const url = val.trim();
             if (!url.startsWith('http')) {
               statusBox.innerHTML = '';
@@ -33063,6 +33921,181 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // PHPBOARD CHANNELS & CONTENT MANAGEMENT
+    if (isset($_POST['save_phpboard_channel'])) {
+      $db = get_db();
+      $code = strtolower(trim(preg_replace('/[^a-zA-Z0-9_\-]/', '', $_POST['channel_code'] ?? '')));
+      $name = trim(htmlspecialchars($_POST['channel_name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $category = trim(htmlspecialchars($_POST['channel_category'] ?? 'Random & Community', ENT_QUOTES, 'UTF-8'));
+      $is_nsfw = !empty($_POST['is_nsfw']) ? 1 : 0;
+      $is_edit = !empty($_POST['is_edit']) ? 1 : 0;
+
+      if ($code === '' || $name === '') {
+        $_SESSION['admin_flash_msg'] = "Channel code and name cannot be empty.";
+      } else {
+        if ($is_edit) {
+          $stmt = $db->prepare("UPDATE phpboard_channels SET name = ?, category = ?, is_nsfw = ? WHERE code = ?");
+          $stmt->execute([$name, $category, $is_nsfw, $code]);
+          log_admin_activity($db, $_SESSION['admin_email'], "Updated PHPBoard channel /{$code}/", 0);
+          $_SESSION['admin_flash_msg'] = "Channel /{$code}/ updated successfully.";
+        } else {
+          $check = $db->prepare("SELECT 1 FROM phpboard_channels WHERE code = ?");
+          $check->execute([$code]);
+          if ($check->fetchColumn()) {
+            $_SESSION['admin_flash_msg'] = "Channel code /{$code}/ already exists.";
+          } else {
+            $stmt = $db->prepare("INSERT INTO phpboard_channels (code, name, category, is_nsfw, is_default) VALUES (?, ?, ?, ?, 0)");
+            $stmt->execute([$code, $name, $category, $is_nsfw]);
+            log_admin_activity($db, $_SESSION['admin_email'], "Created PHPBoard channel /{$code}/ ({$name})", 0);
+            $_SESSION['admin_flash_msg'] = "Channel /{$code}/ created successfully.";
+          }
+        }
+      }
+      header('Location: ?access=admin&page=phpboard&tab=channels');
+      exit;
+    }
+
+    if (isset($_POST['delete_phpboard_channel'])) {
+      $db = get_db();
+      $code = strtolower(trim($_POST['channel_code'] ?? ''));
+
+      if ($code !== '') {
+        // Collect and remove media files for this channel
+        $stmt_t = $db->prepare("SELECT image FROM phpboard_threads WHERE channel = ? AND image IS NOT NULL");
+        $stmt_t->execute([$code]);
+        while ($img = $stmt_t->fetchColumn()) {
+          if ($img && file_exists(MUSIC_DIR . '/' . $img)) @unlink(MUSIC_DIR . '/' . $img);
+        }
+
+        $stmt_r = $db->prepare("SELECT r.image FROM phpboard_replies r JOIN phpboard_threads t ON r.thread_id = t.id WHERE t.channel = ? AND r.image IS NOT NULL");
+        $stmt_r->execute([$code]);
+        while ($img = $stmt_r->fetchColumn()) {
+          if ($img && file_exists(MUSIC_DIR . '/' . $img)) @unlink(MUSIC_DIR . '/' . $img);
+        }
+
+        $db->prepare("DELETE FROM phpboard_channels WHERE code = ?")->execute([$code]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Deleted PHPBoard channel /{$code}/ and all its posts", 0);
+        $_SESSION['admin_flash_msg'] = "Channel /{$code}/ and its associated threads have been removed.";
+      }
+      header('Location: ?access=admin&page=phpboard&tab=channels');
+      exit;
+    }
+
+    if (isset($_POST['reset_phpboard_default_channels'])) {
+      $db = get_db();
+      $db->exec("DELETE FROM phpboard_channels WHERE is_default = 1");
+      global $phpboard_categories;
+      $cat_lookup = [];
+      foreach ($phpboard_categories as $cat => $codes) {
+        foreach ($codes as $c) $cat_lookup[$c] = $cat;
+      }
+      $stmt = $db->prepare("INSERT OR REPLACE INTO phpboard_channels (code, name, category, is_nsfw, is_default) VALUES (?, ?, ?, ?, 1)");
+      foreach (PHPBOARD_ALLOWED_CHANNELS as $ch) {
+        $stmt->execute([
+          $ch,
+          PHPBOARD_CHANNEL_NAMES[$ch] ?? strtoupper($ch),
+          $cat_lookup[$ch] ?? 'Random & Community',
+          in_array($ch, PHPBOARD_NSFW_CHANNELS) ? 1 : 0
+        ]);
+      }
+      log_admin_activity($db, $_SESSION['admin_email'], "Restored default PHPBoard channels", 0);
+      $_SESSION['admin_flash_msg'] = "Default PHPBoard channels have been restored.";
+      header('Location: ?access=admin&page=phpboard&tab=channels');
+      exit;
+    }
+
+    if (isset($_POST['admin_phpboard_post_action'])) {
+      $db = get_db();
+      $action = $_POST['admin_phpboard_post_action'];
+      $target_type = $_POST['post_type'] ?? 'thread';
+      $table = ($target_type === 'thread') ? 'phpboard_threads' : 'phpboard_replies';
+
+      if ($action === 'delete' && isset($_POST['post_ids']) && is_array($_POST['post_ids'])) {
+        foreach ($_POST['post_ids'] as $pid) {
+          $pid = (int)$pid;
+          $stmt = $db->prepare("SELECT image FROM {$table} WHERE id = ?");
+          $stmt->execute([$pid]);
+          $img = $stmt->fetchColumn();
+          if ($img && file_exists(MUSIC_DIR . '/' . $img)) @unlink(MUSIC_DIR . '/' . $img);
+
+          if ($target_type === 'thread') {
+            $stmt_r = $db->prepare("SELECT image FROM phpboard_replies WHERE thread_id = ?");
+            $stmt_r->execute([$pid]);
+            while ($rimg = $stmt_r->fetchColumn()) {
+              if ($rimg && file_exists(MUSIC_DIR . '/' . $rimg)) @unlink(MUSIC_DIR . '/' . $rimg);
+            }
+          }
+          $db->prepare("DELETE FROM {$table} WHERE id = ?")->execute([$pid]);
+        }
+        log_admin_activity($db, $_SESSION['admin_email'], "Bulk deleted {$target_type}s: " . implode(',', $_POST['post_ids']), 0);
+        $_SESSION['admin_flash_msg'] = "Selected {$target_type}(s) deleted successfully.";
+      } elseif ($action === 'single_delete' && isset($_POST['post_id'])) {
+        $pid = (int)$_POST['post_id'];
+        $stmt = $db->prepare("SELECT image FROM {$table} WHERE id = ?");
+        $stmt->execute([$pid]);
+        $img = $stmt->fetchColumn();
+        if ($img && file_exists(MUSIC_DIR . '/' . $img)) @unlink(MUSIC_DIR . '/' . $img);
+
+        if ($target_type === 'thread') {
+          $stmt_r = $db->prepare("SELECT image FROM phpboard_replies WHERE thread_id = ?");
+          $stmt_r->execute([$pid]);
+          while ($rimg = $stmt_r->fetchColumn()) {
+            if ($rimg && file_exists(MUSIC_DIR . '/' . $rimg)) @unlink(MUSIC_DIR . '/' . $rimg);
+          }
+        }
+        $db->prepare("DELETE FROM {$table} WHERE id = ?")->execute([$pid]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Deleted {$target_type} #{$pid}", 0);
+        $_SESSION['admin_flash_msg'] = ucfirst($target_type) . " deleted.";
+      } elseif ($action === 'edit' && isset($_POST['post_id'])) {
+        $pid = (int)$_POST['post_id'];
+        $comment = trim($_POST['comment'] ?? '');
+        if ($target_type === 'thread') {
+          $subject = trim(htmlspecialchars($_POST['subject'] ?? '', ENT_QUOTES, 'UTF-8'));
+          $db->prepare("UPDATE phpboard_threads SET subject = ?, comment = ? WHERE id = ?")->execute([$subject, $comment, $pid]);
+        } else {
+          $db->prepare("UPDATE phpboard_replies SET comment = ? WHERE id = ?")->execute([$comment, $pid]);
+        }
+        log_admin_activity($db, $_SESSION['admin_email'], "Edited {$target_type} #{$pid}", 0);
+        $_SESSION['admin_flash_msg'] = ucfirst($target_type) . " updated.";
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    // COMMENTS MANAGEMENT
+    if (isset($_POST['admin_comment_action'])) {
+      $db = get_db();
+      $action = $_POST['admin_comment_action'];
+      $target_module = $_POST['target_module'] ?? 'artworks';
+      
+      $table = 'comments';
+      if ($target_module === 'songs') $table = 'song_comments';
+      if ($target_module === 'blogs') $table = 'blog_comments';
+
+      if ($action === 'delete' && isset($_POST['comment_ids']) && is_array($_POST['comment_ids'])) {
+        foreach ($_POST['comment_ids'] as $cid) {
+          $cid = (int)$cid;
+          $db->prepare("DELETE FROM {$table} WHERE id = ? OR parent_id = ?")->execute([$cid, $cid]);
+        }
+        log_admin_activity($db, $_SESSION['admin_email'], "Bulk deleted comments in {$target_module}: " . implode(',', $_POST['comment_ids']), 0);
+        $_SESSION['admin_flash_msg'] = "Selected comments and their replies were deleted.";
+      } elseif ($action === 'single_delete' && isset($_POST['comment_id'])) {
+        $cid = (int)$_POST['comment_id'];
+        $db->prepare("DELETE FROM {$table} WHERE id = ? OR parent_id = ?")->execute([$cid, $cid]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Deleted comment #{$cid} in {$target_module}", 0);
+        $_SESSION['admin_flash_msg'] = "Comment deleted successfully.";
+      } elseif ($action === 'edit' && isset($_POST['comment_id']) && isset($_POST['content'])) {
+        $cid = (int)$_POST['comment_id'];
+        $content = $_POST['content'];
+        $col = ($target_module === 'artworks') ? 'comment' : 'content';
+        $db->prepare("UPDATE {$table} SET {$col} = ? WHERE id = ?")->execute([$content, $cid]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Edited comment #{$cid} in {$target_module}", 0);
+        $_SESSION['admin_flash_msg'] = "Comment updated successfully.";
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
     // PURGE ACTIVITY LOGS
     if (isset($_POST['clear_all_admin_logs'])) {
       $db = get_db();
@@ -34061,8 +35094,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         
         if ($action === 'perm_delete') {
           foreach ($imgs as $img) {
-            @unlink(MUSIC_DIR . '/uploads/artworks/' . $img['file_name']);
-            @unlink(MUSIC_DIR . '/uploads/artworks/thumbs/thumb_' . $img['file_name'] . '.jpg');
+            $fn = $img['file_name'];
+            @unlink(MUSIC_DIR . '/phpmusicpost/artworks/' . $fn);
+            @unlink(MUSIC_DIR . '/phpmusicpost/artworks/thumbs/' . $fn . '.jpg');
+            @unlink(MUSIC_DIR . '/uploads/artworks/' . $fn);
+            @unlink(MUSIC_DIR . '/uploads/artworks/thumbs/thumb_' . $fn . '.jpg');
           }
         }
         $db->prepare("DELETE FROM artworks WHERE id = ?")->execute([$aid]);
@@ -34071,6 +35107,148 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       log_admin_activity($db, $_SESSION['admin_email'], "Bulk Action ({$action}) on Artworks: " . implode(',', $_POST['artwork_ids']), 0);
       $_SESSION['admin_flash_msg'] = "Selected artworks removed.";
       header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['admin_orphan_action']) && isset($_POST['orphan_files']) && is_array($_POST['orphan_files'])) {
+      $action = $_POST['admin_orphan_action'];
+      if ($action === 'perm_delete') {
+        foreach ($_POST['orphan_files'] as $fn) {
+          @unlink(MUSIC_DIR . '/phpmusicpost/artworks/' . $fn);
+          @unlink(MUSIC_DIR . '/phpmusicpost/artworks/thumbs/' . $fn . '.jpg');
+          @unlink(MUSIC_DIR . '/uploads/artworks/' . $fn);
+          @unlink(MUSIC_DIR . '/uploads/artworks/thumbs/thumb_' . $fn . '.jpg');
+        }
+        log_admin_activity(get_db(), $_SESSION['admin_email'], "Deleted " . count($_POST['orphan_files']) . " orphaned raw images.", 0);
+        $_SESSION['admin_flash_msg'] = "Selected orphaned files removed.";
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    // RAW IMAGES & THUMBNAIL CACHE MAINTENANCE HANDLERS
+    if (isset($_POST['regenerate_art_thumbnails'])) {
+      $db = get_db();
+      @set_time_limit(300);
+      $regenerated = 0;
+
+      $stmt = $db->query("SELECT id, artwork_id, file_name FROM artwork_images");
+      while ($img = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $fn = $img['file_name'];
+        $rawCandidates = [
+          MUSIC_DIR . '/phpmusicpost/artworks/' . $fn,
+          MUSIC_DIR . '/uploads/artworks/' . $fn
+        ];
+        $rawPath = null;
+        foreach ($rawCandidates as $rc) {
+          if (file_exists($rc) && is_file($rc)) { $rawPath = $rc; break; }
+        }
+
+        if ($rawPath) {
+          $targetThumb = MUSIC_DIR . '/phpmusicpost/artworks/thumbs/' . str_replace('/', DIRECTORY_SEPARATOR, $fn) . '.jpg';
+          $thumbDir = dirname($targetThumb);
+          if (!is_dir($thumbDir)) @mkdir($thumbDir, 0755, true);
+
+          if (!file_exists($targetThumb) || filesize($targetThumb) === 0) {
+            if (function_exists('artworkCreateThumbnail')) {
+              if (artworkCreateThumbnail($rawPath, $targetThumb, 480, 88)) {
+                $regenerated++;
+              }
+            }
+          }
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Regenerated {$regenerated} missing artwork thumbnails", 0);
+      $_SESSION['admin_flash_msg'] = "Regenerated {$regenerated} missing thumbnail(s).";
+      header('Location: ?access=admin&page=artworks&tab=raw_images');
+      exit;
+    }
+
+    if (isset($_POST['purge_orphaned_art_files'])) {
+      $db = get_db();
+      @set_time_limit(300);
+
+      $dbFiles = $db->query("SELECT file_name FROM artwork_images")->fetchAll(PDO::FETCH_COLUMN);
+      
+      // Protect inline raw images embedded in Novel/Post Markdown descriptions
+      $descriptions = $db->query("SELECT description FROM artworks WHERE description LIKE '%f=%' OR description LIKE '%file=%'")->fetchAll(PDO::FETCH_COLUMN);
+      foreach ($descriptions as $desc) {
+        if (preg_match_all('/(?:f|file)=([a-zA-Z0-9_\-\.]+\.(?:jpg|jpeg|png|gif|webp|avif|mp4|webm|mov|mkv|ogg))/i', $desc, $matches)) {
+          foreach ($matches[1] as $m) {
+            $dbFiles[] = $m;
+          }
+        }
+      }
+
+      $dbLookup = array_flip(array_map(fn($f) => str_replace('\\', '/', $f), $dbFiles));
+
+      $artDirs = [MUSIC_DIR . '/phpmusicpost/artworks', MUSIC_DIR . '/uploads/artworks'];
+      $deletedCount = 0;
+      $reclaimedBytes = 0;
+
+      foreach ($artDirs as $adir) {
+        if (is_dir($adir)) {
+          $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($adir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+          );
+          foreach ($it as $f) {
+            if ($f->isFile()) {
+              $full = str_replace('\\', '/', $f->getRealPath());
+              if (strpos($full, '/thumbs/') !== false || strpos($full, '/versions/') !== false) continue;
+              $rel = ltrim(str_replace(str_replace('\\', '/', $adir), '', $full), '/');
+
+              if (!isset($dbLookup[$rel]) && !isset($dbLookup[basename($rel)])) {
+                $sz = $f->getSize();
+                if (@unlink($f->getRealPath())) {
+                  $deletedCount++;
+                  $reclaimedBytes += $sz;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      $reclaimedMb = number_format($reclaimedBytes / 1048576, 2);
+      log_admin_activity($db, $_SESSION['admin_email'], "Purged {$deletedCount} orphaned artwork raw files ({$reclaimedMb} MB)", 0);
+      $_SESSION['admin_flash_msg'] = "Purged {$deletedCount} unreferenced raw file(s). Reclaimed {$reclaimedMb} MB.";
+      header('Location: ?access=admin&page=artworks&tab=raw_images');
+      exit;
+    }
+
+    if (isset($_POST['recalc_art_phashes'])) {
+      $db = get_db();
+      @set_time_limit(300);
+      $updatedCount = 0;
+
+      $stmt = $db->query("SELECT id, artwork_id, file_name, sort_order FROM artwork_images WHERE mime_type NOT LIKE 'video/%'");
+      $upStmt = $db->prepare("UPDATE artwork_images SET phash = ? WHERE id = ?");
+      $artUpStmt = $db->prepare("UPDATE artworks SET phash = ? WHERE id = ?");
+
+      while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $fn = $row['file_name'];
+        $thumbPath = MUSIC_DIR . '/phpmusicpost/artworks/thumbs/' . str_replace('/', DIRECTORY_SEPARATOR, $fn) . '.jpg';
+        if (!file_exists($thumbPath)) {
+          $thumbPath = MUSIC_DIR . '/phpmusicpost/artworks/' . str_replace('/', DIRECTORY_SEPARATOR, $fn);
+        }
+
+        if (file_exists($thumbPath) && function_exists('compute_phash')) {
+          $hash = compute_phash($thumbPath);
+          if ($hash) {
+            $upStmt->execute([$hash, $row['id']]);
+            if ((int)$row['sort_order'] === 0) {
+              $artUpStmt->execute([$hash, $row['artwork_id']]);
+            }
+            $updatedCount++;
+          }
+        }
+      }
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Recomputed pHash signatures for {$updatedCount} artwork images", 0);
+      $_SESSION['admin_flash_msg'] = "Recomputed visual perceptual hashes for {$updatedCount} image(s).";
+      header('Location: ?access=admin&page=artworks&tab=raw_images');
       exit;
     }
 
@@ -34885,7 +36063,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
+  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -34933,6 +36111,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'songs' => 'Song Management',
     'bitrate_management' => 'Audio Bitrate & Transcoding Studio',
     'artworks' => 'Artwork Management',
+    'phpboard' => 'PHPBoard & Imageboard Management',
+    'comments' => 'Comments & Replies',
     'logs' => 'Activity Logs',
     'reports' => 'Pending Reports',
     'rhythm_analytics' => 'Rhythm Game Analytics',
@@ -36238,7 +37418,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php
             $active_p = $_GET['page'] ?? 'users';
             $is_setup_active = in_array($active_p, ['hijack_recovery', 'settings', 'security', 'pwa']);
-            $is_content_active = in_array($active_p, ['users', 'songs', 'artworks', 'storage', 'user_drive_management', 'bitrate_management']) || empty($_GET['page']);
+            $is_content_active = in_array($active_p, ['users', 'songs', 'artworks', 'phpboard', 'storage', 'user_drive_management', 'bitrate_management']) || empty($_GET['page']);
             $is_monitor_active = in_array($active_p, ['analytics', 'logs', 'reports', 'rhythm_analytics', 'appeals']);
             $is_engine_active = in_array($active_p, ['jobs', 'db_backups', 'error_logs', 'phpinfo']);
             $is_tools_active = in_array($active_p, ['manage', 'drive', 'dbmanager', 'ide', 'api', 'update']);
@@ -36279,6 +37459,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo ($active_p === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Studio</span></a>
               <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('phpboard', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=phpboard" title="PHPBoard Imageboard" class="nav-link <?php echo ($active_p === 'phpboard') ? 'active' : ''; ?>"><i class="bi bi-chat-square-quote-fill"></i><span>PHPBoard Studio</span></a>
+              <?php endif; ?>
               <?php if ($is_super_admin_check || in_array('storage', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=storage" title="Storage Studio" class="nav-link <?php echo ($active_p === 'storage') ? 'active' : ''; ?>"><i class="bi bi-hdd-rack-fill"></i><span>Storage Studio</span></a>
               <?php endif; ?>
@@ -36298,6 +37481,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <div class="sidebar-accordion-body <?php echo $is_monitor_active ? '' : 'collapsed'; ?>" id="admin-sec-monitor">
               <?php if ($is_super_admin_check || in_array('analytics', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=analytics" title="Traffic Analytics" class="nav-link <?php echo ($active_p === 'analytics') ? 'active' : ''; ?>"><i class="bi bi-graph-up-arrow"></i><span>Traffic Analytics</span></a>
+              <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('comments', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=comments" title="Comments & Replies" class="nav-link <?php echo ($active_p === 'comments') ? 'active' : ''; ?>"><i class="bi bi-chat-left-text-fill"></i><span>Comments &amp; Replies</span></a>
               <?php endif; ?>
               <?php if ($is_super_admin_check || in_array('logs', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=logs" title="Activity Logs" class="nav-link <?php echo ($active_p === 'logs') ? 'active' : ''; ?>"><i class="bi bi-journal-code"></i><span>Activity Logs</span></a>
@@ -37580,7 +38766,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.4'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.5'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -42513,12 +43699,349 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <a href="?access=admin&page=artworks&tab=moderation" class="update-tab-btn <?php echo $active_art_tab === 'moderation' ? 'active' : ''; ?>">
                 <i class="bi bi-shield-exclamation"></i> Moderation (R-18 / AI) (<?php echo number_format($total_r18); ?>)
               </a>
+              <a href="?access=admin&page=artworks&tab=raw_images" class="update-tab-btn <?php echo $active_art_tab === 'raw_images' ? 'active' : ''; ?>">
+                <i class="bi bi-hdd-fill"></i> Raw Images &amp; Storage
+              </a>
               <a href="?access=admin&page=artworks&tab=settings" class="update-tab-btn <?php echo $active_art_tab === 'settings' ? 'active' : ''; ?>">
                 <i class="bi bi-sliders"></i> Media &amp; Upload Settings
               </a>
             </div>
 
-            <?php if ($active_art_tab === 'settings'): ?>
+            <?php if ($active_art_tab === 'raw_images'): ?>
+              <?php
+                $db = get_db();
+                $raw_filter = $_GET['raw_filter'] ?? 'linked';
+                $raw_page = max(1, (int)($_GET['p'] ?? 1));
+                $raw_limit = 25;
+                $raw_offset = ($raw_page - 1) * $raw_limit;
+                $raw_search = trim($_GET['search'] ?? '');
+
+                // Storage stats calculation
+                $art_storage_dirs = [MUSIC_DIR . '/phpmusicpost/artworks', MUSIC_DIR . '/uploads/artworks'];
+                $total_raw_bytes = 0;
+                $total_raw_files_disk = 0;
+                $total_thumb_bytes = 0;
+
+                foreach ($art_storage_dirs as $asdir) {
+                  if (is_dir($asdir)) {
+                    $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($asdir, FilesystemIterator::SKIP_DOTS));
+                    foreach ($it as $f) {
+                      if ($f->isFile()) {
+                        $p = str_replace('\\', '/', $f->getPathname());
+                        if (strpos($p, '/thumbs/') !== false) {
+                          $total_thumb_bytes += $f->getSize();
+                        } else {
+                          $total_raw_bytes += $f->getSize();
+                          $total_raw_files_disk++;
+                        }
+                      }
+                    }
+                  }
+                }
+
+                $total_db_images = (int)$db->query("SELECT COUNT(*) FROM artwork_images")->fetchColumn();
+                
+                $total_filtered_raw = 0;
+                $total_raw_pages = 1;
+                $raw_items = [];
+
+                if ($raw_filter === 'linked') {
+                  $where_raw = "1=1";
+                  $params_raw = [];
+                  if ($raw_search !== '') {
+                    $where_raw = "(ai.file_name LIKE ? OR a.title LIKE ? OR u.artist LIKE ?)";
+                    $term_r = "%{$raw_search}%";
+                    $params_raw = [$term_r, $term_r, $term_r];
+                  }
+
+                  $stmt_raw_cnt = $db->prepare("SELECT COUNT(*) FROM artwork_images ai JOIN artworks a ON ai.artwork_id = a.id LEFT JOIN users u ON a.user_id = u.id WHERE {$where_raw}");
+                  $stmt_raw_cnt->execute($params_raw);
+                  $total_filtered_raw = (int)$stmt_raw_cnt->fetchColumn();
+                  $total_raw_pages = max(1, ceil($total_filtered_raw / $raw_limit));
+
+                  $stmt_raw_list = $db->prepare("
+                    SELECT ai.*, a.title as art_title, a.type as art_type, a.rating, u.artist as artist_name
+                    FROM artwork_images ai
+                    JOIN artworks a ON ai.artwork_id = a.id
+                    LEFT JOIN users u ON a.user_id = u.id
+                    WHERE {$where_raw}
+                    ORDER BY ai.id DESC
+                    LIMIT {$raw_limit} OFFSET {$raw_offset}
+                  ");
+                  $stmt_raw_list->execute($params_raw);
+                  $raw_items = $stmt_raw_list->fetchAll(PDO::FETCH_ASSOC);
+                } else {
+                  // Find orphans (excluding those safely tracked in DB or embedded in Markdown descriptions)
+                  $dbFiles = $db->query("SELECT file_name FROM artwork_images")->fetchAll(PDO::FETCH_COLUMN);
+                  
+                  // Extract inline images from Markdown descriptions
+                  $descriptions = $db->query("SELECT description FROM artworks WHERE description LIKE '%f=%' OR description LIKE '%file=%'")->fetchAll(PDO::FETCH_COLUMN);
+                  foreach ($descriptions as $desc) {
+                    if (preg_match_all('/(?:f|file)=([a-zA-Z0-9_\-\.]+\.(?:jpg|jpeg|png|gif|webp|avif|mp4|webm|mov|mkv|ogg))/i', $desc, $matches)) {
+                      foreach ($matches[1] as $m) {
+                        $dbFiles[] = $m;
+                      }
+                    }
+                  }
+                  
+                  $dbLookup = array_flip(array_map(fn($f) => str_replace('\\', '/', $f), $dbFiles));
+                  $orphans = [];
+
+                  foreach ($art_storage_dirs as $adir) {
+                    if (is_dir($adir)) {
+                      $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($adir, FilesystemIterator::SKIP_DOTS));
+                      foreach ($it as $f) {
+                        if ($f->isFile()) {
+                          $full = str_replace('\\', '/', $f->getRealPath());
+                          if (strpos($full, '/thumbs/') !== false || strpos($full, '/versions/') !== false || basename($full) === '.htaccess') continue;
+                          $rel = ltrim(str_replace(str_replace('\\', '/', $adir), '', $full), '/');
+
+                          if (!isset($dbLookup[$rel]) && !isset($dbLookup[basename($rel)])) {
+                            if ($raw_search === '' || stripos($rel, $raw_search) !== false) {
+                              $orphans[] = [
+                                'file_name' => $rel,
+                                'full_path' => $full,
+                                'file_size' => $f->getSize(),
+                                'width' => 0, 'height' => 0,
+                                'is_orphan' => true
+                              ];
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                  $total_filtered_raw = count($orphans);
+                  $total_raw_pages = max(1, ceil($total_filtered_raw / $raw_limit));
+                  $raw_items = array_slice($orphans, $raw_offset, $raw_limit);
+                }
+              ?>
+
+              <!-- Storage KPI Cards -->
+              <div class="row g-3 mb-4">
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Raw Images Storage</span>
+                      <span class="text-danger"><i class="bi bi-hdd-fill fs-5"></i></span>
+                    </div>
+                    <div class="fs-4 fw-bold text-white"><?php echo function_exists('format_admin_bytes') ? format_admin_bytes($total_raw_bytes) : number_format($total_raw_bytes / 1048576, 2) . ' MB'; ?></div>
+                    <small class="text-secondary"><?php echo number_format($total_raw_files_disk); ?> physical files on disk</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Database References</span>
+                      <span class="text-info"><i class="bi bi-images fs-5"></i></span>
+                    </div>
+                    <div class="fs-4 fw-bold text-white"><?php echo number_format($total_db_images); ?> <span class="fs-6 text-secondary fw-normal">images</span></div>
+                    <small class="text-secondary">Tracked in artwork_images</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Thumbnail Cache</span>
+                      <span class="text-success"><i class="bi bi-file-image fs-5"></i></span>
+                    </div>
+                    <div class="fs-4 fw-bold text-white"><?php echo function_exists('format_admin_bytes') ? format_admin_bytes($total_thumb_bytes) : number_format($total_thumb_bytes / 1048576, 2) . ' MB'; ?></div>
+                    <small class="text-secondary">Compressed 480px WebP/JPG thumbs</small>
+                  </div>
+                </div>
+
+                <div class="col-12 col-sm-6 col-xl-3">
+                  <div class="admin-card p-3 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="text-secondary small fw-bold text-uppercase">Disk Health</span>
+                      <span class="text-warning"><i class="bi bi-shield-check fs-5"></i></span>
+                    </div>
+                    <div class="fs-4 fw-bold text-white">
+                      <?php echo ($total_raw_files_disk >= $total_db_images) ? '<span class="text-success">Synchronized</span>' : '<span class="text-warning">Missing Files</span>'; ?>
+                    </div>
+                    <small class="text-secondary">Assets verified against database</small>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Maintenance Action Toolbar -->
+              <div class="admin-card p-4 mb-4">
+                <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-3">
+                  <i class="bi bi-tools text-danger"></i> Raw Images &amp; Cache Maintenance Tools
+                </h5>
+                <div class="row g-3">
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column justify-content-between">
+                      <div>
+                        <strong class="text-white d-block mb-1"><i class="bi bi-arrow-repeat text-success me-1"></i> Regenerate Thumbnails</strong>
+                        <span class="text-secondary small">Re-renders missing 480px thumbnail caches for any artwork without valid thumbs.</span>
+                      </div>
+                      <form method="POST" action="?access=admin&page=artworks&tab=raw_images" class="mt-3 m-0">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <button type="submit" name="regenerate_art_thumbnails" class="admin-btn-pill admin-btn-primary w-100 justify-content-center" style="height:34px;">
+                          Regenerate Thumbs
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column justify-content-between">
+                      <div>
+                        <strong class="text-white d-block mb-1"><i class="bi bi-trash3 text-danger me-1"></i> Clean Orphaned Raw Files</strong>
+                        <span class="text-secondary small">Deletes unreferenced raw image files sitting on disk that have no database post.</span>
+                      </div>
+                      <form method="POST" action="?access=admin&page=artworks&tab=raw_images" class="mt-3 m-0" onsubmit="return confirm('Purge unreferenced image files from disk?');">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <button type="submit" name="purge_orphaned_art_files" class="admin-btn-pill w-100 justify-content-center text-danger" style="height:34px; border-color: rgba(239, 68, 68, 0.4);">
+                          Purge Orphans
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+
+                  <div class="col-12 col-md-4">
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 h-100 d-flex flex-column justify-content-between">
+                      <div>
+                        <strong class="text-white d-block mb-1"><i class="bi bi-fingerprint text-info me-1"></i> Recalculate pHash Values</strong>
+                        <span class="text-secondary small">Recomputes 64-bit dHash perceptual fingerprints for visual similarity search.</span>
+                      </div>
+                      <form method="POST" action="?access=admin&page=artworks&tab=raw_images" class="mt-3 m-0">
+                        <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                        <button type="submit" name="recalc_art_phashes" class="admin-btn-pill w-100 justify-content-center text-info" style="height:34px; border-color: rgba(56, 189, 248, 0.4);">
+                          Recalculate Hashes
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Raw Images Asset Table -->
+              <form method="POST" action="?access=admin&page=artworks" id="admin-orphans-form">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                  <?php if ($raw_filter === 'orphaned'): ?>
+                    <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.orphan-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                    <button type="submit" name="admin_orphan_action" value="perm_delete" class="admin-btn-pill" style="color: #ef4444; border-color: rgba(239, 68, 68, 0.4);" onclick="return confirm('Permanently delete selected orphaned files?');"><i class="bi bi-trash2-fill"></i> Delete Selected Orphans</button>
+                  <?php endif; ?>
+                </div>
+
+                <div class="admin-card mb-4">
+                  <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <h5 class="m-0 text-white fw-bold fs-6">Raw Image Assets (<?php echo number_format($total_filtered_raw); ?>)</h5>
+                    <div class="d-flex align-items-center gap-2 m-0 flex-wrap" style="max-width: 500px;">
+                      <select name="raw_filter" class="admin-pill-select" onchange="window.location.href='?access=admin&page=artworks&tab=raw_images&raw_filter='+this.value">
+                        <option value="linked" <?php echo $raw_filter === 'linked' ? 'selected' : ''; ?>>Linked to Post/Novel</option>
+                        <option value="orphaned" <?php echo $raw_filter === 'orphaned' ? 'selected' : ''; ?>>Unlinked / Orphaned Images</option>
+                      </select>
+                      <div class="position-relative" style="flex:1;">
+                        <input type="text" id="raw_search_input" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Search file, title, artist..." value="<?php echo htmlspecialchars($raw_search); ?>" onkeydown="if(event.key==='Enter') { window.location.href='?access=admin&page=artworks&tab=raw_images&raw_filter=<?php echo $raw_filter; ?>&search='+encodeURIComponent(this.value); return false; }">
+                        <button type="button" onclick="window.location.href='?access=admin&page=artworks&tab=raw_images&raw_filter=<?php echo $raw_filter; ?>&search='+encodeURIComponent(document.getElementById('raw_search_input').value);" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0"><i class="bi bi-search"></i></button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle text-nowrap">
+                      <thead>
+                        <tr>
+                          <?php if ($raw_filter === 'orphaned'): ?>
+                            <th style="width: 40px;" class="text-center"></th>
+                          <?php endif; ?>
+                          <th style="width: 50px;">Thumb</th>
+                          <th>Relative File Path</th>
+                          <?php if ($raw_filter === 'linked'): ?>
+                            <th>Parent Post</th>
+                            <th>Artist</th>
+                          <?php else: ?>
+                            <th>Status</th>
+                          <?php endif; ?>
+                          <th>Dimensions</th>
+                          <th>File Size</th>
+                          <th>pHash Signature</th>
+                          <th class="text-end" style="width: 120px;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($raw_items)): ?>
+                          <tr><td colspan="<?php echo $raw_filter === 'linked' ? 8 : 8; ?>" class="text-center py-5 text-secondary">No raw artwork image files found.</td></tr>
+                        <?php else: foreach ($raw_items as $item): 
+                          $fn = $item['file_name'];
+                          $isVid = isset($item['mime_type']) && strpos($item['mime_type'], 'video/') === 0;
+                        ?>
+                          <tr>
+                            <?php if ($raw_filter === 'orphaned'): ?>
+                              <td class="text-center">
+                                <input type="checkbox" name="orphan_files[]" value="<?php echo htmlspecialchars($fn); ?>" class="form-check-input orphan-cb" style="cursor:pointer; transform: scale(1.1);">
+                              </td>
+                            <?php endif; ?>
+                            <td>
+                              <div style="width: 36px; height: 36px; border-radius: 6px; overflow: hidden; background: #000; border: 1px solid var(--border-subtle);">
+                                <img src="?access=artwork&action=thumb&f=<?php echo urlencode($fn); ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                              </div>
+                            </td>
+                            <td class="font-monospace text-white small text-truncate" style="max-width: 260px;" title="<?php echo htmlspecialchars($fn); ?>">
+                              <?php echo htmlspecialchars($fn); ?>
+                            </td>
+                            <?php if ($raw_filter === 'linked'): ?>
+                              <td>
+                                <a href="?access=artwork#/artwork/<?php echo $item['artwork_id']; ?>" target="_blank" class="fw-bold text-info text-decoration-none" title="View Artwork Post">
+                                  <?php echo htmlspecialchars($item['art_title']); ?> (#<?php echo $item['artwork_id']; ?>)
+                                </a>
+                              </td>
+                              <td>
+                                <span class="text-white small"><?php echo htmlspecialchars($item['artist_name'] ?: 'Unknown'); ?></span>
+                              </td>
+                            <?php else: ?>
+                              <td>
+                                <span class="admin-badge admin-badge-warning">Orphaned</span>
+                              </td>
+                            <?php endif; ?>
+                            <td class="font-monospace small text-secondary">
+                              <?php echo !empty($item['width']) && $item['width'] > 0 ? "{$item['width']} × {$item['height']} px" : '—'; ?>
+                            </td>
+                            <td class="font-monospace small text-white">
+                              <?php echo function_exists('format_admin_bytes') ? format_admin_bytes((int)$item['file_size']) : number_format((int)$item['file_size'] / 1024, 1) . ' KB'; ?>
+                            </td>
+                            <td class="font-monospace small text-secondary" style="font-size: 0.72rem;">
+                              <?php echo !empty($item['phash']) ? htmlspecialchars(substr($item['phash'], 0, 16)) . '...' : '<span class="text-muted">Unset</span>'; ?>
+                            </td>
+                            <td class="text-end">
+                              <a href="?access=artwork&action=raw&f=<?php echo urlencode($fn); ?>" target="_blank" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;" title="Open Full Raw Image">
+                                <i class="bi bi-box-arrow-up-right"></i> Open Raw
+                              </a>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </form>
+
+              <!-- Pagination -->
+              <?php if ($total_raw_pages > 1): ?>
+                <div class="admin-pagination mb-4">
+                  <a class="admin-page-btn <?php echo ($raw_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=raw_images&search=<?php echo urlencode($raw_search); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($raw_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=raw_images&search=<?php echo urlencode($raw_search); ?>&p=<?php echo $raw_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $raw_page - 2);
+                    $end_p = min($total_raw_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($raw_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=artworks&tab=raw_images&search=<?php echo urlencode($raw_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($raw_page >= $total_raw_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=raw_images&search=<?php echo urlencode($raw_search); ?>&p=<?php echo $raw_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($raw_page >= $total_raw_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=artworks&tab=raw_images&search=<?php echo urlencode($raw_search); ?>&p=<?php echo $total_raw_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+
+            <?php elseif ($active_art_tab === 'settings'): ?>
               <?php
                 $a_dim = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_max_dim'")->fetchColumn() ?: 4096);
                 $a_qual = (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_webp_quality'")->fetchColumn() ?: 80);
@@ -42818,6 +44341,828 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               new bootstrap.Modal(document.getElementById('adminEditArtworkModal')).show();
             }
           </script>
+        
+        <?php elseif (($_GET['page'] ?? '') === 'phpboard'): ?>
+          <?php
+            $db = get_db();
+            $board_data = get_phpboard_channels_data($db);
+            $pb_tab = $_GET['tab'] ?? 'channels';
+            $pb_search = trim($_GET['search'] ?? '');
+            $pb_channel = trim($_GET['channel'] ?? '');
+            $pb_page = max(1, (int)($_GET['p'] ?? 1));
+            $pb_limit = 25;
+            $pb_offset = ($pb_page - 1) * $pb_limit;
+
+            $total_channels = count($board_data['allowed']);
+            $total_threads = (int)($db->query("SELECT COUNT(*) FROM phpboard_threads")->fetchColumn() ?: 0);
+            $total_replies = (int)($db->query("SELECT COUNT(*) FROM phpboard_replies")->fetchColumn() ?: 0);
+            $total_nsfw_channels = count($board_data['nsfw']);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">PHPBoard &amp; Imageboard Studio</h1>
+              <div class="small text-secondary mt-1">Manage channels, custom boards, threads, images, and anonymous replies.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <button type="button" class="admin-btn-pill admin-btn-primary" data-bs-toggle="modal" data-bs-target="#adminNewChannelModal">
+                <i class="bi bi-plus-circle-fill"></i> New Channel
+              </button>
+              <form method="POST" action="?access=admin&page=phpboard" class="m-0" onsubmit="return confirm('Restore all default channels? Custom channels will be preserved.');">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <button type="submit" name="reset_phpboard_default_channels" class="admin-btn-pill">
+                  <i class="bi bi-arrow-counterclockwise text-warning"></i> Reset Defaults
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metrics Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Channels</span>
+                    <span class="text-danger"><i class="bi bi-hash fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_channels); ?></div>
+                  <small class="text-secondary"><?php echo $total_nsfw_channels; ?> 18+ (NSFW) boards</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Active Threads</span>
+                    <span class="text-info"><i class="bi bi-chat-square-text-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_threads); ?></div>
+                  <small class="text-secondary">Community created threads</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Replies &amp; Posts</span>
+                    <span class="text-success"><i class="bi bi-chat-left-dots-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_replies); ?></div>
+                  <small class="text-secondary">Across all discussion boards</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Board Posts</span>
+                    <span class="text-warning"><i class="bi bi-collection-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_threads + $total_replies); ?></div>
+                  <small class="text-secondary">Total text &amp; media entries</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=phpboard&tab=channels" class="update-tab-btn <?php echo $pb_tab === 'channels' ? 'active' : ''; ?>">
+                <i class="bi bi-hash"></i> Board Channels (<?php echo $total_channels; ?>)
+              </a>
+              <a href="?access=admin&page=phpboard&tab=threads" class="update-tab-btn <?php echo $pb_tab === 'threads' ? 'active' : ''; ?>">
+                <i class="bi bi-chat-square-text"></i> Threads (<?php echo number_format($total_threads); ?>)
+              </a>
+              <a href="?access=admin&page=phpboard&tab=replies" class="update-tab-btn <?php echo $pb_tab === 'replies' ? 'active' : ''; ?>">
+                <i class="bi bi-reply-fill"></i> Replies (<?php echo number_format($total_replies); ?>)
+              </a>
+            </div>
+
+            <?php if ($pb_tab === 'channels'): ?>
+              <?php
+                $stmt_stats = $db->query("
+                  SELECT channel, COUNT(*) as thread_count 
+                  FROM phpboard_threads 
+                  GROUP BY channel
+                ")->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+
+                $all_chans = $board_data['channels'];
+                if ($pb_search !== '') {
+                  $all_chans = array_filter($all_chans, function($ch) use ($pb_search) {
+                    return stripos($ch['code'], $pb_search) !== false ||
+                           stripos($ch['name'], $pb_search) !== false ||
+                           stripos($ch['category'], $pb_search) !== false;
+                  });
+                }
+              ?>
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <h5 class="m-0 text-white fw-bold fs-6">Configured Imageboard Channels</h5>
+                  <div class="position-relative" style="width: 250px;">
+                    <input type="text" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Filter channels..." value="<?php echo htmlspecialchars($pb_search); ?>" oninput="window.location.href='?access=admin&page=phpboard&tab=channels&search='+encodeURIComponent(this.value)">
+                  </div>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th style="width: 100px;">Board Code</th>
+                        <th>Display Name</th>
+                        <th>Category Group</th>
+                        <th>Maturity</th>
+                        <th>Type</th>
+                        <th>Threads</th>
+                        <th class="text-end" style="width: 140px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($all_chans as $ch): 
+                        $t_count = (int)($stmt_stats[$ch['code']] ?? 0);
+                        $ch_json = htmlspecialchars(json_encode($ch), ENT_QUOTES, 'UTF-8');
+                      ?>
+                        <tr>
+                          <td>
+                            <a href="./#board/<?php echo $ch['code']; ?>" target="_blank" class="admin-badge admin-badge-primary font-monospace text-decoration-none">
+                              /<?php echo htmlspecialchars($ch['code']); ?>/
+                            </a>
+                          </td>
+                          <td class="text-white fw-bold">
+                            <?php echo htmlspecialchars($ch['name']); ?>
+                          </td>
+                          <td>
+                            <span class="admin-badge admin-badge-secondary"><?php echo htmlspecialchars($ch['category'] ?: 'General'); ?></span>
+                          </td>
+                          <td>
+                            <?php if ((int)$ch['is_nsfw'] === 1): ?>
+                              <span class="admin-badge admin-badge-danger">18+ (NSFW)</span>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-success">SFW (All)</span>
+                            <?php endif; ?>
+                          </td>
+                          <td>
+                            <?php if ((int)$ch['is_default'] === 1): ?>
+                              <span class="admin-badge admin-badge-info">Default</span>
+                            <?php else: ?>
+                              <span class="admin-badge admin-badge-warning">Custom</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="font-monospace text-secondary small">
+                            <?php echo number_format($t_count); ?> threads
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-1">
+                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick='openEditChannelModal(<?php echo $ch_json; ?>)'>
+                                <i class="bi bi-pencil-fill"></i>
+                              </button>
+                              <form method="POST" action="?access=admin&page=phpboard" class="m-0 d-inline" onsubmit="return confirm('Permanently delete channel /<?php echo $ch['code']; ?>/ and all its threads?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="channel_code" value="<?php echo htmlspecialchars($ch['code']); ?>">
+                                <button type="submit" name="delete_phpboard_channel" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Delete Board">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <?php elseif ($pb_tab === 'threads'): ?>
+              <?php
+                $where_th = ["1=1"];
+                $params_th = [];
+
+                if ($pb_channel !== '') {
+                  $where_th[] = "t.channel = ?";
+                  $params_th[] = $pb_channel;
+                }
+                if ($pb_search !== '') {
+                  $where_th[] = "(t.subject LIKE ? OR t.comment LIKE ? OR t.artist_name LIKE ?)";
+                  $term_th = "%{$pb_search}%";
+                  array_push($params_th, $term_th, $term_th, $term_th);
+                }
+
+                $where_th_sql = "WHERE " . implode(' AND ', $where_th);
+
+                $stmt_t_cnt = $db->prepare("SELECT COUNT(*) FROM phpboard_threads t {$where_th_sql}");
+                $stmt_t_cnt->execute($params_th);
+                $total_filtered_th = (int)$stmt_t_cnt->fetchColumn();
+                $total_th_pages = max(1, ceil($total_filtered_th / $pb_limit));
+
+                $stmt_t_list = $db->prepare("
+                  SELECT t.*, u.artist as reg_artist,
+                  (SELECT COUNT(*) FROM phpboard_replies WHERE thread_id = t.id) as reply_count
+                  FROM phpboard_threads t
+                  LEFT JOIN users u ON t.user_id = u.id
+                  {$where_th_sql}
+                  ORDER BY t.id DESC
+                  LIMIT {$pb_limit} OFFSET {$pb_offset}
+                ");
+                $stmt_t_list->execute($params_th);
+                $thread_rows = $stmt_t_list->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <form method="POST" action="?access=admin&page=phpboard" id="admin-pb-threads-form">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <input type="hidden" name="post_type" value="thread">
+
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.pb-th-cb').forEach(cb => cb.checked = !cb.checked)">
+                      <i class="bi bi-check-all"></i> Toggle Selection
+                    </button>
+                    <button type="submit" name="admin_phpboard_post_action" value="delete" class="admin-btn-pill" style="color:#ef4444; border-color:rgba(239, 68, 68, 0.4);" onclick="return confirm('Permanently delete selected threads and replies?');">
+                      <i class="bi bi-trash2-fill"></i> Delete Selected
+                    </button>
+                  </div>
+
+                  <div class="d-flex align-items-center gap-2">
+                    <select name="channel" class="admin-pill-select" onchange="window.location.href='?access=admin&page=phpboard&tab=threads&channel='+encodeURIComponent(this.value)">
+                      <option value="">All Channels</option>
+                      <?php foreach ($board_data['allowed'] as $c_code): ?>
+                        <option value="<?php echo $c_code; ?>" <?php echo $pb_channel === $c_code ? 'selected' : ''; ?>>/<?php echo $c_code; ?>/ - <?php echo htmlspecialchars($board_data['names'][$c_code] ?? ''); ?></option>
+                      <?php endforeach; ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="admin-card mb-4">
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle">
+                      <thead>
+                        <tr>
+                          <th style="width: 40px;" class="text-center"></th>
+                          <th style="width: 60px;">Media</th>
+                          <th style="width: 80px;">Board</th>
+                          <th>Subject &amp; Snippet</th>
+                          <th>Author</th>
+                          <th>Replies</th>
+                          <th>Date</th>
+                          <th class="text-end" style="width: 120px;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($thread_rows)): ?>
+                          <tr><td colspan="8" class="text-center py-5 text-secondary">No threads found in this query.</td></tr>
+                        <?php else: foreach ($thread_rows as $thr): 
+                          $th_json = htmlspecialchars(json_encode($thr), ENT_QUOTES, 'UTF-8');
+                        ?>
+                          <tr>
+                            <td class="text-center">
+                              <input type="checkbox" name="post_ids[]" value="<?php echo $thr['id']; ?>" class="form-check-input pb-th-cb" style="cursor:pointer; transform:scale(1.1);">
+                            </td>
+                            <td>
+                              <?php if (!empty($thr['image'])): ?>
+                                <a href="./<?php echo htmlspecialchars($thr['image']); ?>" target="_blank" style="width: 36px; height: 36px; display:inline-block; border-radius:6px; overflow:hidden; background:#000;">
+                                  <img src="./<?php echo htmlspecialchars($thr['image']); ?>" alt="" style="width:100%; height:100%; object-fit:cover;">
+                                </a>
+                              <?php else: ?>
+                                <div style="width:36px; height:36px; display:flex; align-items:center; justify-content:center; background:#181818; border-radius:6px; color:#555;"><i class="bi bi-chat-text"></i></div>
+                              <?php endif; ?>
+                            </td>
+                            <td>
+                              <span class="admin-badge admin-badge-primary font-monospace">/<?php echo htmlspecialchars($thr['channel']); ?>/</span>
+                            </td>
+                            <td>
+                              <div class="fw-bold text-white"><?php echo htmlspecialchars($thr['subject'] ?: 'Untitled Thread'); ?></div>
+                              <small class="text-secondary text-truncate d-block" style="max-width: 360px;"><?php echo htmlspecialchars(strip_tags($thr['comment'])); ?></small>
+                            </td>
+                            <td>
+                              <div class="text-white small"><?php echo htmlspecialchars($thr['reg_artist'] ?: $thr['artist_name']); ?></div>
+                              <?php if ($thr['user_id']): ?>
+                                <span class="badge bg-dark border border-secondary text-secondary" style="font-size: 0.65rem;">UID #<?php echo $thr['user_id']; ?></span>
+                              <?php else: ?>
+                                <span class="badge bg-dark text-muted" style="font-size: 0.65rem;">Anonymous</span>
+                              <?php endif; ?>
+                            </td>
+                            <td class="font-monospace text-secondary small">
+                              <?php echo (int)$thr['reply_count']; ?>
+                            </td>
+                            <td class="font-monospace text-secondary small">
+                              <?php echo date('M j, H:i', strtotime($thr['created_at'])); ?>
+                            </td>
+                            <td class="text-end">
+                              <div class="d-flex align-items-center justify-content-end gap-1">
+                                <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick='openEditPostModal("thread", <?php echo $th_json; ?>)'>
+                                  <i class="bi bi-pencil-fill"></i>
+                                </button>
+                                <button type="submit" name="admin_phpboard_post_action" value="single_delete" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" onclick="document.getElementById('edit-pb-post-id').value='<?php echo $thr['id']; ?>'; return confirm('Delete thread #<?php echo $thr['id']; ?>?');">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <?php if ($total_th_pages > 1): ?>
+                  <div class="admin-pagination mb-4">
+                    <a class="admin-page-btn <?php echo ($pb_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=threads&channel=<?php echo urlencode($pb_channel); ?>&search=<?php echo urlencode($pb_search); ?>&p=1">«</a>
+                    <a class="admin-page-btn <?php echo ($pb_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=threads&channel=<?php echo urlencode($pb_channel); ?>&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $pb_page - 1; ?>">‹</a>
+                    <?php
+                      $sp = max(1, $pb_page - 2);
+                      $ep = min($total_th_pages, $sp + 4);
+                      if ($ep - $sp < 4) $sp = max(1, $ep - 4);
+                      for ($i = $sp; $i <= $ep; $i++):
+                    ?>
+                      <a class="admin-page-btn <?php echo ($pb_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=phpboard&tab=threads&channel=<?php echo urlencode($pb_channel); ?>&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                    <?php endfor; ?>
+                    <a class="admin-page-btn <?php echo ($pb_page >= $total_th_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=threads&channel=<?php echo urlencode($pb_channel); ?>&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $pb_page + 1; ?>">›</a>
+                    <a class="admin-page-btn <?php echo ($pb_page >= $total_th_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=threads&channel=<?php echo urlencode($pb_channel); ?>&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $total_th_pages; ?>">»</a>
+                  </div>
+                <?php endif; ?>
+              </form>
+
+            <?php elseif ($pb_tab === 'replies'): ?>
+              <?php
+                $where_rp = ["1=1"];
+                $params_rp = [];
+
+                if ($pb_search !== '') {
+                  $where_rp[] = "(r.comment LIKE ? OR r.artist_name LIKE ?)";
+                  $term_rp = "%{$pb_search}%";
+                  array_push($params_rp, $term_rp, $term_rp);
+                }
+
+                $where_rp_sql = "WHERE " . implode(' AND ', $where_rp);
+
+                $stmt_r_cnt = $db->prepare("SELECT COUNT(*) FROM phpboard_replies r {$where_rp_sql}");
+                $stmt_r_cnt->execute($params_rp);
+                $total_filtered_rp = (int)$stmt_r_cnt->fetchColumn();
+                $total_rp_pages = max(1, ceil($total_filtered_rp / $pb_limit));
+
+                $stmt_r_list = $db->prepare("
+                  SELECT r.*, t.channel, t.subject as thread_subject, u.artist as reg_artist
+                  FROM phpboard_replies r
+                  JOIN phpboard_threads t ON r.thread_id = t.id
+                  LEFT JOIN users u ON r.user_id = u.id
+                  {$where_rp_sql}
+                  ORDER BY r.id DESC
+                  LIMIT {$pb_limit} OFFSET {$pb_offset}
+                ");
+                $stmt_r_list->execute($params_rp);
+                $reply_rows = $stmt_r_list->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <form method="POST" action="?access=admin&page=phpboard" id="admin-pb-replies-form">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <input type="hidden" name="post_type" value="reply">
+
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                  <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.pb-rp-cb').forEach(cb => cb.checked = !cb.checked)">
+                      <i class="bi bi-check-all"></i> Toggle Selection
+                    </button>
+                    <button type="submit" name="admin_phpboard_post_action" value="delete" class="admin-btn-pill" style="color:#ef4444; border-color:rgba(239, 68, 68, 0.4);" onclick="return confirm('Permanently delete selected replies?');">
+                      <i class="bi bi-trash2-fill"></i> Delete Selected
+                    </button>
+                  </div>
+                </div>
+
+                <div class="admin-card mb-4">
+                  <div class="table-responsive">
+                    <table class="admin-table align-middle">
+                      <thead>
+                        <tr>
+                          <th style="width: 40px;" class="text-center"></th>
+                          <th style="width: 60px;">Media</th>
+                          <th style="width: 80px;">Board</th>
+                          <th>Reply Snippet</th>
+                          <th>Parent Thread</th>
+                          <th>Author</th>
+                          <th>Date</th>
+                          <th class="text-end" style="width: 120px;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php if (empty($reply_rows)): ?>
+                          <tr><td colspan="8" class="text-center py-5 text-secondary">No replies found.</td></tr>
+                        <?php else: foreach ($reply_rows as $rep): 
+                          $rep_json = htmlspecialchars(json_encode($rep), ENT_QUOTES, 'UTF-8');
+                        ?>
+                          <tr>
+                            <td class="text-center">
+                              <input type="checkbox" name="post_ids[]" value="<?php echo $rep['id']; ?>" class="form-check-input pb-rp-cb" style="cursor:pointer; transform:scale(1.1);">
+                            </td>
+                            <td>
+                              <?php if (!empty($rep['image'])): ?>
+                                <a href="./<?php echo htmlspecialchars($rep['image']); ?>" target="_blank" style="width: 36px; height: 36px; display:inline-block; border-radius:6px; overflow:hidden; background:#000;">
+                                  <img src="./<?php echo htmlspecialchars($rep['image']); ?>" alt="" style="width:100%; height:100%; object-fit:cover;">
+                                </a>
+                              <?php else: ?>
+                                <div style="width:36px; height:36px; display:flex; align-items:center; justify-content:center; background:#181818; border-radius:6px; color:#555;"><i class="bi bi-reply-fill"></i></div>
+                              <?php endif; ?>
+                            </td>
+                            <td>
+                              <span class="admin-badge admin-badge-primary font-monospace">/<?php echo htmlspecialchars($rep['channel']); ?>/</span>
+                            </td>
+                            <td>
+                              <div class="text-white small" style="max-width: 380px; white-space: pre-wrap; word-break: break-word;"><?php echo htmlspecialchars(strip_tags($rep['comment'])); ?></div>
+                            </td>
+                            <td>
+                              <a href="./#board/<?php echo $rep['channel']; ?>/<?php echo $rep['thread_id']; ?>" target="_blank" class="text-info small fw-bold text-truncate d-block" style="max-width: 180px;">
+                                #<?php echo $rep['thread_id']; ?>: <?php echo htmlspecialchars($rep['thread_subject'] ?: 'View Thread'); ?>
+                              </a>
+                            </td>
+                            <td>
+                              <div class="text-white small"><?php echo htmlspecialchars($rep['reg_artist'] ?: $rep['artist_name']); ?></div>
+                            </td>
+                            <td class="font-monospace text-secondary small">
+                              <?php echo date('M j, H:i', strtotime($rep['created_at'])); ?>
+                            </td>
+                            <td class="text-end">
+                              <div class="d-flex align-items-center justify-content-end gap-1">
+                                <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick='openEditPostModal("reply", <?php echo $rep_json; ?>)'>
+                                  <i class="bi bi-pencil-fill"></i>
+                                </button>
+                                <button type="submit" name="admin_phpboard_post_action" value="single_delete" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" onclick="document.getElementById('edit-pb-post-id').value='<?php echo $rep['id']; ?>'; return confirm('Delete reply #<?php echo $rep['id']; ?>?');">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        <?php endforeach; endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <?php if ($total_rp_pages > 1): ?>
+                  <div class="admin-pagination mb-4">
+                    <a class="admin-page-btn <?php echo ($pb_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=replies&search=<?php echo urlencode($pb_search); ?>&p=1">«</a>
+                    <a class="admin-page-btn <?php echo ($pb_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=replies&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $pb_page - 1; ?>">‹</a>
+                    <?php
+                      $sp = max(1, $pb_page - 2);
+                      $ep = min($total_rp_pages, $sp + 4);
+                      if ($ep - $sp < 4) $sp = max(1, $ep - 4);
+                      for ($i = $sp; $i <= $ep; $i++):
+                    ?>
+                      <a class="admin-page-btn <?php echo ($pb_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=phpboard&tab=replies&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                    <?php endfor; ?>
+                    <a class="admin-page-btn <?php echo ($pb_page >= $total_rp_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=replies&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $pb_page + 1; ?>">›</a>
+                    <a class="admin-page-btn <?php echo ($pb_page >= $total_rp_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=phpboard&tab=replies&search=<?php echo urlencode($pb_search); ?>&p=<?php echo $total_rp_pages; ?>">»</a>
+                  </div>
+                <?php endif; ?>
+              </form>
+            <?php endif; ?>
+          </div>
+
+          <!-- Create / Edit Channel Modal -->
+          <div class="modal fade" id="adminNewChannelModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6" id="chanModalTitle"><i class="bi bi-hash text-danger me-2"></i> Channel Editor</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=phpboard">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_phpboard_channel" value="1">
+                  <input type="hidden" name="is_edit" id="chanIsEdit" value="0">
+                  <div class="modal-body p-4 text-start">
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">CHANNEL CODE (URL SLUG)</label>
+                      <input type="text" name="channel_code" id="chanCode" class="admin-pill-input w-100 font-monospace" placeholder="e.g. music, retro, g" required>
+                      <small class="text-secondary d-block mt-1">Letters and numbers only. Becomes <code>#board/{code}</code>.</small>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">DISPLAY TITLE</label>
+                      <input type="text" name="channel_name" id="chanName" class="admin-pill-input w-100" placeholder="e.g. Synthwave &amp; Retrowave" required>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">CATEGORY GROUP</label>
+                      <input type="text" name="channel_category" id="chanCategory" list="chanCategoryList" class="admin-pill-input w-100" placeholder="e.g. Creative, Video Games" required>
+                      <datalist id="chanCategoryList">
+                        <?php foreach (array_keys($board_data['categories']) as $catName): ?>
+                          <option value="<?php echo htmlspecialchars($catName); ?>">
+                        <?php endforeach; ?>
+                      </datalist>
+                    </div>
+
+                    <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between mb-3">
+                      <div>
+                        <strong class="text-white d-block">18+ Mature Content (NSFW)</strong>
+                        <span class="text-secondary small">Blur thumbnails and require content confirmation.</span>
+                      </div>
+                      <div class="form-check form-switch m-0">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="is_nsfw" id="chanIsNsfw" value="1" style="width: 38px; height: 20px; cursor: pointer;">
+                      </div>
+                    </div>
+
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2" id="chanSubmitBtn">
+                      Save Channel
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Edit Post Modal -->
+          <div class="modal fade" id="adminEditPostModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6" id="editPostTitle"><i class="bi bi-pencil-square text-danger me-2"></i> Edit Board Entry</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=phpboard">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="admin_phpboard_post_action" value="edit">
+                  <input type="hidden" name="post_type" id="edit-pb-type" value="thread">
+                  <input type="hidden" name="post_id" id="edit-pb-post-id" value="">
+                  <div class="modal-body p-4 text-start">
+                    <div class="mb-3" id="editPostSubjectGroup">
+                      <label class="form-label text-secondary small fw-bold mb-1">THREAD SUBJECT</label>
+                      <input type="text" name="subject" id="edit-pb-subject" class="admin-pill-input w-100">
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">COMMENT / BODY</label>
+                      <textarea name="comment" id="edit-pb-comment" class="form-control bg-dark text-white border-secondary" rows="6" style="border-radius:12px; font-size:0.85rem;" required></textarea>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">Apply Changes</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function openEditChannelModal(ch) {
+              document.getElementById('chanModalTitle').innerHTML = '<i class="bi bi-pencil-square text-info me-2"></i> Edit Channel /' + ch.code + '/';
+              document.getElementById('chanIsEdit').value = '1';
+              document.getElementById('chanCode').value = ch.code;
+              document.getElementById('chanCode').readOnly = true;
+              document.getElementById('chanName').value = ch.name;
+              document.getElementById('chanCategory').value = ch.category;
+              document.getElementById('chanIsNsfw').checked = (parseInt(ch.is_nsfw) === 1);
+              document.getElementById('chanSubmitBtn').textContent = 'Update Channel';
+              new bootstrap.Modal(document.getElementById('adminNewChannelModal')).show();
+            }
+
+            function openEditPostModal(type, post) {
+              document.getElementById('edit-pb-type').value = type;
+              document.getElementById('edit-pb-post-id').value = post.id;
+              document.getElementById('editPostTitle').innerHTML = '<i class="bi bi-pencil-square text-danger me-2"></i> Edit ' + (type === 'thread' ? 'Thread' : 'Reply') + ' #' + post.id;
+              
+              const subjGrp = document.getElementById('editPostSubjectGroup');
+              if (type === 'thread') {
+                subjGrp.style.display = 'block';
+                document.getElementById('edit-pb-subject').value = post.subject || '';
+              } else {
+                subjGrp.style.display = 'none';
+              }
+
+              document.getElementById('edit-pb-comment').value = post.comment || '';
+              new bootstrap.Modal(document.getElementById('adminEditPostModal')).show();
+            }
+          </script>
+        
+        <?php elseif (($_GET['page'] ?? '') === 'comments'): ?>
+          <?php
+            $db = get_db();
+            $cm_tab = $_GET['tab'] ?? 'artworks';
+            $cm_search = trim($_GET['search'] ?? '');
+            $cm_sort = $_GET['sort'] ?? 'newest';
+            $cm_page = max(1, (int)($_GET['p'] ?? 1));
+            $cm_limit = 25;
+            $cm_offset = ($cm_page - 1) * $cm_limit;
+
+            $table = 'comments';
+            $target_col = 'artwork_id';
+            $target_join = "JOIN artworks t ON c.artwork_id = t.id";
+            $target_title = "t.title as target_title";
+            $target_link = "?access=artwork#/artwork/";
+
+            if ($cm_tab === 'songs') {
+              $table = 'song_comments';
+              $target_col = 'song_id';
+              $target_join = "JOIN music t ON c.song_id = t.id";
+              $target_link = "#/?action=play&id=";
+            } elseif ($cm_tab === 'blogs') {
+              $table = 'blog_comments';
+              $target_col = 'blog_id';
+              $target_join = "JOIN blogs t ON c.blog_id = t.id";
+              $target_link = "#/blog/";
+            }
+
+            // Fallback content column name handling (artworks uses 'comment', songs/blogs use 'content')
+            $content_col = ($cm_tab === 'artworks') ? 'c.comment' : 'c.content';
+
+            $total_art_comments = (int)($db->query("SELECT COUNT(*) FROM comments")->fetchColumn() ?: 0);
+            $total_song_comments = (int)($db->query("SELECT COUNT(*) FROM song_comments")->fetchColumn() ?: 0);
+            $total_blog_comments = (int)($db->query("SELECT COUNT(*) FROM blog_comments")->fetchColumn() ?: 0);
+
+            $where_clauses = ["1=1"];
+            $params = [];
+
+            if ($cm_search !== '') {
+              $where_clauses[] = "({$content_col} LIKE ? OR u.artist LIKE ? OR u.email LIKE ? OR t.title LIKE ?)";
+              $term = "%{$cm_search}%";
+              $params = [$term, $term, $term, $term];
+            }
+
+            $where_sql = "WHERE " . implode(' AND ', $where_clauses);
+            $sort_map = [
+              'newest' => 'ORDER BY c.created_at DESC',
+              'oldest' => 'ORDER BY c.created_at ASC',
+              'replies' => 'ORDER BY (CASE WHEN c.parent_id IS NOT NULL AND c.parent_id > 0 THEN 1 ELSE 0 END) DESC, c.created_at DESC'
+            ];
+            $order_by = $sort_map[$cm_sort] ?? 'ORDER BY c.created_at DESC';
+
+            $stmt_cnt = $db->prepare("SELECT COUNT(*) FROM {$table} c JOIN users u ON c.user_id = u.id {$target_join} {$where_sql}");
+            $stmt_cnt->execute($params);
+            $total_filtered = (int)$stmt_cnt->fetchColumn();
+            $total_pages = max(1, ceil($total_filtered / $cm_limit));
+
+            $blog_pub_sql = ($cm_tab === 'blogs') ? "t.public_id as blog_public_id" : "NULL as blog_public_id";
+
+            $stmt_list = $db->prepare("
+              SELECT c.id, {$content_col} as content, c.created_at, c.parent_id, c.{$target_col} as target_id,
+              u.artist, u.email, u.id as user_id, u.profile_picture_type, {$target_title},
+              {$blog_pub_sql}
+              FROM {$table} c
+              JOIN users u ON c.user_id = u.id
+              {$target_join}
+              {$where_sql}
+              {$order_by}
+              LIMIT {$cm_limit} OFFSET {$cm_offset}
+            ");
+            $stmt_list->execute($params);
+            $comments = $stmt_list->fetchAll(PDO::FETCH_ASSOC);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Comments &amp; Replies</h1>
+              <div class="small text-secondary mt-1">Moderate user discussions across PHPMusicPost, Songs, and Blogs.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 500px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="comments">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($cm_tab); ?>">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="newest" <?php echo $cm_sort === 'newest' ? 'selected' : ''; ?>>Newest First</option>
+                  <option value="oldest" <?php echo $cm_sort === 'oldest' ? 'selected' : ''; ?>>Oldest First</option>
+                  <option value="replies" <?php echo $cm_sort === 'replies' ? 'selected' : ''; ?>>Replies First</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search comments, users..." value="<?php echo htmlspecialchars($cm_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=comments&tab=artworks" class="update-tab-btn <?php echo $cm_tab === 'artworks' ? 'active' : ''; ?>">
+                <i class="bi bi-image"></i> Artworks (<?php echo number_format($total_art_comments); ?>)
+              </a>
+              <a href="?access=admin&page=comments&tab=songs" class="update-tab-btn <?php echo $cm_tab === 'songs' ? 'active' : ''; ?>">
+                <i class="bi bi-music-note"></i> Songs (<?php echo number_format($total_song_comments); ?>)
+              </a>
+              <a href="?access=admin&page=comments&tab=blogs" class="update-tab-btn <?php echo $cm_tab === 'blogs' ? 'active' : ''; ?>">
+                <i class="bi bi-journal-text"></i> Blogs (<?php echo number_format($total_blog_comments); ?>)
+              </a>
+            </div>
+
+            <form method="POST" action="?access=admin&page=comments" id="admin-comments-form">
+              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+              <input type="hidden" name="target_module" value="<?php echo htmlspecialchars($cm_tab); ?>">
+              <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+                <button type="button" class="admin-btn-pill" onclick="document.querySelectorAll('.comment-cb').forEach(cb => cb.checked = !cb.checked)"><i class="bi bi-check-all"></i> Toggle Selection</button>
+                <button type="submit" name="admin_comment_action" value="delete" class="admin-btn-pill" style="color:#ef4444; border-color:rgba(239, 68, 68, 0.4);" onclick="return confirm('Permanently delete selected comments and their replies?');"><i class="bi bi-trash2-fill"></i> Delete Selected</button>
+              </div>
+
+              <div class="admin-card mb-4">
+                <div class="table-responsive">
+                  <table class="admin-table align-middle">
+                    <thead>
+                      <tr>
+                        <th style="width: 40px;" class="text-center"></th>
+                        <th style="width: 150px;">Date</th>
+                        <th style="width: 220px;">Author</th>
+                        <th>Comment Text</th>
+                        <th style="width: 220px;">Target Post</th>
+                        <th class="text-end" style="width: 120px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($comments)): ?>
+                        <tr><td colspan="5" class="text-center py-5 text-secondary">No comments found.</td></tr>
+                      <?php else: foreach ($comments as $c): 
+                        $final_url = $target_link . ($c['blog_public_id'] ?? $c['target_id']);
+                      ?>
+                        <tr>
+                          <td class="text-center">
+                            <input type="checkbox" name="comment_ids[]" value="<?php echo $c['id']; ?>" class="form-check-input comment-cb" style="cursor:pointer; transform:scale(1.1);">
+                          </td>
+                          <td class="text-secondary font-monospace small">
+                            <?php echo is_numeric($c['created_at']) ? date('M j, Y H:i', $c['created_at']) : date('M j, Y H:i', strtotime($c['created_at'])); ?>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <img src="?access=api&action=get_profile_picture&id=<?php echo $c['user_id']; ?>&v=<?php echo time(); ?>" class="rounded-circle shadow-sm" style="width: 32px; height: 32px; object-fit: cover; background: #000; border: 1px solid var(--drive-border);" alt="">
+                              <div>
+                                <div class="fw-bold text-white text-truncate" style="max-width: 140px;"><?php echo htmlspecialchars($c['artist']); ?></div>
+                                <small class="text-secondary font-monospace" style="font-size: 0.72rem;"><?php echo htmlspecialchars($c['email'] ?? 'Anonymous'); ?></small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <?php if ($c['parent_id']): ?>
+                              <span class="admin-badge admin-badge-secondary mb-1">Reply</span><br>
+                            <?php endif; ?>
+                            <div style="font-size: 0.85rem; color: #f1f1f1; max-width: 400px; white-space: pre-wrap; overflow-wrap: break-word; max-height: 80px; overflow-y: auto; scrollbar-width: none;"><?php echo htmlspecialchars($c['content']); ?></div>
+                          </td>
+                          <td>
+                            <a href="<?php echo htmlspecialchars($final_url); ?>" target="_blank" class="text-info fw-bold text-truncate text-decoration-none d-block" style="max-width: 180px;" title="<?php echo htmlspecialchars($c['target_title'] ?? 'Untitled'); ?>">
+                              <i class="bi bi-box-arrow-up-right me-1"></i> <?php echo htmlspecialchars($c['target_title'] ?? 'Untitled'); ?>
+                            </a>
+                            <small class="text-secondary font-monospace">Target ID: #<?php echo $c['target_id']; ?></small>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-1">
+                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick='openEditCommentModal(<?php echo $c['id']; ?>, <?php echo htmlspecialchars(json_encode($c['content'] ?? ""), ENT_QUOTES, "UTF-8"); ?>)'>
+                                <i class="bi bi-pencil-fill"></i>
+                              </button>
+                              <form method="POST" action="?access=admin&page=comments" class="m-0 d-inline" onsubmit="return confirm('Permanently delete this comment and its replies?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="target_module" value="<?php echo htmlspecialchars($cm_tab); ?>">
+                                <input type="hidden" name="admin_comment_action" value="single_delete">
+                                <input type="hidden" name="comment_id" value="<?php echo $c['id']; ?>">
+                                <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Delete Comment">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <?php if ($total_pages > 1): ?>
+                <div class="admin-pagination mb-4">
+                  <a class="admin-page-btn <?php echo ($cm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=comments&tab=<?php echo urlencode($cm_tab); ?>&search=<?php echo urlencode($cm_search); ?>&sort=<?php echo urlencode($cm_sort); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($cm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=comments&tab=<?php echo urlencode($cm_tab); ?>&search=<?php echo urlencode($cm_search); ?>&sort=<?php echo urlencode($cm_sort); ?>&p=<?php echo $cm_page - 1; ?>">‹</a>
+                  <?php
+                    $start_p = max(1, $cm_page - 2);
+                    $end_p = min($total_pages, $start_p + 4);
+                    if ($end_p - $start_p < 4) { $start_p = max(1, $end_p - 4); }
+                    for ($i = $start_p; $i <= $end_p; $i++):
+                  ?>
+                    <a class="admin-page-btn <?php echo ($cm_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=comments&tab=<?php echo urlencode($cm_tab); ?>&search=<?php echo urlencode($cm_search); ?>&sort=<?php echo urlencode($cm_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($cm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=comments&tab=<?php echo urlencode($cm_tab); ?>&search=<?php echo urlencode($cm_search); ?>&sort=<?php echo urlencode($cm_sort); ?>&p=<?php echo $cm_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($cm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=comments&tab=<?php echo urlencode($cm_tab); ?>&search=<?php echo urlencode($cm_search); ?>&sort=<?php echo urlencode($cm_sort); ?>&p=<?php echo $total_pages; ?>">»</a>
+                </div>
+              <?php endif; ?>
+            </form>
+          </div>
+
+          <!-- Edit Comment Modal -->
+          <div class="modal fade" id="adminEditCommentModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-pencil-square text-danger me-2"></i> Edit Comment</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=comments">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="target_module" value="<?php echo htmlspecialchars($cm_tab); ?>">
+                  <input type="hidden" name="admin_comment_action" value="edit">
+                  <input type="hidden" name="comment_id" id="edit-comment-id" value="">
+                  <div class="modal-body p-4 text-start">
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">COMMENT CONTENT</label>
+                      <textarea name="content" id="edit-comment-content" class="form-control bg-dark text-white border-secondary" rows="6" style="border-radius:12px; font-size:0.85rem;" required></textarea>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">Save Changes</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function openEditCommentModal(id, content) {
+              document.getElementById('edit-comment-id').value = id;
+              document.getElementById('edit-comment-content').value = content;
+              new bootstrap.Modal(document.getElementById('adminEditCommentModal')).show();
+            }
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
           <?php 
             $db = get_db();
@@ -44568,7 +46913,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.4';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.5';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -67211,7 +69556,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                                         <?php if ($user['is_admin'] == 1): ?>
                                           <?php
                                             $u_settings = json_decode($user['settings'] ?: '{}', true) ?? [];
-                                            $u_perms = $u_settings['admin_permissions'] ?? ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+                                            $u_perms = $u_settings['admin_permissions'] ?? $current_admin_permissions;
                                             $perms_json = htmlspecialchars(json_encode($u_perms), ENT_QUOTES, 'UTF-8');
                                           ?>
                                           <button type="button" class="dropdown-item" onclick="openPermissionsModal(<?php echo $user['id']; ?>, '<?php echo addslashes(htmlspecialchars($user['artist'], ENT_QUOTES)); ?>', '<?php echo $perms_json; ?>')">
@@ -67307,7 +69652,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const userData = JSON.parse(btn.getAttribute('data-user'));
               const modalBody = document.getElementById('user-details-modal-body');
               
-              let u_perms = ['analytics', 'storage', 'users', 'songs', 'artworks', 'logs', 'reports', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'playground'];
+              let u_perms = ['hijack_recovery', 'settings', 'security', 'pwa', 'users', 'songs', 'artworks', 'phpboard', 'storage', 'user_drive_management', 'bitrate_management', 'analytics', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'jobs', 'db_backups', 'error_logs', 'phpinfo', 'manage', 'drive', 'ide', 'dbmanager', 'api', 'playground', 'update'];
               try {
                 const settings = JSON.parse(userData.settings || '{}');
                 if (settings.admin_permissions) u_perms = settings.admin_permissions;
@@ -67504,142 +69849,248 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     </div>
     <?php endif; ?>
     <div class="modal fade" id="admin-permissions-modal" tabindex="-1" data-bs-backdrop="static">
-      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
-        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040;">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 20px;">
           <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid var(--ytm-surface-2) !important;">
-            <h5 class="modal-title text-white fw-bold"><i class="bi bi-ui-checks text-success me-2"></i>Access Permissions</h5>
+            <div class="d-flex align-items-center gap-2">
+              <div style="width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, #ff0044, #990022); display: flex; align-items: center; justify-content: center; color: #fff;">
+                <i class="bi bi-ui-checks"></i>
+              </div>
+              <h5 class="modal-title text-white fw-bold m-0">Administrator Access Permissions</h5>
+            </div>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
-          <div class="modal-body text-light p-4">
-            <p class="text-secondary small mb-4">Grant or revoke access to specific admin areas for <strong class="text-white" id="perm-user-name"></strong>.</p>
+          <div class="modal-body text-light p-4" style="max-height: 72vh; overflow-y: auto;">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 pb-2 border-bottom border-secondary border-opacity-25">
+              <span class="text-secondary small">Customizing accessible pages for <strong class="text-white" id="perm-user-name">User</strong>:</span>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-sm btn-outline-light rounded-pill px-3 py-1 fw-bold" style="font-size: 0.75rem;" onclick="document.querySelectorAll('#admin-permissions-modal input[type=\'checkbox\']').forEach(cb => cb.checked = true);">
+                  <i class="bi bi-check-all me-1"></i> Select All
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 fw-bold" style="font-size: 0.75rem;" onclick="document.querySelectorAll('#admin-permissions-modal input[type=\'checkbox\']').forEach(cb => cb.checked = false);">
+                  <i class="bi bi-x-lg me-1"></i> Deselect All
+                </button>
+              </div>
+            </div>
+
             <form method="POST" action="">
               <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token'] ?? ''; ?>">
               <input type="hidden" name="user_id" id="perm-user-id" value="">
-              
-              <div class="row g-3 mb-4">
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="settings" id="perm-settings">
-                    <label class="form-check-label text-white fw-medium" for="perm-settings">General Settings</label>
+
+              <!-- 1. Security & Configuration -->
+              <div class="mb-3">
+                <span class="text-danger fw-bold small text-uppercase d-flex align-items-center gap-2 mb-2" style="font-size: 0.72rem; letter-spacing: 0.6px;">
+                  <i class="bi bi-shield-lock-fill"></i> Security &amp; Platform Setup
+                </span>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-hijack">Incident / Emergency</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="hijack_recovery" id="perm-hijack" style="cursor: pointer;">
+                    </div>
                   </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="security" id="perm-security">
-                    <label class="form-check-label text-white fw-medium" for="perm-security">Security &amp; Firewall</label>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-settings">General Settings</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="settings" id="perm-settings" style="cursor: pointer;">
+                    </div>
                   </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="pwa" id="perm-pwa">
-                    <label class="form-check-label text-white fw-medium" for="perm-pwa">Progressive Web App</label>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-security">Security &amp; Firewall</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="security" id="perm-security" style="cursor: pointer;">
+                    </div>
                   </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="users" id="perm-users">
-                    <label class="form-check-label text-white fw-medium" for="perm-users">User Management</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="songs" id="perm-songs">
-                    <label class="form-check-label text-white fw-medium" for="perm-songs">Song Management</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="bitrate_management" id="perm-bitrate">
-                    <label class="form-check-label text-white fw-medium" for="perm-bitrate">Bitrate Management</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="logs" id="perm-logs">
-                    <label class="form-check-label text-white fw-medium" for="perm-logs">Activity Logs</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="reports" id="perm-reports">
-                    <label class="form-check-label text-white fw-medium" for="perm-reports">Profile Reports</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="rhythm_analytics" id="perm-rhythm-analytics">
-                    <label class="form-check-label text-white fw-medium" for="perm-rhythm-analytics">Rhythm Analytics</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="appeals" id="perm-appeals">
-                    <label class="form-check-label text-white fw-medium" for="perm-appeals">Ban Appeals</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="manage" id="perm-manage">
-                    <label class="form-check-label text-white fw-medium" for="perm-manage">Player Manager</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="drive" id="perm-drive">
-                    <label class="form-check-label text-white fw-medium" for="perm-drive">Drive Manager</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="ide" id="perm-ide">
-                    <label class="form-check-label text-white fw-medium" for="perm-ide">PHPEditor (IDE)</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="dbmanager" id="perm-dbmanager">
-                    <label class="form-check-label text-white fw-medium" for="perm-dbmanager">PHPDBManager</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="api" id="perm-api">
-                    <label class="form-check-label text-white fw-medium" for="perm-api">API Keys</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="update" id="perm-update">
-                    <label class="form-check-label text-white fw-medium" for="perm-update">System Update</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="playground" id="perm-playground">
-                    <label class="form-check-label text-white fw-medium" for="perm-playground">API Playground</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="analytics" id="perm-analytics">
-                    <label class="form-check-label text-white fw-medium" for="perm-analytics">Traffic Analytics</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="storage" id="perm-storage">
-                    <label class="form-check-label text-white fw-medium" for="perm-storage">Storage Stats</label>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="form-check form-switch">
-                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="permissions[]" value="user_drive_management" id="perm-user-drive">
-                    <label class="form-check-label text-white fw-medium" for="perm-user-drive">User Drive Quota</label>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-pwa">Progressive Web App (PWA)</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="pwa" id="perm-pwa" style="cursor: pointer;">
+                    </div>
                   </div>
                 </div>
               </div>
-              
-              <div class="d-flex justify-content-end gap-2">
+
+              <!-- 2. Media, Storage & Content -->
+              <div class="mb-3">
+                <span class="text-warning fw-bold small text-uppercase d-flex align-items-center gap-2 mb-2" style="font-size: 0.72rem; letter-spacing: 0.6px;">
+                  <i class="bi bi-folder-fill"></i> Media, Storage &amp; Content
+                </span>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-users">User Management</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="users" id="perm-users" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-songs">Song Management</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="songs" id="perm-songs" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-artworks">Artwork Studio</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="artworks" id="perm-artworks" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-phpboard">PHPBoard Imageboard</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="phpboard" id="perm-phpboard" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-storage">Storage Studio</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="storage" id="perm-storage" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-user-drive">User Drive Quota</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="user_drive_management" id="perm-user-drive" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-bitrate">Bitrate Studio</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="bitrate_management" id="perm-bitrate" style="cursor: pointer;">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 3. Monitoring & Moderation -->
+              <div class="mb-3">
+                <span class="text-info fw-bold small text-uppercase d-flex align-items-center gap-2 mb-2" style="font-size: 0.72rem; letter-spacing: 0.6px;">
+                  <i class="bi bi-graph-up-arrow"></i> Monitoring, Analytics &amp; Moderation
+                </span>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-analytics">Traffic Analytics</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="analytics" id="perm-analytics" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-comments">Comments &amp; Replies</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="comments" id="perm-comments" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-logs">Activity Audit Logs</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="logs" id="perm-logs" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-reports">Profile Reports</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="reports" id="perm-reports" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-rhythm-analytics">Rhythm Analytics</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="rhythm_analytics" id="perm-rhythm-analytics" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-appeals">Ban Appeals</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="appeals" id="perm-appeals" style="cursor: pointer;">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 4. Advanced Server Engine & System -->
+              <div class="mb-3">
+                <span class="text-success fw-bold small text-uppercase d-flex align-items-center gap-2 mb-2" style="font-size: 0.72rem; letter-spacing: 0.6px;">
+                  <i class="bi bi-cpu-fill"></i> Advanced Server Engine &amp; Maintenance
+                </span>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-jobs">Background Tasks &amp; Cron</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="jobs" id="perm-jobs" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-db-backups">DB Snapshot Vault</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="db_backups" id="perm-db-backups" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-error-logs">PHP Error Logs</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="error_logs" id="perm-error-logs" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-phpinfo">PHP Runtime Diagnostics</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="phpinfo" id="perm-phpinfo" style="cursor: pointer;">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 5. Developer Tools & Codebase -->
+              <div class="mb-4">
+                <span class="text-primary fw-bold small text-uppercase d-flex align-items-center gap-2 mb-2" style="font-size: 0.72rem; letter-spacing: 0.6px;">
+                  <i class="bi bi-tools"></i> Developer Tools &amp; Codebase
+                </span>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-manage">Player Manager</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="manage" id="perm-manage" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-drive">Drive Manager</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="drive" id="perm-drive" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-ide">PHPEditor (IDE)</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="ide" id="perm-ide" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-dbmanager">PHPDBManager</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="dbmanager" id="perm-dbmanager" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-api">API Keys &amp; Gateway</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="api" id="perm-api" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-playground">API Playground</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="playground" id="perm-playground" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-update">System Update</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="update" id="perm-update" style="cursor: pointer;">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="d-flex justify-content-end gap-2 pt-2 border-top border-secondary border-opacity-25">
                 <button type="button" class="btn btn-outline-light rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Cancel</button>
                 <button type="submit" name="save_admin_permissions" class="btn btn-success text-dark fw-bold rounded-pill px-4">Save Permissions</button>
               </div>
@@ -73055,23 +75506,24 @@ if (isset($_GET['action'])) {
       break;
 
     case 'get_phpboard_index':
+      $board_info = get_phpboard_channels_data($db);
       $data = [];
       $stmt_t = $db->query("SELECT channel, COUNT(*) as c FROM phpboard_threads GROUP BY channel");
       $thread_counts = $stmt_t->fetchAll(PDO::FETCH_KEY_PAIR);
       $stmt_r = $db->query("SELECT t.channel, COUNT(*) as c FROM phpboard_replies r JOIN phpboard_threads t ON r.thread_id = t.id GROUP BY t.channel");
       $reply_counts = $stmt_r->fetchAll(PDO::FETCH_KEY_PAIR);
       
-      foreach (PHPBOARD_ALLOWED_CHANNELS as $ch) {
+      foreach ($board_info['allowed'] as $ch) {
         $tc = $thread_counts[$ch] ?? 0;
         $rc = $reply_counts[$ch] ?? 0;
         $data[$ch] = [
           'code' => $ch, 
-          'name' => PHPBOARD_CHANNEL_NAMES[$ch] ?? $ch, 
+          'name' => $board_info['names'][$ch] ?? strtoupper($ch), 
           'total_posts' => $tc + $rc, 
-          'is_nsfw' => in_array($ch, PHPBOARD_NSFW_CHANNELS)
+          'is_nsfw' => in_array($ch, $board_info['nsfw'])
         ];
       }
-      send_json(['categories' => $phpboard_categories, 'boards' => $data]);
+      send_json(['categories' => $board_info['categories'], 'boards' => $data]);
       break;
 
     case 'get_phpboard_channel':
@@ -73082,7 +75534,8 @@ if (isset($_GET['action'])) {
       $sort = $_GET['sort'] ?? 'newest';
       $search = $_GET['q'] ?? '';
       
-      if (!in_array($channel, PHPBOARD_ALLOWED_CHANNELS)) send_json(['status'=>'error', 'message'=>'Invalid channel']);
+      $board_info = get_phpboard_channels_data($db);
+      if (!in_array($channel, $board_info['allowed'])) send_json(['status'=>'error', 'message'=>'Invalid channel']);
       
       $order_sql = "ORDER BY t.last_reply_at DESC";
       if ($sort === 'oldest') $order_sql = "ORDER BY t.created_at ASC";
@@ -73112,7 +75565,7 @@ if (isset($_GET['action'])) {
            $t['recent_replies'] = array_reverse($r_stmt->fetchAll());
         }
       }
-      send_json(['threads' => $threads, 'channel_name' => PHPBOARD_CHANNEL_NAMES[$channel]]);
+      send_json(['threads' => $threads, 'channel_name' => $board_info['names'][$channel] ?? strtoupper($channel)]);
       break;
 
     case 'get_phpboard_thread':
@@ -73141,7 +75594,8 @@ if (isset($_GET['action'])) {
       $r_stmt->execute([$thread_id, $limit, $offset]);
       $thread['replies'] = $r_stmt->fetchAll();
       
-      send_json(['thread' => $thread, 'channel_name' => PHPBOARD_CHANNEL_NAMES[$thread['channel']]]);
+      $board_info = get_phpboard_channels_data($db);
+      send_json(['thread' => $thread, 'channel_name' => $board_info['names'][$thread['channel']] ?? strtoupper($thread['channel'])]);
       break;
 
     case 'post_phpboard':
@@ -73152,7 +75606,8 @@ if (isset($_GET['action'])) {
       $artist_name = trim(htmlspecialchars($_POST['artist_name'] ?? 'Anonymous', ENT_QUOTES, 'UTF-8'));
       $password = $_POST['password'] ?? '';
       
-      if (!$thread_id && !in_array($channel, PHPBOARD_ALLOWED_CHANNELS)) {
+      $board_info = get_phpboard_channels_data($db);
+      if (!$thread_id && !in_array($channel, $board_info['allowed'])) {
         send_json(['status'=>'error', 'message'=>'Invalid channel']);
       }
       if (empty(trim(strip_tags($comment))) && empty($_FILES['image'])) {
@@ -83092,6 +85547,206 @@ function perform_cover_scan($db) {
         scrollbar-color: #555 transparent;
       }
 
+      .unified-editor-box {
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        background: #141418 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        transition: border-color 0.2s ease !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .unified-editor-box:focus-within {
+        border-color: var(--ytm-accent, #ff0000) !important;
+        box-shadow: 0 0 0 1px var(--ytm-accent, #ff0000) !important;
+      }
+      .editor-tab-header {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        flex-wrap: wrap !important;
+        gap: 8px !important;
+        background: #18181c !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+        padding: 6px 12px !important;
+      }
+      .editor-tab-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 6px !important;
+        padding: 5px 14px !important;
+        border-radius: 8px !important;
+        font-size: 0.78rem !important;
+        font-weight: 700 !important;
+        color: #9494a8 !important;
+        background: transparent !important;
+        border: 1px solid transparent !important;
+        cursor: pointer !important;
+        transition: all 0.15s ease !important;
+        user-select: none !important;
+      }
+      .editor-tab-btn:hover:not(.active) {
+        color: #ffffff !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+      }
+      .editor-tab-btn.active {
+        background: var(--ytm-accent, #ff0000) !important;
+        color: #ffffff !important;
+        border-color: var(--ytm-accent, #ff0000) !important;
+      }
+      .editor-toolbar-pmp {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        white-space: nowrap !important;
+        -webkit-overflow-scrolling: touch !important;
+        scrollbar-width: thin !important;
+        scrollbar-color: rgba(255, 0, 0, 0.35) transparent !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        padding: 6px 10px !important;
+        gap: 4px !important;
+        background: transparent !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+      }
+      .editor-toolbar-pmp::-webkit-scrollbar {
+        height: 4px !important;
+      }
+      .editor-toolbar-pmp::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2) !important;
+        border-radius: 10px !important;
+      }
+      .editor-toolbar-pmp .btn-tool-item {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        border-radius: 8px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        color: #a0a0b2 !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        transition: all 0.15s ease !important;
+        cursor: pointer !important;
+      }
+      .editor-toolbar-pmp .btn-tool-item:hover {
+        background: rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        border-color: rgba(255, 255, 255, 0.2) !important;
+      }
+      .editor-toolbar-pmp .toolbar-separator {
+        width: 1px !important;
+        height: 18px !important;
+        min-width: 1px !important;
+        background: rgba(255, 255, 255, 0.12) !important;
+        margin: 0 4px !important;
+        flex-shrink: 0 !important;
+      }
+      .comment-tree-node {
+        display: flex;
+        gap: 0.85rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding-top: 1rem;
+        margin-bottom: 0.5rem;
+      }
+      .comment-tree-node .badge {
+        padding: 4px 9px !important;
+        font-size: 0.74rem !important;
+        line-height: 1.2 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-weight: 700 !important;
+      }
+      .comment-replies-list {
+        margin-left: 1.5rem;
+        margin-top: 0.75rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        border-left: 2px solid rgba(255, 255, 255, 0.1);
+        padding-left: 0.9rem;
+      }
+      .rich-text-content {
+        font-size: 0.92rem;
+        line-height: 1.65;
+        color: #e4e4e7;
+        word-break: break-word;
+      }
+      .rich-text-content p {
+        margin-bottom: 0.5rem;
+      }
+      .rich-text-content p:last-child {
+        margin-bottom: 0;
+      }
+      .rich-text-content a {
+        color: var(--ytm-accent, #ff0000);
+        text-decoration: underline;
+      }
+      .rich-text-content code {
+        background: rgba(255, 255, 255, 0.08);
+        padding: 2px 5px;
+        border-radius: 4px;
+        font-family: monospace;
+        color: #ff7788;
+      }
+      .rich-text-content pre {
+        background: #0d0d12;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+        margin: 0.5rem 0;
+      }
+      .rich-text-content img, .rich-text-content video {
+        max-width: 100%;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+      }
+      .comment-actions-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+        margin-top: 0.45rem;
+        font-size: 0.76rem;
+        color: var(--ytm-secondary-text, #aaa);
+      }
+      .comment-actions-bar a, .comment-actions-bar button {
+        color: var(--ytm-secondary-text, #aaa);
+        text-decoration: none;
+        background: none;
+        border: none;
+        padding: 0;
+        cursor: pointer;
+        font-size: 0.76rem;
+        font-weight: 600;
+        transition: color 0.15s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .comment-actions-bar a:hover, .comment-actions-bar button:hover {
+        color: #ffffff;
+      }
+      .comment-actions-bar .btn-action-reply {
+        color: var(--ytm-accent, #ff0000) !important;
+      }
+      .comment-actions-bar .btn-action-delete {
+        color: #ef4444 !important;
+      }
+      .comment-actions-bar .btn-action-react.active {
+        color: var(--ytm-accent, #ff0000) !important;
+        font-weight: 700;
+      }
+
       .modern-custom-scroll::-webkit-scrollbar {
         width: 6px;
         height: 6px;
@@ -87448,43 +90103,30 @@ function perform_cover_scan($db) {
                 </button>
               </div>
             </div>
-            <div class="d-flex gap-3 mb-3">
-              <img src="?action=get_profile_picture&id=<?php echo $_SESSION['user_id'] ?? 0; ?>" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1" style="width: 44px; height: 44px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
-              <div class="flex-grow-1 rich-input-container" data-target-id="comment-input">
-                <form id="comment-form" class="bg-transparent position-relative">
-                  <input type="hidden" id="comment-parent-id" value="">
-                  <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                    <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
-                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
-                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
-                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
-                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
-                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
-                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
-                    </div>
-                    <div class="d-flex align-items-end">
-                      <textarea id="comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" rows="4" required style="resize: none; min-height: 110px; max-height: 350px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;" oninput="this.style.height = ''; this.style.height = Math.max(110, this.scrollHeight) + 'px'"></textarea>
-                      <button type="submit" class="btn btn-danger rounded-pill d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm fw-bold text-dark" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-5 me-2"></i> Post This</button>
+            <div class="mb-4">
+              <form id="comment-form" onsubmit="window.handleSongCommentSubmit(event)" style="display:flex; flex-direction:column; gap:0.6rem;">
+                <input type="hidden" id="comment-parent-id" value="">
+                <div class="unified-editor-box">
+                  <div class="editor-tab-header">
+                    <div class="d-flex align-items-center gap-1">
+                      <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                        <i class="bi bi-pencil-square"></i> Edit
+                      </button>
+                      <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                        <i class="bi bi-eye"></i> Preview
+                      </button>
                     </div>
                   </div>
-                </form>
-              </div>
+                  <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                    <div class="pmp-toolbar-slot"></div>
+                    <textarea id="comment-input" name="comment" class="form-control text-white border-0 shadow-none p-3" placeholder="Leave your thoughts on this track..." required style="min-height:95px; resize:vertical; background:transparent !important; font-size:0.92rem; line-height:1.6;"></textarea>
+                  </div>
+                  <div class="comment-preview-pane rich-text-content" style="display:none; min-height:95px; padding:1rem; background:transparent; overflow-y:auto;"></div>
+                </div>
+                <div style="display:flex; justify-content:flex-end;">
+                  <button type="submit" class="btn btn-danger rounded-pill fw-bold px-4 py-1" style="font-size: 0.85rem;">Post Comment</button>
+                </div>
+              </form>
             </div>
             <div class="d-flex justify-content-end align-items-center mb-4 ps-2">
               <select id="comments-sort-select" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill">
@@ -88619,46 +91261,36 @@ function perform_cover_scan($db) {
 
     <div class="modal fade" id="edit-phpboard-modal" tabindex="-1" data-bs-backdrop="static">
       <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
-        <div class="modal-content" style="background: rgba(25, 25, 25, 0.95); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.8);">
+        <div class="modal-content" style="background: rgba(25, 25, 25, 0.96); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.85);">
           <div class="modal-header border-0 pb-2 px-4 pt-4">
-            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-warning me-2"></i>Edit Post</h5>
+            <h5 class="modal-title text-white fw-bold"><i class="bi bi-pencil-square text-danger me-2"></i>Edit Post</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body px-4 pb-4">
-            <form id="edit-phpboard-form">
+            <form id="edit-phpboard-form" style="display:flex; flex-direction:column; gap:0.75rem;">
               <input type="hidden" id="edit-phpboard-id">
               <input type="hidden" id="edit-phpboard-type">
-              <div class="rich-input-container" data-target-id="edit-phpboard-input">
-                <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
-                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
-                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
-                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
-                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
-                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
-                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
+              <div class="unified-editor-box">
+                <div class="editor-tab-header">
+                  <div class="d-flex align-items-center gap-1">
+                    <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                      <i class="bi bi-pencil-square"></i> Edit
+                    </button>
+                    <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                      <i class="bi bi-eye"></i> Preview
+                    </button>
                   </div>
-                  <textarea id="edit-phpboard-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" required rows="8" style="resize: none; min-height: 180px; font-size: 1rem; line-height: 1.5; padding: 10px 14px;"></textarea>
+                  <span class="text-secondary small fw-bold text-uppercase" style="font-size: 0.72rem; letter-spacing: 0.5px;">Markdown Supported</span>
                 </div>
+                <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                  <div class="pmp-toolbar-slot"></div>
+                  <textarea id="edit-phpboard-input" class="form-control text-white border-0 shadow-none p-3 modern-custom-scroll" placeholder="Write your post... (Markdown & Task-lists supported)" maxlength="5000" required rows="7" style="resize:vertical; min-height:140px; background:transparent !important; font-size:0.95rem; line-height:1.6;"></textarea>
+                </div>
+                <div class="comment-preview-pane rich-text-content" style="display:none; min-height:140px; padding:1rem; background:transparent; overflow-y:auto;"></div>
               </div>
-              <div class="d-flex justify-content-end align-items-center">
-                <button type="submit" class="btn btn-warning text-dark fw-bold rounded-pill px-5 py-2 shadow-sm">Save Changes</button>
+              <div class="d-flex justify-content-end align-items-center gap-2 mt-1">
+                <button type="button" class="btn btn-outline-secondary rounded-pill px-4 py-2 fw-bold" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-danger rounded-pill px-5 py-2 fw-bold shadow-sm">Save Changes</button>
               </div>
             </form>
           </div>
@@ -106242,11 +108874,11 @@ SOFTWARE.</div>
                           </div>
     
                           <div class="mt-5 pt-4 border-top border-secondary">
-                            <div class="d-flex justify-content-between align-items-center mb-4 pb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-4 pb-2">
+                              <h4 class="text-white fw-bold m-0" style="font-size: 1.15rem;">Responses (<span id="total-blog-comments-count">0</span>)</h4>
                               ${
                                 currentUser
                                   ? `
-                              <span class="text-secondary small fw-bold"><span id="total-blog-comments-count">0</span> Comments</span>
                               <div class="d-flex align-items-center gap-3">
                                 <button class="btn btn-link text-secondary text-decoration-none p-0 d-flex align-items-center gap-2" id="blog-like-btn" style="transition: color 0.2s;">
                                   <i class="bi bi-hand-thumbs-up fs-5"></i> <span id="blog-like-count" class="fw-bold">0</span>
@@ -106262,43 +108894,30 @@ SOFTWARE.</div>
                             ${
                               currentUser
                                 ? `
-                            <div class="d-flex gap-3 mb-3">
-                              <img src="?action=get_profile_picture&id=${currentUser.id}" class="rounded-circle shadow-sm flex-shrink-0 d-none d-sm-block mt-1 border border-secondary border-opacity-25" style="width: 44px; height: 44px; object-fit: cover;">
-                              <div class="flex-grow-1 rich-input-container" data-target-id="blog-comment-input">
-                                <form id="blog-comment-form" class="bg-transparent position-relative mb-2">
-                                  <input type="hidden" id="blog-comment-parent-id" value="">
-                                  <div class="d-flex flex-column bg-dark rounded-4 p-2 shadow-inner" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='#3ea6ff'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                                    <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 mb-2 px-3 py-2 rounded-4 shadow-sm" style="background-color: #212121; border: 1px solid rgba(255,255,255,0.05);">
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
-                                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
-                                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
-                                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
-                                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
-                                      <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
-                                      <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
-                                    </div>
-                                    <div class="d-flex align-items-end">
-                                      <textarea id="blog-comment-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Start typing here... (Markdown & Task-lists supported)" maxlength="5000" rows="4" required style="resize: none; min-height: 110px; max-height: 350px; padding: 10px 14px; font-size: 1rem; line-height: 1.5;" oninput="this.style.height = ''; this.style.height = Math.max(110, this.scrollHeight) + 'px'"></textarea>
-                                      <button type="submit" class="btn btn-danger rounded-pill d-flex align-items-center justify-content-center m-1 flex-shrink-0 shadow-sm fw-bold text-dark" style="transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"><i class="bi bi-send-fill fs-5 me-2"></i> Post This</button>
+                            <div class="mb-4">
+                              <form id="blog-comment-form" onsubmit="window.handleBlogCommentSubmit(event)" style="display:flex; flex-direction:column; gap:0.6rem;">
+                                <input type="hidden" id="blog-comment-parent-id" value="">
+                                <div class="unified-editor-box">
+                                  <div class="editor-tab-header">
+                                    <div class="d-flex align-items-center gap-1">
+                                      <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                                        <i class="bi bi-pencil-square"></i> Edit
+                                      </button>
+                                      <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                                        <i class="bi bi-eye"></i> Preview
+                                      </button>
                                     </div>
                                   </div>
-                                </form>
-                              </div>
+                                  <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                                    <div class="pmp-toolbar-slot"></div>
+                                    <textarea id="blog-comment-input" name="content" class="form-control text-white border-0 shadow-none p-3" placeholder="Leave your thoughts on this blog post..." required style="min-height:95px; resize:vertical; background:transparent !important; font-size:0.92rem; line-height:1.6;"></textarea>
+                                  </div>
+                                  <div class="comment-preview-pane rich-text-content" style="display:none; min-height:95px; padding:1rem; background:transparent; overflow-y:auto;"></div>
+                                </div>
+                                <div style="display:flex; justify-content:flex-end;">
+                                  <button type="submit" class="btn btn-danger rounded-pill fw-bold px-4 py-1" style="font-size: 0.85rem;">Post Response</button>
+                                </div>
+                              </form>
                             </div>
                             `
                                 : '<p class="text-secondary mb-4 small"><i class="bi bi-lock-fill me-1"></i> Log in to post comments and react to this blog.</p>'
@@ -106422,47 +109041,72 @@ SOFTWARE.</div>
               }
               break;
     
-            case "phpboard_index":
-              updateContentTitle("PHPBoard - Forums", false);
-    
+                    case "phpboard_index":
+              updateContentTitle("Imageboard", false);
+
               if (currentView.searchQuery)
                 pageParams.set("q", currentView.searchQuery);
               const boardData = await fetchData(
                 `?action=get_phpboard_index&${pageParams.toString()}`,
               );
-    
+
               if (boardData && boardData.categories) {
                 let html = `
-                      <div class="d-flex flex-wrap align-items-center justify-content-between p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background-color: var(--ytm-surface-2); border: 1px solid #333;">
-                        <div class="text-white fw-bold fs-5 mb-3 mb-md-0 d-flex align-items-center"><i class="bi bi-chat-square-text-fill text-warning me-3 fs-3"></i> PHPBoard</div>
-                        <div class="d-flex gap-2 align-items-center w-100 mt-2">
-                          <input type="text" id="phpboard-search-input" class="form-control bg-dark text-white border-secondary" placeholder="Search threads..." value="${escapeHTML(currentView.searchQuery || "")}">
+                  <div class="w-100 p-3 p-md-4 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, rgba(30, 30, 38, 0.8) 0%, rgba(14, 14, 18, 0.95) 100%); border: 1px solid rgba(255,255,255,0.08);">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+                      <div class="d-flex align-items-center gap-3">
+                        <div class="d-flex align-items-center justify-content-center rounded-3 shadow" style="width: 44px; height: 44px; min-width: 44px; background: linear-gradient(135deg, #ff0044, #990022); color: #fff;">
+                          <i class="bi bi-chat-square-text-fill fs-5"></i>
                         </div>
-                      </div><div class="mx-md-3">`;
-    
+                        <div>
+                          <h3 class="text-white fw-bold mb-0 fs-5">PHPBoard Community</h3>
+                          <p class="text-secondary small mb-0">Browse topic channels, share art, and join real-time discussions.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="position-relative w-100">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="phpboard-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5 shadow-none" placeholder="Search boards..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 40px; font-size: 0.9rem;">
+                    </div>
+                  </div>
+                  <div class="w-100 pb-5">`;
+
                 for (const cat in boardData.categories) {
-                  html += `<h5 class="text-info fw-bold mt-4 mb-3 border-bottom border-secondary pb-2">${escapeHTML(cat)}</h5><div class="row row-cols-2 row-cols-md-3 row-cols-lg-4 g-3 mb-4">`;
-                  boardData.categories[cat].forEach((ch) => {
-                    const b = boardData.boards[ch];
-                    if (b) {
-                      html += `<div class="col"><div class="card bg-dark text-white border-secondary h-100 shadow-sm" style="cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-3px)'" onmouseout="this.style.transform='none'" onclick="window.loadView({type: 'phpboard_channel', param: '${b.code}', sort: 'newest', filter: ''})">
-                              <div class="card-body p-3 text-center">
-                                <h6 class="fw-bold text-warning mb-1">/${escapeHTML(b.code)}/</h6>
-                                <div class="small fw-medium">${escapeHTML(b.name)}</div>
-                                <div class="text-secondary mt-2" style="font-size: 0.75rem;">${b.total_posts} Posts</div>
-                                ${b.is_nsfw ? '<span class="badge bg-danger mt-2">NSFW</span>' : ""}
-                              </div>
-                            </div></div>`;
-                    }
+                  const boards = boardData.categories[cat].map(code => boardData.boards[code]).filter(Boolean);
+                  if (boards.length === 0) continue;
+
+                  html += `
+                    <div class="mb-4">
+                      <div class="d-flex align-items-center gap-2 mb-2 pb-2 border-bottom border-secondary border-opacity-25">
+                        <i class="bi bi-collection-fill text-danger small"></i>
+                        <h6 class="text-white fw-bold m-0 text-uppercase" style="font-size: 0.88rem; letter-spacing: 0.5px;">${escapeHTML(cat)}</h6>
+                      </div>
+                      <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 g-2 g-md-3">`;
+
+                  boards.forEach((b) => {
+                    html += `
+                      <div class="col">
+                        <div class="card h-100 text-white p-3 shadow-sm rounded-4" style="background: #111116; border: 1px solid rgba(255,255,255,0.07); cursor: pointer; transition: transform 0.2s, border-color 0.2s, background 0.2s;" onmouseover="this.style.transform='translateY(-3px)'; this.style.borderColor='var(--ytm-accent)'; this.style.background='#171720';" onmouseout="this.style.transform='none'; this.style.borderColor='rgba(255,255,255,0.07)'; this.style.background='#111116';" onclick="window.loadView({type: 'phpboard_channel', param: '${b.code}', sort: 'newest', filter: ''})">
+                          <div class="d-flex justify-content-between align-items-start mb-2">
+                            <span class="badge bg-danger bg-opacity-25 text-danger border border-danger border-opacity-50 rounded-pill px-2 py-1 font-monospace fw-bold" style="font-size: 0.78rem;">/${escapeHTML(b.code)}/</span>
+                            ${b.is_nsfw ? '<span class="badge bg-danger text-white rounded-pill px-2 py-0" style="font-size: 0.62rem;">18+</span>' : ''}
+                          </div>
+                          <div class="fw-bold text-white mb-1 text-truncate" style="font-size: 0.9rem;" title="${escapeHTML(b.name)}">${escapeHTML(b.name)}</div>
+                          <span class="text-secondary small mt-auto pt-1 d-flex align-items-center gap-1" style="font-size: 0.74rem;">
+                            <i class="bi bi-chat-left-dots"></i> ${formatSongCount(b.total_posts)} posts
+                          </span>
+                        </div>
+                      </div>`;
                   });
-                  html += `</div>`;
+
+                  html += `</div></div>`;
                 }
                 html += `</div>`;
                 contentArea.innerHTML = html;
-    
+
                 document
                   .getElementById("phpboard-search-input")
-                  .addEventListener("input", (e) => {
+                  ?.addEventListener("input", (e) => {
                     clearTimeout(window.boardSearchTimeout);
                     window.boardSearchTimeout = setTimeout(() => {
                       currentView.searchQuery = e.target.value;
@@ -106472,151 +109116,265 @@ SOFTWARE.</div>
               }
               allContentloaded = true;
               break;
-    
-            case "phpboard_channel":
-              updateContentTitle(`/${currentView.param}/`, false);
-    
+
+                    case "phpboard_index": {
+              updateContentTitle("Imageboard", false);
+
               if (currentView.searchQuery)
                 pageParams.set("q", currentView.searchQuery);
-              const chanData = await fetchData(
-                `?action=get_phpboard_channel&channel=${currentView.param}&${pageParams.toString()}`,
+              const boardData = await fetchData(
+                `?action=get_phpboard_index&${pageParams.toString()}`,
               );
-    
-              if (currentPage === 1) {
-                let html = `
-                        <div class="p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                          <div class="mb-3">
-                            <button class="btn btn-sm btn-outline-light fw-bold px-3 rounded-pill" onclick="window.loadView({type: 'phpboard_index', param:'', sort:'', filter:''})"><i class="bi bi-arrow-left me-1"></i> Index</button>
-                          </div>
-                          <div class="text-center mb-3">
-                            <h2 class="text-danger fw-bold mb-1 fs-3">/${escapeHTML(currentView.param)}/ - ${escapeHTML(chanData.channel_name)}</h2>
-                          </div>
-    
-                          <div class="d-flex flex-column flex-md-row align-items-md-center gap-2 px-md-3 mb-4">
-                            <input type="text" id="phpboard-chan-search" class="form-control bg-dark text-white border-secondary w-100" placeholder="Search in /${escapeHTML(currentView.param)}/..." value="${escapeHTML(currentView.searchQuery || "")}">
-                            <select id="phpboard-chan-sort" class="form-select w-100 bg-dark text-white border-secondary" style="max-width: 200px;">
-                              <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest Activity</option>
-                              <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest</option>
-                              <option value="most_replied" ${currentView.sort === "most_replied" ? "selected" : ""}>Most Replied</option>
-                            </select>
-                          </div>
-    
-                          <div class="mt-4 px-md-3">
-                            <div class="rich-input-container" data-target-id="board-thread-input">
-                              <form id="board-thread-form" class="bg-transparent position-relative">
-                                <input type="hidden" id="board-thread-channel" value="${escapeHTML(currentView.param)}">
-    
-                                <div class="row g-2 mb-2">
-                                  <div class="col-md-4">
-                                    <input type="text" id="board-thread-user" class="form-control bg-dark text-white border-secondary" placeholder="Name (Anonymous)" ${currentUser ? 'value="' + escapeHTML(currentUser.artist) + '" readonly' : ""}>
-                                  </div>
-                                  <div class="col-md-4">
-                                    <input type="password" id="board-thread-pwd" class="form-control bg-dark text-white border-secondary" placeholder="Deletion Password" ${currentUser ? "disabled" : ""}>
-                                  </div>
-                                  <div class="col-md-4">
-                                    <input type="text" id="board-thread-subj" class="form-control bg-dark text-white border-secondary" placeholder="Subject">
-                                  </div>
-                                </div>
-    
-                                <div class="d-flex flex-column bg-dark rounded-3 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 px-3 py-2 border-bottom border-secondary m-0 rounded-0" style="background-color: transparent;">
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
-                                  </div>
-                                  <textarea id="board-thread-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Create a new thread... (Max 5,000 characters)" maxlength="5000" rows="5" style="resize: none; min-height: 100px; padding: 1rem;"></textarea>
-                                </div>
-    
-                                <div class="input-group shadow-sm mb-4">
-                                  <input type="file" id="board-thread-file" class="form-control bg-dark text-secondary border-secondary" accept="image/*,video/*,audio/*">
-                                  <button type="submit" class="btn btn-danger text-white fw-bold px-4 border-secondary">Post Thread</button>
-                                </div>
-                              </form>
-                            </div>
-                          </div>
+
+              if (boardData && boardData.categories) {
+                let boardIndexHtml = `
+                  <div class="w-100 p-3 p-md-4 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, rgba(30, 30, 38, 0.85) 0%, rgba(14, 14, 18, 0.98) 100%); border: 1px solid rgba(255,255,255,0.08);">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+                      <div class="d-flex align-items-center gap-3">
+                        <div class="d-flex align-items-center justify-content-center rounded-3 shadow" style="width: 44px; height: 44px; min-width: 44px; background: linear-gradient(135deg, #ff0044, #990022); color: #fff;">
+                          <i class="bi bi-chat-square-text-fill fs-5"></i>
                         </div>
-                        <div id="phpboard-threads-container" class="mx-md-3 pb-5 d-flex flex-column gap-4"></div>
-                      `;
-                contentArea.innerHTML = html;
-    
+                        <div>
+                          <h3 class="text-white fw-bold mb-0 fs-5">PHPBoard Community</h3>
+                          <p class="text-secondary small mb-0">Browse topic channels, share art, and join real-time discussions.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="position-relative w-100">
+                      <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                      <input type="text" id="phpboard-search-input" class="form-control bg-dark text-white border-secondary rounded-pill ps-5 shadow-none" placeholder="Search boards..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 40px; font-size: 0.9rem;">
+                    </div>
+                  </div>
+                  <div class="w-100 pb-5">`;
+
+                for (const cat in boardData.categories) {
+                  const boards = boardData.categories[cat].map(code => boardData.boards[code]).filter(Boolean);
+                  if (boards.length === 0) continue;
+
+                  boardIndexHtml += `
+                    <div class="mb-4">
+                      <div class="d-flex align-items-center gap-2 mb-2 pb-2 border-bottom border-secondary border-opacity-25">
+                        <i class="bi bi-collection-fill text-danger small"></i>
+                        <h6 class="text-white fw-bold m-0 text-uppercase" style="font-size: 0.88rem; letter-spacing: 0.5px;">${escapeHTML(cat)}</h6>
+                      </div>
+                      <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 g-2 g-md-3">`;
+
+                  boards.forEach((b) => {
+                    boardIndexHtml += `
+                      <div class="col">
+                        <div class="card h-100 text-white p-3 shadow-sm rounded-4" style="background: #111116; border: 1px solid rgba(255,255,255,0.07); cursor: pointer; transition: transform 0.2s, border-color 0.2s, background 0.2s;" onmouseover="this.style.transform='translateY(-3px)'; this.style.borderColor='var(--ytm-accent)'; this.style.background='#171720';" onmouseout="this.style.transform='none'; this.style.borderColor='rgba(255,255,255,0.07)'; this.style.background='#111116';" onclick="window.loadView({type: 'phpboard_channel', param: '${b.code}', sort: 'newest', filter: ''})">
+                          <div class="d-flex justify-content-between align-items-start mb-2">
+                            <span class="badge bg-danger bg-opacity-25 text-danger border border-danger border-opacity-50 rounded-pill px-2 py-1 font-monospace fw-bold" style="font-size: 0.78rem;">/${escapeHTML(b.code)}/</span>
+                            ${b.is_nsfw ? '<span class="badge bg-danger text-white rounded-pill px-2 py-0" style="font-size: 0.62rem;">18+</span>' : ''}
+                          </div>
+                          <div class="fw-bold text-white mb-1 text-truncate" style="font-size: 0.9rem;" title="${escapeHTML(b.name)}">${escapeHTML(b.name)}</div>
+                          <span class="text-secondary small mt-auto pt-1 d-flex align-items-center gap-1" style="font-size: 0.74rem;">
+                            <i class="bi bi-chat-left-dots"></i> ${formatSongCount(b.total_posts)} posts
+                          </span>
+                        </div>
+                      </div>`;
+                  });
+
+                  boardIndexHtml += `</div></div>`;
+                }
+                boardIndexHtml += `</div>`;
+                contentArea.innerHTML = boardIndexHtml;
+
                 document
-                  .getElementById("phpboard-chan-search")
-                  .addEventListener("input", (e) => {
+                  .getElementById("phpboard-search-input")
+                  ?.addEventListener("input", (e) => {
                     clearTimeout(window.boardSearchTimeout);
                     window.boardSearchTimeout = setTimeout(() => {
                       currentView.searchQuery = e.target.value;
                       loadView(currentView);
                     }, 400);
                   });
-    
+              }
+              allContentloaded = true;
+              break;
+            }
+
+            case "phpboard_channel": {
+              updateContentTitle(`/${currentView.param}/`, false);
+
+              if (currentView.searchQuery)
+                pageParams.set("q", currentView.searchQuery);
+              const chanData = await fetchData(
+                `?action=get_phpboard_channel&channel=${currentView.param}&${pageParams.toString()}`,
+              );
+
+              const renderChannelMedia = (filePath) => {
+                if (!filePath) return "";
+                const cleanPath = filePath.startsWith("http") ? filePath : filePath;
+                const ext = cleanPath.split(".").pop().toLowerCase();
+                if (["mp4", "webm", "mov"].includes(ext)) {
+                  return `
+                    <div class="mt-2 mb-2 w-100" style="max-width: 440px;">
+                      <video src="${cleanPath}" controls class="rounded-3 w-100 shadow-sm" style="max-height: 280px; background: #000; border: 1px solid rgba(255,255,255,0.08);"></video>
+                    </div>`;
+                } else if (["mp3", "wav", "ogg", "m4a"].includes(ext)) {
+                  return `
+                    <div class="mt-2 mb-2 w-100" style="max-width: 380px;">
+                      <audio src="${cleanPath}" controls class="w-100"></audio>
+                    </div>`;
+                } else {
+                  return `
+                    <div class="mt-2 mb-2">
+                      <img src="${cleanPath}" class="rounded-3 shadow-sm" style="max-height: 280px; max-width: 100%; object-fit: contain; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); background: #000;" onclick="window.openMediaPreview('${cleanPath}', 'image'); event.stopPropagation();" alt="Attachment">
+                    </div>`;
+                }
+              };
+
+              const renderChannelText = (raw) => {
+                let decoded = decodeHTML(raw || "");
+                let parsed = parseUserText(decoded);
+                if (typeof marked !== "undefined") {
+                  try { parsed = marked.parse(parsed); } catch (e) {}
+                }
+                return `<div class="rich-text-content" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #ececee;">${parsed}</div>`;
+              };
+
+              if (currentPage === 1) {
+                let channelHtml = `
+                  <!-- Minimal Full-Width Header Bar -->
+                  <div class="w-100 p-3 mb-3 rounded-4 shadow-sm" style="background: linear-gradient(135deg, rgba(30, 30, 38, 0.85) 0%, rgba(14, 14, 18, 0.98) 100%); border: 1px solid rgba(255,255,255,0.08);">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                      <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold d-inline-flex align-items-center gap-1 shadow-sm" onclick="window.loadView({type: 'phpboard_index', param:'', sort:'', filter:''})">
+                          <i class="bi bi-arrow-left"></i> Index
+                        </button>
+                        <div class="d-flex align-items-center gap-2">
+                          <span class="badge bg-danger rounded-pill px-2 py-1 font-monospace" style="font-size:0.85rem;">/${escapeHTML(currentView.param)}/</span>
+                          <span class="text-white fw-bold text-truncate" style="font-size:1.05rem;">${escapeHTML(chanData ? chanData.channel_name : currentView.param)}</span>
+                        </div>
+                      </div>
+                      <button class="btn btn-sm btn-danger rounded-pill px-3 fw-bold shadow-sm d-inline-flex align-items-center gap-1 ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#new-thread-collapse">
+                        <i class="bi bi-plus-lg"></i> New Thread
+                      </button>
+                    </div>
+
+                    <div class="d-flex flex-column flex-md-row align-items-stretch align-items-md-center gap-2">
+                      <div class="position-relative flex-grow-1">
+                        <i class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-secondary"></i>
+                        <input type="text" id="phpboard-chan-search" class="form-control bg-dark text-white border-secondary rounded-pill ps-5 shadow-none" placeholder="Search in /${escapeHTML(currentView.param)}/..." value="${escapeHTML(currentView.searchQuery || "")}" style="height: 38px; font-size:0.88rem;">
+                      </div>
+                      <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                        <select id="phpboard-chan-sort" class="form-select form-select-sm bg-dark text-white border-secondary rounded-pill shadow-sm" style="width: auto; height: 38px;">
+                          <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest Activity</option>
+                          <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest</option>
+                          <option value="most_replied" ${currentView.sort === "most_replied" ? "selected" : ""}>Most Replied</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Collapsible New Thread Card -->
+                  <div class="collapse w-100 mb-3" id="new-thread-collapse">
+                    <div class="p-3 rounded-4 shadow-sm" style="background: #121217; border: 1px solid rgba(255, 0, 68, 0.35);">
+                      <div class="d-flex align-items-center justify-content-between mb-3">
+                        <h6 class="text-white fw-bold mb-0 d-flex align-items-center gap-2" style="font-size: 0.95rem;">
+                          <i class="bi bi-pencil-square text-danger"></i> Start a New Thread
+                        </h6>
+                        <button type="button" class="btn-close btn-close-white small" data-bs-toggle="collapse" data-bs-target="#new-thread-collapse"></button>
+                      </div>
+                      <form id="board-thread-form" style="display:flex; flex-direction:column; gap:0.65rem;">
+                        <input type="hidden" id="board-thread-channel" value="${escapeHTML(currentView.param)}">
+
+                        <div class="row g-2">
+                          <div class="col-12 col-md-4">
+                            <input type="text" id="board-thread-user" class="form-control form-control-sm bg-dark text-white border-secondary rounded-pill px-3" placeholder="Name (Anonymous)" ${currentUser ? 'value="' + escapeHTML(currentUser.artist) + '" readonly' : ""}>
+                          </div>
+                          <div class="col-12 col-md-4">
+                            <input type="password" id="board-thread-pwd" class="form-control form-control-sm bg-dark text-white border-secondary rounded-pill px-3" placeholder="Deletion Password (Optional)" ${currentUser ? "disabled" : ""}>
+                          </div>
+                          <div class="col-12 col-md-4">
+                            <input type="text" id="board-thread-subj" class="form-control form-control-sm bg-dark text-white border-secondary rounded-pill px-3" placeholder="Subject / Title (Optional)">
+                          </div>
+                        </div>
+
+                        <div class="unified-editor-box">
+                          <div class="editor-tab-header">
+                            <div class="d-flex align-items-center gap-1">
+                              <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                                <i class="bi bi-pencil-square"></i> Edit
+                              </button>
+                              <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                                <i class="bi bi-eye"></i> Preview
+                              </button>
+                            </div>
+                            <span class="text-secondary small fw-bold text-uppercase" style="font-size: 0.7rem; letter-spacing: 0.5px;">Markdown Supported</span>
+                          </div>
+                          <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                            <div class="pmp-toolbar-slot"></div>
+                            <textarea id="board-thread-input" name="comment" class="form-control text-white border-0 shadow-none p-3 modern-custom-scroll" placeholder="Write your post... (Max 5,000 characters)" maxlength="5000" rows="4" style="resize:vertical; min-height:100px; background:transparent !important; font-size:0.9rem; line-height:1.6;"></textarea>
+                          </div>
+                          <div class="comment-preview-pane rich-text-content" style="display:none; min-height:100px; padding:1rem; background:transparent; overflow-y:auto;"></div>
+                        </div>
+
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-1">
+                          <label class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 mb-0 d-inline-flex align-items-center gap-2 cursor-pointer" style="font-size:0.8rem;">
+                            <i class="bi bi-paperclip"></i> Attach File
+                            <input type="file" id="board-thread-file" class="d-none" accept="image/*,video/*,audio/*" onchange="const lbl = this.closest('label').querySelector('.file-status'); if(lbl) lbl.textContent = this.files[0] ? this.files[0].name : '';">
+                            <span class="file-status text-truncate" style="max-width:140px; font-weight:normal; color:#fff;"></span>
+                          </label>
+                          <button type="submit" class="btn btn-danger rounded-pill fw-bold px-4 py-1" style="font-size: 0.85rem;">
+                            Post Thread
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+
+                  <!-- Thread Stream -->
+                  <div id="phpboard-threads-container" class="w-100 pb-5 d-flex flex-column gap-3"></div>
+                `;
+                contentArea.innerHTML = channelHtml;
+
+                const pSlot = document.querySelector("#board-thread-form .pmp-toolbar-slot");
+                if (pSlot && typeof window.getPmpToolbarHtml === "function") {
+                  pSlot.innerHTML = window.getPmpToolbarHtml();
+                }
+
+                document
+                  .getElementById("phpboard-chan-search")
+                  ?.addEventListener("input", (e) => {
+                    clearTimeout(window.boardSearchTimeout);
+                    window.boardSearchTimeout = setTimeout(() => {
+                      currentView.searchQuery = e.target.value;
+                      loadView(currentView);
+                    }, 400);
+                  });
+
                 document
                   .getElementById("phpboard-chan-sort")
-                  .addEventListener("change", (e) => {
+                  ?.addEventListener("change", (e) => {
                     currentView.sort = e.target.value;
                     loadView(currentView);
                   });
-    
+
                 document
                   .getElementById("board-thread-form")
-                  .addEventListener("submit", async (e) => {
+                  ?.addEventListener("submit", async (e) => {
                     e.preventDefault();
                     const btn = e.target.querySelector('button[type="submit"]');
                     btn.disabled = true;
-                    btn.innerHTML =
-                      '<span class="spinner-border spinner-border-sm"></span>';
+                    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Posting...';
                     const fd = new FormData();
-                    fd.append(
-                      "channel",
-                      document.getElementById("board-thread-channel").value,
-                    );
-                    fd.append(
-                      "artist_name",
-                      document.getElementById("board-thread-user").value,
-                    );
-                    fd.append(
-                      "password",
-                      document.getElementById("board-thread-pwd").value,
-                    );
-                    fd.append(
-                      "subject",
-                      document.getElementById("board-thread-subj").value,
-                    );
-                    fd.append(
-                      "comment",
-                      document.getElementById("board-thread-input").value,
-                    );
+                    fd.append("channel", document.getElementById("board-thread-channel").value);
+                    fd.append("artist_name", document.getElementById("board-thread-user").value);
+                    fd.append("password", document.getElementById("board-thread-pwd").value);
+                    fd.append("subject", document.getElementById("board-thread-subj").value);
+                    fd.append("comment", document.getElementById("board-thread-input").value);
                     const fileInp = document.getElementById("board-thread-file");
                     if (fileInp.files[0]) fd.append("image", fileInp.files[0]);
-    
+
                     const res = await fetch("?action=post_phpboard", {
                       method: "POST",
                       body: fd,
                     }).then((r) => r.json());
                     if (res && res.status === "success") {
                       requestCache.clear();
-                      showToast("Thread posted successfully!", "success");
-                      document.getElementById("board-thread-input").value = "";
-                      if (document.getElementById("board-thread-file"))
-                        document.getElementById("board-thread-file").value = "";
+                      showToast("Thread created successfully!", "success");
                       loadView(currentView);
                     } else {
                       showToast(res.message || "Error posting thread", "error");
@@ -106625,394 +109383,313 @@ SOFTWARE.</div>
                     }
                   });
               }
-    
-              const renderBoardMedia = (img, mediaType) => {
-                if (!img) return "";
-                const mediaId =
-                  "board_media_" + Math.random().toString(36).substr(2, 9);
-                let btnText = "View Image";
-                let btnIcon = "bi-image";
-                let innerHtml = "";
-    
-                if (mediaType === "youtube") {
-                  btnText = "View YouTube";
-                  btnIcon = "bi-play-btn";
-                  innerHtml = `<iframe src="${img}" width="100%" height="300" frameborder="0" allowfullscreen></iframe>`;
-                } else {
-                  const directSrc = img.startsWith("http") ? img : img;
-                  if (mediaType === "video") {
-                    btnText = "View Video";
-                    btnIcon = "bi-camera-video";
-                    innerHtml = `<video src="${directSrc}" controls class="rounded w-100" style="max-height: 400px; max-width:100%;"></video>`;
-                  } else if (mediaType === "audio") {
-                    btnText = "Listen Audio";
-                    btnIcon = "bi-music-note";
-                    innerHtml = `<audio src="${directSrc}" controls class="w-100"></audio>`;
-                  } else {
-                    innerHtml = `<img src="${directSrc}" class="rounded shadow-sm w-100" style="max-height: 400px; max-width:100%; object-fit:contain; cursor:pointer;" onclick="window.openMediaPreview('${directSrc}', 'image'); event.stopPropagation();">`;
-                  }
-                }
-    
-                return `
-                        <div class="mt-2 mb-2 w-100">
-                          <button type="button" class="btn btn-sm btn-outline-secondary fw-bold mb-2" onclick="const wrapper = document.getElementById('${mediaId}'); wrapper.classList.toggle('d-none'); this.innerHTML = wrapper.classList.contains('d-none') ? '<i class=\\'bi ${btnIcon}\\'></i> ${btnText}' : '<i class=\\'bi bi-chevron-up\\'></i> Hide Media'; event.stopPropagation();">
-                            <i class="bi ${btnIcon}"></i> ${btnText}
-                          </button>
-                          <div id="${mediaId}" class="d-none w-100">
-                            ${innerHtml}
-                          </div>
-                        </div>
-                      `;
-              };
-    
-              const buildThreadHTML = (t) => {
+
+              const buildUnifiedThreadNode = (t) => {
                 const isOpMod = t.is_admin == 1;
-                const isOwner =
-                  currentUser &&
-                  (currentUser.id == t.user_id ||
-                    currentUser.status === "super_admin" ||
-                    currentUser.is_admin == 1);
-                const roleBadge = isOpMod
-                  ? '<span class="badge bg-danger ms-1">Admin</span>'
-                  : "";
-                const nameStr = `<span class="fw-bold ${isOpMod ? "text-danger" : "text-success"}">${escapeHTML(t.artist || t.artist_name || "Anonymous")}</span>${roleBadge}`;
-    
-                let mediaHtml = "";
-                if (t.image) {
-                  const ext = t.image.split(".").pop().toLowerCase();
-                  let mType = "image";
-                  if (["mp4", "webm", "mov"].includes(ext)) mType = "video";
-                  else if (["mp3", "wav", "ogg"].includes(ext)) mType = "audio";
-                  mediaHtml = renderBoardMedia(t.image, mType);
-                }
-    
-                let html = `
-                        <div class="card bg-dark border-secondary text-white shadow-sm thread-card mb-4" style="border-radius: 12px;">
-                          <div class="card-header border-bottom border-secondary bg-transparent py-3 position-relative">
-                            <div class="d-flex justify-content-between align-items-start">
-                              <div class="d-flex flex-column gap-2 pe-4">
-                                <div class="d-flex align-items-center gap-2 small flex-wrap">
-                                  ${t.subject ? `<strong class="text-info fs-5">${escapeHTML(t.subject)}</strong> <span class="text-secondary fs-5">|</span>` : ""}
-                                  <span class="fs-6">${nameStr}</span> <span class="text-secondary ms-2 fw-medium">${new Date(t.created_at.replace(" ", "T") + "Z").toLocaleString()}</span>
-                                  <span class="text-secondary ms-2 fw-medium">No.${t.id}</span>
-                                </div>
-                                <div>
-                                  <button class="btn btn-sm btn-outline-info rounded-pill py-1 px-3 fw-bold" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''}); setTimeout(() => { window.setBoardReply(${t.id}, '${encodeURIComponent(t.artist || t.artist_name || "Anonymous")}', '${encodeURIComponent(t.comment)}') }, 800);"><i class="bi bi-reply-fill"></i> Reply</button>
-                                </div>
-                              </div>
-                              <div class="position-absolute top-0 end-0 mt-2 me-2 d-flex align-items-start gap-2">
-                                ${
-                                  isOwner
-                                    ? `
-                                  <div class="custom-opt-dropdown">
-                                    <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                      <li><button class="dropdown-item edit-phpboard-btn" data-id="${t.id}" data-type="thread" data-content="${encodeURIComponent(t.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete</button></li>
-                                    </ul>
-                                  </div>
-                                `
-                                    : `
-                                  <div class="custom-opt-dropdown">
-                                    <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                    <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                      <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
-                                    </ul>
-                                  </div>
-                                `
-                                }
-                              </div>
-                            </div>
-                          </div>
-                          <div class="card-body p-4 fs-5" style="line-height: 1.6;">
-                            ${mediaHtml}
-                            <div class="mt-3 text-light" style="white-space: pre-wrap; word-break: break-word;">${parseUserText(decodeHTML(t.comment))}</div>
-                          </div>
-                          ${
-                            t.recent_replies && t.recent_replies.length > 0
-                              ? `
-                            <div class="card-footer bg-transparent border-top border-secondary p-3 d-flex flex-column gap-2">
-                              <div class="text-secondary small fw-bold mb-1 ps-2">${t.reply_count > 3 ? `${t.reply_count - 3} replies omitted. Click Reply to view.` : ""}</div>
-                              ${t.recent_replies
-                                .map((r) => {
-                                  const isRMod = r.is_admin == 1;
-                                  const isROwner =
-                                    currentUser &&
-                                    (currentUser.id == r.user_id ||
-                                      currentUser.status === "super_admin" ||
-                                      currentUser.is_admin == 1);
-                                  const rName = `<span class="fw-bold ${isRMod ? "text-danger" : "text-success"}">${escapeHTML(r.artist || r.artist_name || "Anonymous")}</span>${isRMod ? '<span class="badge bg-danger ms-1">Admin</span>' : ""}`;
-                                  let rMedia = "";
-                                  if (r.image) {
-                                    const rext = r.image
-                                      .split(".")
-                                      .pop()
-                                      .toLowerCase();
-                                    let rmType = "image";
-                                    if (["mp4", "webm", "mov"].includes(rext))
-                                      rmType = "video";
-                                    else if (["mp3", "wav", "ogg"].includes(rext))
-                                      rmType = "audio";
-                                    rMedia = renderBoardMedia(r.image, rmType);
-                                  }
-                                  return `
-                                  <div class="p-3 rounded-4 mb-2" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);">
-                                    <div class="card-header border-0 bg-transparent py-0 position-relative px-0 mb-2">
-                                      <div class="d-flex justify-content-between align-items-start">
-                                        <div class="d-flex flex-column gap-2 pe-4">
-                                          <div class="small d-flex align-items-center gap-2 flex-wrap">
-                                            ${rName} <span class="text-secondary ms-2 fw-medium">${new Date(r.created_at.replace(" ", "T") + "Z").toLocaleString()}</span>
-                                            <span class="text-secondary ms-2 fw-medium">No.${r.id}</span>
-                                          </div>
-                                          <div>
-                                            <button class="btn btn-sm btn-outline-info rounded-pill py-0 px-2 fw-bold" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''}); setTimeout(() => { window.setBoardReply(${r.id}, '${encodeURIComponent(r.artist || r.artist_name || "Anonymous")}', '${encodeURIComponent(r.comment)}') }, 800);"><i class="bi bi-reply-fill"></i> Reply</button>
-                                          </div>
-                                        </div>
-                                        <div class="position-absolute top-0 end-0 mt-0 d-flex align-items-start gap-2">
-                                          ${
-                                            isROwner
-                                              ? `
-                                            <div class="custom-opt-dropdown">
-                                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                                <li><button class="dropdown-item edit-phpboard-btn" data-id="${r.id}" data-type="reply" data-content="${encodeURIComponent(r.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete</button></li>
-                                              </ul>
-                                            </div>
-                                          `
-                                              : `
-                                            <div class="custom-opt-dropdown">
-                                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                                <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
-                                              </ul>
-                                            </div>
-                                          `
-                                          }
-                                        </div>
-                                      </div>
-                                    </div>
-                                    ${rMedia}
-                                    <div class="mt-2 text-light" style="white-space: pre-wrap; word-break: break-word; font-size: 1.05rem;">${parseUserText(decodeHTML(r.comment))}</div>
-                                  </div>
-                                `;
-                                })
-                                .join("")} <
-                  /div>
-                `
-                              : ""
-                          }
+                const isOwner = currentUser && (currentUser.id == t.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+                const roleBadge = isOpMod ? '<span class="badge bg-danger rounded-pill px-2 py-1 ms-1">Admin</span>' : "";
+                const rawArtist = t.artist || t.artist_name || "Anonymous";
+                const authorName = escapeHTML(rawArtist);
+                const avatarSrc = t.user_id ? `?action=get_profile_picture&id=${t.user_id}` : getSvgPlaceholder(rawArtist);
+
+                let recentRepliesHTML = "";
+                if (t.recent_replies && t.recent_replies.length > 0) {
+                  recentRepliesHTML = t.recent_replies.map((r) => {
+                    const isRMod = r.is_admin == 1;
+                    const isROwner = currentUser && (currentUser.id == r.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+                    const rawRArtist = r.artist || r.artist_name || "Anonymous";
+                    const rAvatar = r.user_id ? `?action=get_profile_picture&id=${r.user_id}` : getSvgPlaceholder(rawRArtist);
+                    const rAuthor = escapeHTML(rawRArtist);
+
+                    return `
+                      <div class="d-flex align-items-start gap-2 pt-2 pb-1" style="border-top: 1px solid rgba(255,255,255,0.06);">
+                        <div class="${r.user_id ? 'user-profile-link' : ''}" ${r.user_id ? `data-userid="${r.user_id}" data-artist="${encodeURIComponent(rawRArtist)}" role="button" title="View ${rAuthor}'s Profile"` : ''} style="flex-shrink:0;">
+                          <img src="${rAvatar}" class="rounded-circle shadow-sm" style="width:28px; height:28px; object-fit:cover; background:#1e1e24; border: 1.5px solid rgba(255,255,255,0.08); transition: transform 0.15s ease;" onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'" alt="" onerror="this.src='?action=get_app_icon'">
                         </div>
-                      `;
-                return html;
+                        <div style="flex:1; min-width:0;">
+                          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-1">
+                            <div class="d-flex align-items-center gap-1 flex-wrap">
+                              <span class="fw-bold text-white ${r.user_id ? 'user-profile-link hover-underline' : ''}" ${r.user_id ? `data-userid="${r.user_id}" data-artist="${encodeURIComponent(rawRArtist)}" role="button" title="View ${rAuthor}'s Profile"` : ''} style="font-size:0.84rem;">${rAuthor}</span>
+                              ${isRMod ? '<span class="badge bg-danger rounded-pill px-2 py-1">Admin</span>' : ''}
+                              <span class="badge bg-dark text-secondary border border-secondary border-opacity-25 font-monospace ms-1 px-2 py-1">#${r.id}</span>
+                            </div>
+                            <span style="font-size:0.72rem; color:var(--ytm-secondary-text);">${timeAgo(r.created_at)}</span>
+                          </div>
+                          <div style="margin-top:0.2rem;">
+                            ${renderChannelMedia(r.image)}
+                            ${renderChannelText(r.comment)}
+                          </div>
+                          <div class="d-flex align-items-center gap-2 mt-2 pt-2 border-top border-secondary border-opacity-25 flex-wrap">
+                            <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''}); setTimeout(() => window.setBoardReply(${r.id}, '${encodeURIComponent(rawRArtist)}'), 800);"><i class="bi bi-reply-fill text-info"></i> <span>Reply</span></a>
+                            ${isROwner ? `
+                              <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.openPhpboardEdit('reply', ${r.id}, '${encodeURIComponent(r.comment)}');"><i class="bi bi-pencil"></i> <span>Edit</span></a>
+                              <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25" onclick="window.deletePhpboardPost('reply', ${r.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                            ` : `
+                              <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25 opacity-75" onclick="window.deletePhpboardPost('reply', ${r.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                            `}
+                          </div>
+                        </div>
+                      </div>
+                    `;
+                  }).join("");
+                }
+
+                return `
+                  <div class="w-100 p-3 rounded-4 shadow-sm" style="background: #111116; border: 1px solid rgba(255,255,255,0.07); transition: border-color 0.2s, background 0.2s;" onmouseover="this.style.borderColor='rgba(255,0,68,0.35)';" onmouseout="this.style.borderColor='rgba(255,255,255,0.07)';">
+                    <div class="d-flex align-items-start gap-3">
+                      <!-- Avatar Column (Clickable to User Profile) -->
+                      <div class="${t.user_id ? 'user-profile-link' : ''}" ${t.user_id ? `data-userid="${t.user_id}" data-artist="${encodeURIComponent(rawArtist)}" role="button" title="View ${authorName}'s Profile"` : ''} style="flex-shrink:0;">
+                        <img src="${avatarSrc}" class="rounded-circle shadow-sm" style="width:42px; height:42px; object-fit:cover; background:#1e1e24; border: 2px solid rgba(255,255,255,0.1); cursor:pointer; transition: transform 0.15s ease;" onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'" alt="" onerror="this.src='?action=get_app_icon'">
+                      </div>
+
+                      <!-- Main Card Content Area -->
+                      <div style="flex:1; min-width:0;">
+                        <!-- Header Info Row (Author, Role, Badges, Post ID and Timestamp) -->
+                        <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-1">
+                          <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="fw-bold text-white ${t.user_id ? 'user-profile-link hover-underline' : ''}" ${t.user_id ? `data-userid="${t.user_id}" data-artist="${encodeURIComponent(rawArtist)}" role="button" title="View ${authorName}'s Profile"` : ''} style="font-size:0.92rem;">${authorName}</span>
+                            ${roleBadge}
+                            ${!t.user_id ? '<span class="badge bg-secondary rounded-pill px-2 py-1">Guest</span>' : ''}
+                            <span class="badge bg-dark text-secondary border border-secondary border-opacity-25 font-monospace px-2 py-1">#${t.id}</span>
+                            ${t.subject ? `<span class="badge bg-danger bg-opacity-25 text-danger border border-danger border-opacity-50 px-2 py-1 fw-bold">${escapeHTML(t.subject)}</span>` : ''}
+                          </div>
+                          <span style="font-size:0.74rem; color:var(--ytm-secondary-text);"><i class="bi bi-clock me-1"></i>${timeAgo(t.created_at)}</span>
+                        </div>
+
+                        <!-- Post Body Content -->
+                        <div style="margin-top:0.35rem;">
+                          ${renderChannelMedia(t.image)}
+                          ${renderChannelText(t.comment)}
+                        </div>
+
+                        <!-- Clean Actions Bar (Single-Line Button Pills) -->
+                        <div class="d-flex align-items-center gap-2 mt-2 pt-2 border-top border-secondary border-opacity-25 flex-wrap">
+                          <a href="javascript:;" class="phpmusic-comments-action-btn text-white fw-bold" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''})">
+                            <i class="bi bi-chat-left-text-fill text-danger"></i> <span>Thread (${t.reply_count || 0})</span>
+                          </a>
+                          <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''}); setTimeout(() => window.setBoardReply(${t.id}, '${encodeURIComponent(rawArtist)}'), 800);"><i class="bi bi-reply-fill text-info"></i> <span>Reply</span></a>
+                          ${isOwner ? `
+                            <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.openPhpboardEdit('thread', ${t.id}, '${encodeURIComponent(t.comment)}');"><i class="bi bi-pencil"></i> <span>Edit</span></a>
+                            <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25" onclick="window.deletePhpboardPost('thread', ${t.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                          ` : `
+                            <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25 opacity-75" onclick="window.deletePhpboardPost('thread', ${t.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                          `}
+                        </div>
+
+                        <!-- Nested Recent Replies -->
+                        ${recentRepliesHTML ? `
+                          <div class="comment-replies-list" style="margin-top: 0.75rem; border-left: 2px solid rgba(255,0,68,0.35); padding-left: 0.75rem;">
+                            ${t.reply_count > 3 ? `
+                              <div class="mb-2">
+                                <a href="javascript:;" class="small text-info text-decoration-none fw-bold" onclick="window.loadView({type: 'phpboard_thread', param: ${t.id}, sort: 'oldest', filter: ''})">
+                                  <i class="bi bi-arrow-return-right"></i> ${t.reply_count - 3} older replies. Click to view all.
+                                </a>
+                              </div>
+                            ` : ''}
+                            ${recentRepliesHTML}
+                          </div>
+                        ` : ''}
+                      </div>
+                    </div>
+                  </div>
+                `;
               };
-    
+
               if (chanData && chanData.threads && chanData.threads.length > 0) {
-                const container = document.getElementById(
-                  "phpboard-threads-container",
-                );
+                const container = document.getElementById("phpboard-threads-container");
                 if (currentPage === 1)
-                  container.innerHTML = chanData.threads
-                    .map(buildThreadHTML)
-                    .join("");
+                  container.innerHTML = chanData.threads.map(buildUnifiedThreadNode).join("");
                 else
-                  container.insertAdjacentHTML(
-                    "beforeend",
-                    chanData.threads.map(buildThreadHTML).join(""),
-                  );
+                  container.insertAdjacentHTML("beforeend", chanData.threads.map(buildUnifiedThreadNode).join(""));
               } else if (currentPage === 1) {
                 document.getElementById("phpboard-threads-container").innerHTML =
-                  '<div class="text-center p-5 text-secondary">No threads found in this board. Be the first!</div>';
+                  '<div class="text-center p-5 text-secondary">No threads in this board yet. Be the first to start one!</div>';
                 allContentloaded = true;
               } else {
                 allContentloaded = true;
               }
               break;
-    
-            case "phpboard_thread":
+            }
+
+            case "phpboard_thread": {
               const tData = await fetchData(
                 `?action=get_phpboard_thread&thread_id=${currentView.param}&page=${currentPage}&sort=${currentView.sort}`,
               );
               updateContentTitle(`Thread No.${currentView.param}`, false);
-    
+
+              const renderThreadMedia = (filePath) => {
+                if (!filePath) return "";
+                const cleanPath = filePath.startsWith("http") ? filePath : filePath;
+                const ext = cleanPath.split(".").pop().toLowerCase();
+                if (["mp4", "webm", "mov"].includes(ext)) {
+                  return `<div class="mt-2 mb-2 w-100" style="max-width: 440px;"><video src="${cleanPath}" controls class="rounded-3 w-100 shadow-sm" style="max-height: 280px; background: #000; border: 1px solid rgba(255,255,255,0.08);"></video></div>`;
+                } else if (["mp3", "wav", "ogg", "m4a"].includes(ext)) {
+                  return `<div class="mt-2 mb-2 w-100" style="max-width: 380px;"><audio src="${cleanPath}" controls class="w-100"></audio></div>`;
+                } else {
+                  return `<div class="mt-2 mb-2"><img src="${cleanPath}" class="rounded-3 shadow-sm" style="max-height: 280px; max-width: 100%; object-fit: contain; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); background: #000;" onclick="window.openMediaPreview('${cleanPath}', 'image'); event.stopPropagation();" alt="Attachment"></div>`;
+                }
+              };
+
+              const renderThreadComment = (raw) => {
+                let decoded = decodeHTML(raw || "");
+                let parsed = parseUserText(decoded);
+                if (typeof marked !== "undefined") {
+                  try { parsed = marked.parse(parsed); } catch (e) {}
+                }
+                return `<div class="rich-text-content" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #ececee;">${parsed}</div>`;
+              };
+
               if (tData && tData.thread) {
                 const t = tData.thread;
                 const isOpMod = t.is_admin == 1;
-                const isOwner =
-                  currentUser &&
-                  (currentUser.id == t.user_id ||
-                    currentUser.status === "super_admin" ||
-                    currentUser.is_admin == 1);
-                const roleBadge = isOpMod
-                  ? '<span class="badge bg-danger ms-1">Admin</span>'
-                  : "";
-                const nameStr = `<span class="fw-bold ${isOpMod ? "text-danger" : "text-success"}">${escapeHTML(t.artist || t.artist_name || "Anonymous")}</span>${roleBadge}`;
-    
-                let mediaHtml = "";
-                if (t.image) {
-                  const ext = t.image.split(".").pop().toLowerCase();
-                  let mType = "image";
-                  if (["mp4", "webm", "mov"].includes(ext)) mType = "video";
-                  else if (["mp3", "wav", "ogg"].includes(ext)) mType = "audio";
-                  mediaHtml = renderBoardMedia(t.image, mType);
-                }
-    
+                const isOwner = currentUser && (currentUser.id == t.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+                const roleBadge = isOpMod ? '<span class="badge bg-danger rounded-pill px-2 py-0 ms-1" style="font-size:0.65rem;">Admin</span>' : "";
+                const rawArtist = t.artist || t.artist_name || "Anonymous";
+                const authorName = escapeHTML(rawArtist);
+                const opAvatar = t.user_id ? `?action=get_profile_picture&id=${t.user_id}` : getSvgPlaceholder(rawArtist);
+                const opProfileAttrs = t.user_id ? `class="user-profile-link" data-userid="${t.user_id}" data-artist="${encodeURIComponent(rawArtist)}" role="button" title="View ${authorName}'s Profile"` : '';
+
                 if (currentPage === 1) {
-                  let html = `
-                          <div class="p-3 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(135deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                            <div class="mb-3">
-                              <button class="btn btn-sm btn-outline-light fw-bold px-3 rounded-pill" onclick="window.loadView({type: 'phpboard_channel', param:'${t.channel}', sort:'newest', filter:''})"><i class="bi bi-arrow-left me-1"></i> /${escapeHTML(t.channel)}/</button>
+                  let threadDetailHtml = `
+                    <!-- Minimal Navigation Bar -->
+                    <div class="w-100 d-flex align-items-center justify-content-between mb-3 p-2">
+                      <button class="btn btn-outline-light btn-sm rounded-pill px-3 fw-bold d-inline-flex align-items-center gap-1 shadow-sm" onclick="window.loadView({type: 'phpboard_channel', param:'${t.channel}', sort:'newest', filter:''})">
+                        <i class="bi bi-arrow-left"></i> /${escapeHTML(t.channel)}/
+                      </button>
+                      <span class="badge bg-danger bg-opacity-25 text-danger border border-danger border-opacity-50 font-monospace rounded-pill px-3 py-1">Thread #${t.id}</span>
+                    </div>
+
+                    <!-- OP Featured Post -->
+                    <div class="w-100 p-3 mb-3 rounded-4 shadow-sm" style="background: #121217; border: 1px solid rgba(255, 0, 68, 0.35);">
+                      <div class="d-flex align-items-start gap-3">
+                        <div ${opProfileAttrs} style="flex-shrink:0;">
+                          <img src="${opAvatar}" class="rounded-circle shadow-sm" style="width:42px; height:42px; object-fit:cover; background:#1e1e24; border: 2px solid rgba(255,255,255,0.1); cursor:pointer; transition: transform 0.15s ease;" onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'" alt="" onerror="this.src='?action=get_app_icon'">
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-1">
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                              <span class="fw-bold text-white ${t.user_id ? 'user-profile-link hover-underline' : ''}" ${opProfileAttrs} style="font-size:0.92rem;">${authorName}</span>
+                              ${roleBadge}
+                              ${!t.user_id ? '<span class="badge bg-secondary rounded-pill px-2 py-1">Guest</span>' : ''}
+                              <span class="badge bg-danger text-white rounded-pill font-monospace px-2 py-1">OP #${t.id}</span>
+                              ${t.subject ? `<span class="badge bg-danger bg-opacity-25 text-danger border border-danger border-opacity-50 px-2 py-1 fw-bold">${escapeHTML(t.subject)}</span>` : ''}
                             </div>
-                            <div class="text-center">
-                              <h3 class="text-danger fw-bold mb-0">Thread No.${t.id}</h3>
-                            </div>
+                            <span style="font-size:0.74rem; color:var(--ytm-secondary-text);"><i class="bi bi-clock me-1"></i>${timeAgo(t.created_at)}</span>
                           </div>
-    
-                          <div class="mx-md-3 mb-4 card bg-dark border-danger text-white shadow-sm" style="border-radius: 12px; border-width: 2px;">
-                            <div class="card-header border-bottom border-danger bg-transparent py-3 position-relative">
-                              <div class="d-flex justify-content-between align-items-start">
-                                <div class="d-flex flex-column gap-2 pe-4">
-                                  <div class="d-flex align-items-center gap-2 flex-wrap">
-                                    ${t.subject ? `<strong class="text-info fs-5">${escapeHTML(t.subject)}</strong> <span class="text-secondary fs-5">|</span>` : ""}
-                                    <span class="fs-6">${nameStr}</span> <span class="text-secondary ms-2 fw-medium">${new Date(t.created_at.replace(" ", "T") + "Z").toLocaleString()}</span>
-                                    <span class="text-secondary ms-2 fw-medium">No.${t.id}</span>
-                                  </div>
-                                  <div class="d-flex align-items-center gap-2">
-                                    <button class="btn btn-sm btn-outline-info rounded-pill py-1 px-3 fw-bold" onclick="window.setBoardReply(${t.id}, '${encodeURIComponent(t.artist || t.artist_name || "Anonymous")}', '${encodeURIComponent(t.comment)}')"><i class="bi bi-reply-fill"></i> Reply</button>
-                                  </div>
-                                </div>
-                                <div class="position-absolute top-0 end-0 mt-2 me-2 d-flex align-items-start gap-2">
-                                  ${
-                                    isOwner
-                                      ? `
-                                    <div class="custom-opt-dropdown">
-                                      <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                      <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                        <li><button class="dropdown-item edit-phpboard-btn" data-id="${t.id}" data-type="thread" data-content="${encodeURIComponent(t.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete</button></li>
-                                      </ul>
-                                    </div>
-                                  `
-                                      : `
-                                    <div class="custom-opt-dropdown">
-                                      <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                      <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                        <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${t.id}" data-type="thread"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
-                                      </ul>
-                                    </div>
-                                  `
-                                  }
-                                </div>
-                              </div>
-                            </div>
-                            <div class="card-body p-4 fs-5" style="line-height: 1.6;">
-                              ${mediaHtml}
-                              <div class="mt-3 text-light" style="white-space: pre-wrap; word-break: break-word;">${parseUserText(decodeHTML(t.comment))}</div>
-                            </div>
+
+                          <div style="margin-top:0.35rem;">
+                            ${renderThreadMedia(t.image)}
+                            ${renderThreadComment(t.comment)}
                           </div>
-    
-                          <div class="mx-md-3 mb-4">
-                            <div class="rich-input-container" data-target-id="board-reply-input">
-                              <form id="board-reply-form" class="bg-transparent position-relative">
-                                <input type="hidden" id="board-reply-thread" value="${t.id}">
-                                <input type="hidden" id="board-reply-to-id" value="">
-    
-                                <div class="row g-2 mb-2">
-                                  <div class="col-md-6">
-                                    <input type="text" id="board-reply-user" class="form-control bg-dark text-white border-secondary" placeholder="Name (Anonymous)" ${currentUser ? 'value="' + escapeHTML(currentUser.artist) + '" readonly' : ""}>
-                                  </div>
-                                  <div class="col-md-6">
-                                    <input type="password" id="board-reply-pwd" class="form-control bg-dark text-white border-secondary" placeholder="Deletion Password" ${currentUser ? "disabled" : ""}>
-                                  </div>
-                                </div>
-    
-                                <div class="d-flex flex-column bg-dark rounded-3 shadow-inner mb-3" style="border: 1px solid rgba(255,255,255,0.12); transition: border-color 0.3s;" onfocusin="this.style.borderColor='var(--ytm-accent)'" onfocusout="this.style.borderColor='rgba(255,255,255,0.12)'">
-                                  <div class="editor-toolbar d-flex flex-wrap align-items-center gap-1 px-3 py-2 border-bottom border-secondary m-0 rounded-0" style="background-color: transparent;">
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="bold" title="Bold"><i class="bi bi-type-bold fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="italic" title="Italic"><i class="bi bi-type-italic fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="heading" title="Heading"><i class="bi bi-type-h1 fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ul" title="Bullet List"><i class="bi bi-list-ul fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="ol" title="Numbered List"><i class="bi bi-list-ol fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="task" title="Task List"><i class="bi bi-ui-checks fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="quote" title="Blockquote"><i class="bi bi-quote fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="code" title="Code Block"><i class="bi bi-code-slash fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="table" title="Table"><i class="bi bi-table fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-left" title="Align Left"><i class="bi bi-text-left fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-center" title="Align Center"><i class="bi bi-text-center fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="align-right" title="Align Right"><i class="bi bi-text-right fs-6"></i></button>
-                                    <div class="vr bg-secondary mx-2 opacity-25" style="width: 2px; border-radius: 2px; min-height: 20px;"></div>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="link" title="Link"><i class="bi bi-link-45deg fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="image" title="Image"><i class="bi bi-image fs-6"></i></button>
-                                    <button type="button" class="btn btn-sm btn-link text-secondary border-0 hover-white text-decoration-none" data-md="video" title="Video"><i class="bi bi-camera-video fs-6"></i></button>
-                                  </div>
-                                  <textarea id="board-reply-input" class="form-control bg-transparent text-white border-0 shadow-none modern-custom-scroll" placeholder="Type a reply... (Max 5,000 characters)" maxlength="5000" rows="4" style="resize: none; min-height: 80px; padding: 1rem;"></textarea>
-                                </div>
-    
-                                <div class="input-group shadow-sm mb-4">
-                                  <input type="file" id="board-reply-file" class="form-control bg-dark text-secondary border-secondary" accept="image/*,video/*,audio/*">
-                                  <button type="submit" class="btn btn-danger text-white fw-bold px-4 border-secondary btn-sm">Post Reply</button>
-                                </div>
-                              </form>
+
+                          <div class="d-flex align-items-center gap-2 mt-2 pt-2 border-top border-secondary border-opacity-25 flex-wrap">
+                            <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.setBoardReply(${t.id}, '${encodeURIComponent(rawArtist)}');"><i class="bi bi-reply-fill text-info"></i> <span>Reply</span></a>
+                            ${isOwner ? `
+                              <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.openPhpboardEdit('thread', ${t.id}, '${encodeURIComponent(t.comment)}');"><i class="bi bi-pencil"></i> <span>Edit</span></a>
+                              <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25" onclick="window.deletePhpboardPost('thread', ${t.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                            ` : `
+                              <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25 opacity-75" onclick="window.deletePhpboardPost('thread', ${t.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                            `}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Standalone Reply Form -->
+                    <div class="w-100 p-3 mb-4 rounded-4 shadow-sm" style="background: #101015; border: 1px solid rgba(255,255,255,0.08);">
+                      <div class="d-flex align-items-center justify-content-between mb-2">
+                        <h6 class="text-white fw-bold mb-0 d-flex align-items-center gap-2" style="font-size: 0.9rem;">
+                          <i class="bi bi-reply-fill text-danger"></i> Post Reply
+                        </h6>
+                        <span id="board-reply-quoting-badge" class="badge bg-dark border border-secondary text-info d-none"></span>
+                      </div>
+
+                      <form id="board-reply-form" style="display:flex; flex-direction:column; gap:0.65rem;">
+                        <input type="hidden" id="board-reply-thread" value="${t.id}">
+                        <input type="hidden" id="board-reply-to-id" value="">
+
+                        <div class="row g-2">
+                          <div class="col-12 col-md-6">
+                            <input type="text" id="board-reply-user" class="form-control form-control-sm bg-dark text-white border-secondary rounded-pill px-3" placeholder="Name (Anonymous)" ${currentUser ? 'value="' + escapeHTML(currentUser.artist) + '" readonly' : ""}>
+                          </div>
+                          <div class="col-12 col-md-6">
+                            <input type="password" id="board-reply-pwd" class="form-control form-control-sm bg-dark text-white border-secondary rounded-pill px-3" placeholder="Deletion Password (Optional)" ${currentUser ? "disabled" : ""}>
+                          </div>
+                        </div>
+
+                        <div class="unified-editor-box">
+                          <div class="editor-tab-header">
+                            <div class="d-flex align-items-center gap-1">
+                              <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                                <i class="bi bi-pencil-square"></i> Edit
+                              </button>
+                              <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                                <i class="bi bi-eye"></i> Preview
+                              </button>
                             </div>
+                            <span class="text-secondary small fw-bold text-uppercase" style="font-size: 0.7rem; letter-spacing: 0.5px;">Markdown Supported</span>
                           </div>
-    
-                          <div class="d-flex justify-content-between align-items-center px-md-3 mb-3 mt-4">
-                            <h5 class="text-white fw-bold m-0"><i class="bi bi-chat-left-dots text-info me-2"></i> Replies</h5>
-                            <select id="phpboard-reply-sort" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill shadow-sm">
-                              <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest First</option>
-                              <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest First</option>
-                            </select>
+                          <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                            <div class="pmp-toolbar-slot"></div>
+                            <textarea id="board-reply-input" name="comment" class="form-control text-white border-0 shadow-none p-3 modern-custom-scroll" placeholder="Write your reply... (Max 5,000 characters)" maxlength="5000" rows="3" style="resize:vertical; min-height:85px; background:transparent !important; font-size:0.9rem; line-height:1.6;"></textarea>
                           </div>
-    
-                          <div class="mx-md-3 pb-5 d-flex flex-column gap-3" id="phpboard-replies-container"></div>
-                        `;
-                  contentArea.innerHTML = html;
-    
+                          <div class="comment-preview-pane rich-text-content" style="display:none; min-height:85px; padding:0.85rem; background:transparent; overflow-y:auto;"></div>
+                        </div>
+
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-1">
+                          <label class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 mb-0 d-inline-flex align-items-center gap-2 cursor-pointer" style="font-size:0.8rem;">
+                            <i class="bi bi-paperclip"></i> Attach File
+                            <input type="file" id="board-reply-file" class="d-none" accept="image/*,video/*,audio/*" onchange="const lbl = this.closest('label').querySelector('.file-status'); if(lbl) lbl.textContent = this.files[0] ? this.files[0].name : '';">
+                            <span class="file-status text-truncate" style="max-width:140px; font-weight:normal; color:#fff;"></span>
+                          </label>
+                          <button type="submit" class="btn btn-danger rounded-pill fw-bold px-4 py-1" style="font-size: 0.85rem;">
+                            Post Reply
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+
+                    <!-- Responses Stream Header -->
+                    <div class="w-100 d-flex justify-content-between align-items-center mb-3">
+                      <h6 class="text-white fw-bold m-0" style="font-size:0.95rem;"><i class="bi bi-chat-left-dots text-danger me-2"></i> Responses</h6>
+                      <select id="phpboard-reply-sort" class="form-select form-select-sm w-auto bg-dark text-white border-secondary rounded-pill shadow-sm" style="font-size:0.78rem;">
+                        <option value="oldest" ${currentView.sort === "oldest" ? "selected" : ""}>Oldest First</option>
+                        <option value="newest" ${currentView.sort === "newest" ? "selected" : ""}>Newest First</option>
+                      </select>
+                    </div>
+
+                    <div class="w-100 pb-5 d-flex flex-column gap-2" id="phpboard-replies-container"></div>
+                  `;
+                  contentArea.innerHTML = threadDetailHtml;
+
+                  const rSlot = document.querySelector("#board-reply-form .pmp-toolbar-slot");
+                  if (rSlot && typeof window.getPmpToolbarHtml === "function") {
+                    rSlot.innerHTML = window.getPmpToolbarHtml();
+                  }
+
                   document
                     .getElementById("phpboard-reply-sort")
-                    .addEventListener("change", (e) => {
+                    ?.addEventListener("change", (e) => {
                       currentView.sort = e.target.value;
                       loadView(currentView);
                     });
-    
+
                   document
                     .getElementById("board-reply-form")
-                    .addEventListener("submit", async (e) => {
+                    ?.addEventListener("submit", async (e) => {
                       e.preventDefault();
                       const btn = e.target.querySelector('button[type="submit"]');
                       btn.disabled = true;
-                      btn.innerHTML =
-                        '<span class="spinner-border spinner-border-sm"></span>';
+                      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Posting...';
                       const fd = new FormData();
-                      fd.append(
-                        "thread_id",
-                        document.getElementById("board-reply-thread").value,
-                      );
-                      fd.append(
-                        "reply_to_id",
-                        document.getElementById("board-reply-to-id").value,
-                      );
-                      fd.append(
-                        "artist_name",
-                        document.getElementById("board-reply-user").value,
-                      );
-                      fd.append(
-                        "password",
-                        document.getElementById("board-reply-pwd").value,
-                      );
-                      fd.append(
-                        "comment",
-                        document.getElementById("board-reply-input").value,
-                      );
+                      fd.append("thread_id", document.getElementById("board-reply-thread").value);
+                      fd.append("reply_to_id", document.getElementById("board-reply-to-id").value);
+                      fd.append("artist_name", document.getElementById("board-reply-user").value);
+                      fd.append("password", document.getElementById("board-reply-pwd").value);
+                      fd.append("comment", document.getElementById("board-reply-input").value);
                       const fileInp = document.getElementById("board-reply-file");
                       if (fileInp.files[0]) fd.append("image", fileInp.files[0]);
-    
+
                       const res = await fetch("?action=post_phpboard", {
                         method: "POST",
                         body: fd,
@@ -107020,9 +109697,6 @@ SOFTWARE.</div>
                       if (res && res.status === "success") {
                         requestCache.clear();
                         showToast("Reply posted successfully!", "success");
-                        document.getElementById("board-reply-input").value = "";
-                        if (document.getElementById("board-reply-file"))
-                          document.getElementById("board-reply-file").value = "";
                         loadView(currentView);
                       } else {
                         showToast(res.message || "Error posting reply", "error");
@@ -107031,121 +109705,95 @@ SOFTWARE.</div>
                       }
                     });
                 }
-    
-                window.setBoardReply = (id, encSender, encContent) => {
-                  const sender = decodeURIComponent(encSender || "");
-                  const content = decodeURIComponent(encContent || "");
+
+                window.setBoardReply = (id, encSender) => {
+                  const sender = decodeURIComponent(encSender || "Anonymous");
                   const input = document.getElementById("board-reply-input");
-                  document.getElementById("board-reply-to-id").value = id;
-                  document.getElementById("board-reply-preview-text").innerHTML =
-                    `<strong>Replying to ${escapeHTML(sender)}:</strong><br><span class="text-secondary small d-block text-truncate">${escapeHTML(decodeHTML(content).replace(/<[^>]*>?/gm, ""))}</span>`;
-                  document
-                    .getElementById("board-reply-preview-bar")
-                    .classList.add("active");
+                  const replyToInput = document.getElementById("board-reply-to-id");
+                  const quoteBadge = document.getElementById("board-reply-quoting-badge");
+
+                  if (replyToInput) replyToInput.value = id;
+                  if (quoteBadge) {
+                    quoteBadge.textContent = `Replying to >>${id} (${sender})`;
+                    quoteBadge.classList.remove("d-none");
+                  }
+
                   if (input) {
-                    input.value += `>>${id}\n`;
+                    input.value = `>>${id}\n` + input.value;
                     input.focus();
-                    input.scrollIntoView({
-                      behavior: "smooth",
-                      block: "center",
-                    });
+                    input.scrollIntoView({ behavior: "smooth", block: "center" });
                   }
                 };
-    
+
                 if (t.replies && t.replies.length > 0) {
-                  const rHtml = t.replies
-                    .map((r) => {
-                      const isRMod = r.is_admin == 1;
-                      const isROwner =
-                        currentUser &&
-                        (currentUser.id == r.user_id ||
-                          currentUser.status === "super_admin" ||
-                          currentUser.is_admin == 1);
-                      const safeSender = escapeHTML(
-                        r.artist || r.artist_name || "Anonymous",
-                      );
-                      const rName = `<span class="fw-bold ${isRMod ? "text-danger" : "text-success"}">${safeSender}</span>${isRMod ? '<span class="badge bg-danger ms-1">Admin</span>' : ""}`;
-                      let rMedia = "";
-                      if (r.image) {
-                        const rext = r.image.split(".").pop().toLowerCase();
-                        let rmType = "image";
-                        if (["mp4", "webm", "mov"].includes(rext)) rmType = "video";
-                        else if (["mp3", "wav", "ogg"].includes(rext))
-                          rmType = "audio";
-                        rMedia = renderBoardMedia(r.image, rmType);
-                      }
-    
-                      let replyQuoteHtml = "";
-                      if (r.reply_to_id && r.reply_content) {
-                        const cleanRep = decodeHTML(r.reply_content).replace(
-                          /<[^>]*>?/gm,
-                          "",
-                        );
-                        replyQuoteHtml = `
-                              <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${r.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post">
-                                <strong class="text-info">&gt;&gt;${r.reply_to_id}</strong><br>
-                                <span class="text-truncate d-block">${escapeHTML(cleanRep)}</span>
+                  const rHtml = t.replies.map((r) => {
+                    const isRMod = r.is_admin == 1;
+                    const isROwner = currentUser && (currentUser.id == r.user_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+                    const rawRArtist = r.artist || r.artist_name || "Anonymous";
+                    const rAvatar = r.user_id ? `?action=get_profile_picture&id=${r.user_id}` : getSvgPlaceholder(rawRArtist);
+                    const rAuthor = escapeHTML(rawRArtist);
+
+                    let quoteBubbleHtml = "";
+                    if (r.reply_to_id && r.reply_content) {
+                      const cleanRep = decodeHTML(r.reply_content).replace(/<[^>]*>?/gm, "");
+                      quoteBubbleHtml = `
+                        <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${r.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.25); border-left: 3px solid var(--ytm-accent); padding: 5px 8px; border-radius: 0 6px 6px 0; font-size: 0.8rem; cursor: pointer;">
+                          <strong class="text-info">&gt;&gt;${r.reply_to_id}</strong> <span class="text-secondary opacity-75">(${escapeHTML(r.reply_sender || "Someone")})</span><br>
+                          <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
+                        </div>
+                      `;
+                    }
+
+                    return `
+                      <div class="w-100 p-3 rounded-4 shadow-sm reply-anchor-${r.id}" style="background: #111116; border: 1px solid rgba(255,255,255,0.06);">
+                        <div class="d-flex align-items-start gap-3">
+                          <div ${rProfileAttrs} style="flex-shrink:0;">
+                            <img src="${rAvatar}" class="rounded-circle shadow-sm" style="width:34px; height:34px; object-fit:cover; background:#1e1e24; border: 1.5px solid rgba(255,255,255,0.08); cursor:pointer; transition: transform 0.15s ease;" onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'" alt="" onerror="this.src='?action=get_app_icon'">
+                          </div>
+                          <div style="flex:1; min-width:0;">
+                            <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-1">
+                              <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <span class="fw-bold text-white ${r.user_id ? 'user-profile-link hover-underline' : ''}" ${rProfileAttrs} style="font-size:0.86rem;">${rAuthor}</span>
+                                ${isRMod ? '<span class="badge bg-danger rounded-pill px-2 py-1">Admin</span>' : ''}
+                                ${!r.user_id ? '<span class="badge bg-secondary rounded-pill px-2 py-1">Guest</span>' : ''}
+                                <span class="badge bg-dark text-secondary border border-secondary border-opacity-25 font-monospace px-2 py-1">#${r.id}</span>
                               </div>
-                            `;
-                      }
-    
-                      return `
-                            <div class="card bg-dark border-secondary text-white shadow-sm mb-3 reply-anchor-${r.id}" style="border-radius: 12px;">
-                              <div class="card-header border-0 bg-transparent py-2 pb-0 position-relative px-3">
-                                <div class="d-flex justify-content-between align-items-start">
-                                  <div class="d-flex flex-column gap-2 pe-4">
-                                    <div class="small d-flex align-items-center gap-2 flex-wrap">
-                                      ${rName} <span class="text-secondary ms-2 fw-medium">${new Date(r.created_at.replace(" ", "T") + "Z").toLocaleString()}</span>
-                                      <span class="text-secondary ms-2 fw-medium">No.${r.id}</span>
-                                    </div>
-                                    <div>
-                                      <button class="btn btn-sm btn-outline-info rounded-pill py-0 px-2 fw-bold" onclick="window.setBoardReply(${r.id}, '${encodeURIComponent(r.artist || r.artist_name || "Anonymous")}', '${encodeURIComponent(r.comment)}')"><i class="bi bi-reply-fill"></i> Reply</button>
-                                    </div>
-                                  </div>
-                                  <div class="position-absolute top-0 end-0 mt-2 me-2 d-flex align-items-start gap-2">
-                                    ${
-                                      isROwner
-                                        ? `
-                                      <div class="custom-opt-dropdown">
-                                        <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                          <li><button class="dropdown-item edit-phpboard-btn" data-id="${r.id}" data-type="reply" data-content="${encodeURIComponent(r.comment)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete</button></li>
-                                        </ul>
-                                      </div>
-                                    `
-                                        : `
-                                      <div class="custom-opt-dropdown">
-                                        <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                        <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                          <li><button class="dropdown-item text-danger delete-phpboard-btn" data-id="${r.id}" data-type="reply"><i class="bi bi-trash2"></i> Delete (Anon)</button></li>
-                                        </ul>
-                                      </div>
-                                    `
-                                    }
-                                  </div>
-                                </div>
-                              </div>
-                              <div class="card-body pt-1 pb-3" style="font-size: 1.05rem; line-height: 1.5;">
-                                ${replyQuoteHtml}
-                                ${rMedia}
-                                <div class="mt-2 text-light" style="white-space: pre-wrap; word-break: break-word;">${parseUserText(decodeHTML(r.comment))}</div>
-                              </div>
+                              <span style="font-size:0.72rem; color:var(--ytm-secondary-text);"><i class="bi bi-clock me-1"></i>${timeAgo(r.created_at)}</span>
                             </div>
-                          `;
-                    })
-                    .join("");
-    
-                  const container = document.getElementById(
-                    "phpboard-replies-container",
-                  );
+
+                            <div style="margin-top:0.3rem;">
+                              ${quoteBubbleHtml}
+                              ${renderThreadMedia(r.image)}
+                              ${renderThreadComment(r.comment)}
+                            </div>
+
+                            <div class="d-flex align-items-center gap-2 mt-2 pt-2 border-top border-secondary border-opacity-25 flex-wrap">
+                              <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.setBoardReply(${r.id}, '${encodeURIComponent(rawRArtist)}');"><i class="bi bi-reply-fill text-info"></i> <span>Reply</span></a>
+                              ${isOwner ? `
+                                <a href="javascript:;" class="phpmusic-comments-action-btn" onclick="window.openPhpboardEdit('reply', ${r.id}, '${encodeURIComponent(r.comment)}');"><i class="bi bi-pencil"></i> <span>Edit</span></a>
+                                <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25" onclick="window.deletePhpboardPost('reply', ${r.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                              ` : `
+                                <a href="javascript:;" class="phpmusic-comments-action-btn text-danger border-danger border-opacity-25 opacity-75" onclick="window.deletePhpboardPost('reply', ${r.id});"><i class="bi bi-trash2"></i> <span>Delete</span></a>
+                              `}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    `;
+                  }).join("");
+
+                  const container = document.getElementById("phpboard-replies-container");
                   if (currentPage === 1) container.innerHTML = rHtml;
                   else container.insertAdjacentHTML("beforeend", rHtml);
-    
+
                   if (t.replies.length < 50) {
                     allContentloaded = true;
                   }
                 } else {
+                  if (currentPage === 1) {
+                    document.getElementById("phpboard-replies-container").innerHTML =
+                      '<div class="text-center p-4 text-secondary small">No replies yet. Start the conversation!</div>';
+                  }
                   allContentloaded = true;
                 }
               } else {
@@ -107153,6 +109801,7 @@ SOFTWARE.</div>
                 allContentloaded = true;
               }
               break;
+            }
     
             case "get_notes":
               let noteFilter = currentView.filter || "all";
@@ -111176,7 +113825,252 @@ SOFTWARE.</div>
         }
         let activeCommentSongId = null;
         let currentCommentsPage = 1;
-    
+
+        window.getPmpToolbarHtml = () => `
+          <div class="editor-toolbar-pmp" onclick="window.handlePmpToolbarClick(event)" onwheel="if(event.deltaY!==0){this.scrollLeft+=event.deltaY;event.preventDefault();}">
+            <button type="button" class="btn-tool-item" data-md="bold" title="Bold"><i class="bi bi-type-bold"></i></button>
+            <button type="button" class="btn-tool-item" data-md="italic" title="Italic"><i class="bi bi-type-italic"></i></button>
+            <button type="button" class="btn-tool-item" data-md="strikethrough" title="Strikethrough"><i class="bi bi-type-strikethrough"></i></button>
+            <button type="button" class="btn-tool-item" data-md="spoiler" title="Spoiler"><i class="bi bi-eye-slash"></i></button>
+            <button type="button" class="btn-tool-item" data-md="heading" title="Heading"><i class="bi bi-type-h1"></i></button>
+            <div class="toolbar-separator"></div>
+            <button type="button" class="btn-tool-item" data-md="ul" title="Bullet List"><i class="bi bi-list-ul"></i></button>
+            <button type="button" class="btn-tool-item" data-md="ol" title="Numbered List"><i class="bi bi-list-ol"></i></button>
+            <button type="button" class="btn-tool-item" data-md="task" title="Task List"><i class="bi bi-ui-checks"></i></button>
+            <div class="toolbar-separator"></div>
+            <button type="button" class="btn-tool-item" data-md="quote" title="Blockquote"><i class="bi bi-quote"></i></button>
+            <button type="button" class="btn-tool-item" data-md="code" title="Code Block"><i class="bi bi-code-slash"></i></button>
+            <div class="toolbar-separator"></div>
+            <button type="button" class="btn-tool-item" data-md="table" title="Table"><i class="bi bi-table"></i></button>
+            <button type="button" class="btn-tool-item" data-md="link" title="Link"><i class="bi bi-link-45deg"></i></button>
+            <button type="button" class="btn-tool-item" data-md="image" title="Image"><i class="bi bi-image"></i></button>
+            <button type="button" class="btn-tool-item" data-md="video" title="Video"><i class="bi bi-camera-video"></i></button>
+          </div>
+        `;
+
+        window.switchPmpCommentTab = (btn, tab) => {
+          const container = btn.closest('.unified-editor-box');
+          if (!container) return;
+          const editPane = container.querySelector('.comment-edit-pane');
+          const prevPane = container.querySelector('.comment-preview-pane');
+          const textarea = container.querySelector('textarea');
+          const btns = container.querySelectorAll('.editor-tab-btn');
+
+          btns.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+
+          if (tab === 'preview') {
+            const text = textarea ? textarea.value.trim() : '';
+            if (prevPane) {
+              prevPane.innerHTML = text
+                ? (typeof marked !== 'undefined' ? marked.parse(text) : escapeHTML(text).replace(/\n/g, '<br>'))
+                : '<p class="fst-italic m-0 text-secondary">Nothing to preview.</p>';
+              editPane.style.display = 'none';
+              prevPane.style.display = 'block';
+            }
+          } else {
+            editPane.style.display = 'flex';
+            prevPane.style.display = 'none';
+            if (textarea) textarea.focus();
+          }
+        };
+
+        window.handlePmpToolbarClick = (event) => {
+          const btn = event.target.closest('button[data-md]');
+          if (!btn) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const action = btn.getAttribute('data-md');
+          const toolbar = btn.closest('.editor-toolbar-pmp');
+          const form = toolbar ? toolbar.closest('form') : null;
+          const textarea = form ? form.querySelector('textarea') : null;
+          if (textarea) window.applyMarkdownToTextarea(action, textarea);
+        };
+
+        window.applyMarkdownToTextarea = (action, textarea) => {
+          if (!textarea) return;
+          textarea.focus();
+          const start = textarea.selectionStart || 0;
+          const end = textarea.selectionEnd || 0;
+          const text = textarea.value;
+          const selected = text.substring(start, end);
+          let replace = '';
+          let selectStart = start;
+          let selectEnd = end;
+
+          switch (action) {
+            case 'bold': replace = `**${selected || 'bold text'}**`; selectStart = start + 2; selectEnd = selectStart + (selected ? selected.length : 9); break;
+            case 'italic': replace = `*${selected || 'italic text'}*`; selectStart = start + 1; selectEnd = selectStart + (selected ? selected.length : 11); break;
+            case 'strikethrough': replace = `~~${selected || 'strikethrough'}~~`; selectStart = start + 2; selectEnd = selectStart + (selected ? selected.length : 13); break;
+            case 'spoiler': replace = `||${selected || 'spoiler text'}||`; selectStart = start + 2; selectEnd = selectStart + (selected ? selected.length : 12); break;
+            case 'heading': replace = `\n### ${selected || 'Heading'}\n`; selectStart = start + 5; selectEnd = selectStart + (selected ? selected.length : 7); break;
+            case 'ul': replace = `\n- ${selected || 'List item'}\n`; selectStart = start + 3; selectEnd = selectStart + (selected ? selected.length : 9); break;
+            case 'ol': replace = `\n1. ${selected || 'Numbered item'}\n`; selectStart = start + 4; selectEnd = selectStart + (selected ? selected.length : 13); break;
+            case 'task': replace = `\n- [ ] ${selected || 'Task item'}\n`; selectStart = start + 7; selectEnd = selectStart + (selected ? selected.length : 9); break;
+            case 'quote': replace = `\n> ${selected || 'Blockquote'}\n`; selectStart = start + 3; selectEnd = selectStart + (selected ? selected.length : 10); break;
+            case 'code': replace = `\n\`\`\`\n${selected || 'code here'}\n\`\`\`\n`; selectStart = start + 5; selectEnd = selectStart + (selected ? selected.length : 9); break;
+            case 'table': replace = `\n| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |\n`; selectStart = start + replace.length; selectEnd = selectStart; break;
+            case 'link': replace = `[${selected || 'Link Title'}](https://example.com)`; selectStart = start + (selected ? selected.length + 3 : 1); selectEnd = start + replace.length - 1; break;
+            case 'image': replace = `![${selected || 'Image Alt'}](https://example.com/image.jpg)`; selectStart = start + (selected ? selected.length + 4 : 2); selectEnd = start + replace.length - 1; break;
+            case 'video': replace = `\n<video controls src="https://example.com/video.mp4"></video>\n`; selectStart = start + 21; selectEnd = start + 50; break;
+            default: return;
+          }
+
+          if (!document.execCommand || !document.execCommand('insertText', false, replace)) {
+            textarea.setRangeText(replace, start, end, 'end');
+          }
+          textarea.setSelectionRange(selectStart, selectEnd);
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+
+        window.togglePmpReplyBox = (type, commentId) => {
+          const box = document.getElementById(`${type}-reply-box-${commentId}`);
+          if (!box) return;
+          const isHidden = box.style.display === 'none';
+          box.style.display = isHidden ? 'block' : 'none';
+          if (isHidden) {
+            const slot = box.querySelector('.pmp-toolbar-slot');
+            if (slot && !slot.hasChildNodes()) {
+              slot.innerHTML = window.getPmpToolbarHtml();
+            }
+            const ta = box.querySelector('textarea');
+            if (ta) ta.focus();
+          }
+        };
+
+        window.submitPmpReply = async (e, type, targetEntityId, parentId) => {
+          e.preventDefault();
+          if (!currentUser) return showToast("Please login", "error");
+          const form = e.target;
+          const textarea = form.querySelector('textarea');
+          const content = textarea.value.trim();
+          if (!content) return;
+
+          const submitBtn = form.querySelector('button[type="submit"]');
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Posting...";
+
+          try {
+            if (type === 'song') {
+              await fetchData("?action=add_song_comment", {
+                method: "POST",
+                body: JSON.stringify({
+                  song_id: targetEntityId,
+                  parent_id: parentId,
+                  content: content
+                })
+              });
+              window.refreshComments(true);
+            } else if (type === 'blog') {
+              await fetchData("?action=add_blog_comment", {
+                method: "POST",
+                body: JSON.stringify({
+                  blog_id: targetEntityId,
+                  parent_id: parentId,
+                  content: content
+                })
+              });
+              window.refreshBlogComments(true);
+            }
+            textarea.value = '';
+            window.togglePmpReplyBox(type, parentId);
+            showToast("Reply posted!", "success");
+          } catch(err) {
+            showToast("Failed to post reply", "error");
+          } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Reply";
+          }
+        };
+
+        window.handleSongCommentSubmit = async (e) => {
+          e.preventDefault();
+          if (!currentUser) return showToast("Please login", "error");
+          const input = document.getElementById("comment-input");
+          const content = input.value.trim();
+          if (!content) return;
+
+          const submitBtn = e.target.querySelector('button[type="submit"]');
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Posting...";
+
+          try {
+            await fetchData("?action=add_song_comment", {
+              method: "POST",
+              body: JSON.stringify({
+                song_id: activeCommentSongId,
+                parent_id: null,
+                content: content
+              })
+            });
+            input.value = "";
+            window.refreshComments(true);
+            showToast("Comment posted!", "success");
+          } catch(err) {
+            showToast("Failed to post comment", "error");
+          } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Post Comment";
+          }
+        };
+
+        window.handleBlogCommentSubmit = async (e) => {
+          e.preventDefault();
+          if (!currentUser) return showToast("Please login", "error");
+          const input = document.getElementById("blog-comment-input");
+          const content = input.value.trim();
+          if (!content) return;
+
+          const submitBtn = e.target.querySelector('button[type="submit"]');
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Posting...";
+
+          try {
+            await fetchData("?action=add_blog_comment", {
+              method: "POST",
+              body: JSON.stringify({
+                blog_id: window.activeBlogPublicId,
+                parent_id: null,
+                content: content
+              })
+            });
+            input.value = "";
+            window.refreshBlogComments(true);
+            showToast("Response posted!", "success");
+          } catch(err) {
+            showToast("Failed to post response", "error");
+          } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Post Response";
+          }
+        };
+
+        window.openPmpEditComment = (type, commentId) => {
+          const textEl = document.getElementById(`comm-text-${commentId}`);
+          const currentText = textEl ? textEl.innerText.trim() : '';
+          document.getElementById(type === 'song' ? "edit-comment-id" : "edit-blog-comment-id").value = commentId;
+          document.getElementById(type === 'song' ? "edit-comment-input" : "edit-blog-comment-input").value = currentText;
+          bootstrap.Modal.getOrCreateInstance(document.getElementById(type === 'song' ? "edit-comment-modal" : "edit-blog-comment-modal")).show();
+        };
+
+        window.deletePmpComment = async (type, commentId) => {
+          if (!confirm("Delete this comment permanently?")) return;
+          if (type === 'song') {
+            await fetchData("?action=delete_song_comment", {
+              method: "POST",
+              body: JSON.stringify({ comment_id: commentId })
+            });
+            window.refreshComments(true);
+          } else if (type === 'blog') {
+            await fetchData("?action=delete_blog_comment", {
+              method: "POST",
+              body: JSON.stringify({ comment_id: commentId })
+            });
+            window.refreshBlogComments(true);
+          }
+          showToast("Comment deleted", "success");
+        };
+
         window.openCommentsModal = async (
           songId,
           replyCommentId = null,
@@ -111248,237 +114142,113 @@ SOFTWARE.</div>
             dBtn.classList.toggle("text-white", data.my_reaction === "dislike");
           }
     
+          // Initialize PMP Toolbar in Song Comments Header Form
+          const topToolbarSlot = document.querySelector("#comment-form .pmp-toolbar-slot");
+          if (topToolbarSlot && !topToolbarSlot.hasChildNodes()) {
+            topToolbarSlot.innerHTML = window.getPmpToolbarHtml();
+          }
+
+          const renderContent = (raw) => {
+            let decoded = decodeHTML(raw || "");
+            let parsed = parseUserText(decoded);
+            if (typeof marked !== "undefined") {
+              try { parsed = marked.parse(parsed); } catch (e) {}
+            }
+            return `<div class="rich-text-content" style="font-size: 0.88rem; line-height: 1.65; word-break: break-word;">${parsed}</div>`;
+          };
+
           const buildTree = (comments, parent = null) => {
             const children = comments.filter((c) => c.parent_id == parent);
             if (children.length === 0) return "";
-    
-            const renderContent = (raw) => {
-              let decoded = decodeHTML(raw || "");
-              let parsed = parseUserText(decoded);
-              if (typeof marked !== "undefined") {
-                try {
-                  parsed = marked.parse(parsed);
-                } catch (e) {}
-              }
-              return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
-            };
-    
-            const styleInjection =
-              parent === null
-                ? `
-                <style>
-                  .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
-                  .rich-comment-box img:hover { transform: scale(1.02); }
-                  .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
-                  .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
-                  .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
-                  .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
-                  .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
-                  .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
-                  .rich-comment-box li { margin-bottom: 6px; }
-                  .rich-comment-box p { margin-bottom: 12px; }
-                  .rich-comment-box p:last-child { margin-bottom: 0; }
-                  .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
-                  .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
-                  .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
-                  .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
-                  .phpmusic-comments-action-btn:active { transform: scale(0.95); }
-                  .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                  .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                  @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-                </style>
-              `
-            : "";
-    
-            if (parent === null) {
-              return (
-                styleInjection +
-                children
-                  .map(
-                    (c) => `
-                      <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
-                        <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
-                          <div class="position-relative">
-                            <img src="?action=get_profile_picture&id=${c.u_id}"
-                                 class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
-                                 data-userid="${c.u_id}"
-                                 data-artist="${encodeURIComponent(c.artist)}"
-                                 style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
-                                 onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
-                                 onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
-                            ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
-                          </div>
-                        </div>
-    
-                        <div class="flex-grow-1" style="min-width: 0;">
-                          <div class="d-flex justify-content-between align-items-start mb-2">
-                            <div class="d-flex align-items-center flex-wrap gap-2">
-                              <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                    data-userid="${c.u_id}"
-                                    data-artist="${encodeURIComponent(c.artist)}"
-                                    style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
-                                    onmouseover="this.style.textDecoration='underline'"
-                                    onmouseout="this.style.textDecoration='none'">
-                                ${escapeHTML(c.artist)}
-                              </span>
-                              <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
-                                <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                              </span>
-                            </div>
-                            ${
-                              currentUser &&
-                              (currentUser.id == c.u_id ||
-                                currentUser.status === "super_admin" ||
-                                currentUser.is_admin == 1)
-                                ? `
-                              <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                                <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                                <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                  <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                  <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                                </ul>
-                              </div>
-                            `
-                                : ""
-                            }
-                          </div>
-    
-                          <div class="p-3 mb-3 rounded-4">
-                            ${renderContent(c.content)}
-                          </div>
-    
-                          ${
-                            currentUser
-                              ? `
-                          <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                            <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
-                              <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
-                              <span>${c.like_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
-                              <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
-                              <span>${c.dislike_count || 0}</span>
-                            </button>
-    
-                            <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
-                              <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
-                            </button>
-                          </div>
-                          `
-                              : `
-                          <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white fs-5"></i> ${c.like_count || 0}</span>
-                            <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white fs-5"></i> ${c.dislike_count || 0}</span>
-                          </div>
-                          `
-                          }
-                          <div class="mt-4">${buildTree(comments, c.id)}</div>
-                        </div>
-                      </div>
-                    `,
-                  )
-                .join("")
-              );
-            } else {
-              const repliesHtml = children
-                .map(
-                  (c) => `
-                    <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-secondary rounded-4 p-2" style="animation: slideFadeIn 0.3s ease forwards;">
-                      <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                        <img src="?action=get_profile_picture&id=${c.u_id}"
-                             class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
-                             data-userid="${c.u_id}"
-                             data-artist="${encodeURIComponent(c.artist)}"
-                             style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                             onmouseover="this.style.transform='scale(1.15)'"
-                             onmouseout="this.style.transform='scale(1)'">
-                      </div>
-  
-                      <div class="flex-grow-1" style="min-width: 0;">
-                        <div class="d-flex justify-content-between align-items-start mb-1">
-                          <div class="d-flex align-items-center flex-wrap gap-2">
-                            <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                  data-userid="${c.u_id}"
-                                  data-artist="${encodeURIComponent(c.artist)}"
-                                  style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                  onmouseover="this.style.textDecoration='underline'"
-                                  onmouseout="this.style.textDecoration='none'">
-                              ${escapeHTML(c.artist)}
-                            </span>
-                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
-                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                            </span>
-                          </div>
-                          ${
-                            currentUser &&
-                            (currentUser.id == c.u_id ||
-                              currentUser.status === "super_admin" ||
-                              currentUser.is_admin == 1)
-                              ? `
-                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                <li><button class="dropdown-item edit-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                <li><button class="dropdown-item text-danger delete-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                              </ul>
-                            </div>
-                          `
-                              : ""
-                          }
-                        </div>
-  
-                        <div class="p-2 mb-2">
-                          ${renderContent(c.content)}
-                        </div>
-  
-                        ${
-                          currentUser
-                            ? `
-                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                          <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 10px; font-size: 0.8rem;">
-                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
-                            <span>${c.like_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 10px; font-size: 0.8rem;">
-                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
-                            <span>${c.dislike_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 10px; font-size: 0.8rem;">
-                            <i class="bi bi-chat-left-text"></i> Reply
-                          </button>
-                        </div>
-                        `
-                            : `
-                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
-                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-white"></i> ${c.like_count || 0}</span>
-                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-white"></i> ${c.dislike_count || 0}</span>
-                        </div>
-                        `
-                        }
-                        <div class="mt-2">${buildTree(comments, c.id)}</div>
-                      </div>
-                    </div>
-                  `,
-                )
-                .join("");
-    
+
+            return children.map((c) => {
+              const canManage = currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+              const repliesHTML = buildTree(comments, c.id);
+
               return `
-                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
-                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
-                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
-                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                <div class="comment-tree-node" id="song-comm-${c.id}">
+                  <img src="?action=get_profile_picture&id=${c.u_id}" class="rounded-circle shadow-sm flex-shrink-0 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="width:36px; height:36px; object-fit:cover; background:#1e1e24;" alt="" onerror="this.src='?action=get_app_icon'">
+                  <div style="flex:1; min-width:0;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span class="user-profile-link fw-bold text-white hover-underline" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="font-size:0.85rem; cursor:pointer;">${escapeHTML(c.artist)}</span>
+                      <span style="font-size:0.75rem; color:var(--ytm-secondary-text);">${timeAgo(c.created_at)}</span>
                     </div>
-                    View ${children.length} ${children.length === 1 ? "reply" : "replies"}
-                  </button>
-                  <div id="comment-reply-container-${parent}" class="d-none mt-2 pt-2">
-                    ${repliesHtml}
+                    <div style="margin-top:0.25rem;" id="comm-text-${c.id}">
+                      ${renderContent(c.content)}
+                    </div>
+
+                    <div class="comment-actions-bar">
+                      <button type="button" class="btn-action-react ${c.my_reaction === 'like' ? 'active' : ''}" onclick="window.handleSongCommentReaction(${c.id}, 'like', this)">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      <button type="button" class="btn-action-react ${c.my_reaction === 'dislike' ? 'active' : ''}" onclick="window.handleSongCommentReaction(${c.id}, 'dislike', this)">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+
+                      ${currentUser ? `<a href="javascript:;" class="btn-action-reply" onclick="window.togglePmpReplyBox('song', ${c.id})"><i class="bi bi-reply-fill"></i> Reply</a>` : ''}
+                      ${canManage ? `
+                        <a href="javascript:;" onclick="window.openPmpEditComment('song', ${c.id})"><i class="bi bi-pencil"></i> Edit</a>
+                        <a href="javascript:;" class="btn-action-delete" onclick="window.deletePmpComment('song', ${c.id})"><i class="bi bi-trash2"></i> Delete</a>
+                      ` : ''}
+                    </div>
+
+                    <!-- Inline Reply Accordion Box -->
+                    <div id="song-reply-box-${c.id}" style="display:none; margin-top:0.6rem;">
+                      <form onsubmit="window.submitPmpReply(event, 'song', ${activeCommentSongId}, ${c.id})" style="display:flex; flex-direction:column; gap:0.4rem;">
+                        <div class="unified-editor-box">
+                          <div class="editor-tab-header">
+                            <div class="d-flex align-items-center gap-1">
+                              <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                                <i class="bi bi-pencil-square"></i> Edit
+                              </button>
+                              <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                                <i class="bi bi-eye"></i> Preview
+                              </button>
+                            </div>
+                          </div>
+                          <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                            <div class="pmp-toolbar-slot"></div>
+                            <textarea name="content" class="form-control text-white border-0 shadow-none p-2" placeholder="Write reply..." required style="min-height:70px; resize:vertical; background:transparent !important; font-size:0.88rem; line-height:1.5;"></textarea>
+                          </div>
+                          <div class="comment-preview-pane rich-text-content" style="display:none; min-height:70px; padding:0.8rem; overflow-y:auto;"></div>
+                        </div>
+                        <div style="display:flex; justify-content:flex-end; gap:0.4rem;">
+                          <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 fw-bold" style="font-size:0.75rem;" onclick="window.togglePmpReplyBox('song', ${c.id})">Cancel</button>
+                          <button type="submit" class="btn btn-sm btn-danger rounded-pill px-3 py-1 fw-bold" style="font-size:0.75rem;">Reply</button>
+                        </div>
+                      </form>
+                    </div>
+
+                    ${repliesHTML ? `<div class="comment-replies-list">${repliesHTML}</div>` : ''}
                   </div>
                 </div>
               `;
+            }).join('');
+          };
+
+          window.handleSongCommentReaction = async (commentId, reaction, btnEl) => {
+            if (!currentUser) return showToast("Please login", "error");
+            const icon = btnEl.querySelector("i");
+            const span = btnEl.querySelector("span");
+            let count = parseInt(span.textContent) || 0;
+            const isFilled = icon.classList.contains("bi-hand-thumbs-up-fill") || icon.classList.contains("bi-hand-thumbs-down-fill");
+
+            if (isFilled) {
+              icon.className = `bi bi-hand-thumbs-${reaction}`;
+              btnEl.classList.remove("active");
+              span.textContent = Math.max(0, count - 1);
+            } else {
+              icon.className = `bi bi-hand-thumbs-${reaction}-fill`;
+              btnEl.classList.add("active");
+              span.textContent = count + 1;
             }
+
+            fetchData("?action=toggle_comment_reaction", {
+              method: "POST",
+              body: JSON.stringify({ comment_id: commentId, reaction: reaction })
+            });
           };
     
           const commentsList = document.getElementById("comments-list");
@@ -112036,7 +114806,59 @@ SOFTWARE.</div>
             window.refreshBlogComments(true);
           }
         });
-    
+
+        window.openPhpboardEdit = (type, id, encContent) => {
+          const rawContent = decodeURIComponent(encContent || "");
+          document.getElementById("edit-phpboard-id").value = id;
+          document.getElementById("edit-phpboard-type").value = type;
+          const input = document.getElementById("edit-phpboard-input");
+          if (input) input.value = decodeHTML(rawContent);
+
+          const slot = document.querySelector("#edit-phpboard-form .pmp-toolbar-slot");
+          if (slot && typeof window.getPmpToolbarHtml === "function") {
+            slot.innerHTML = window.getPmpToolbarHtml();
+          }
+
+          bootstrap.Modal.getOrCreateInstance(
+            document.getElementById("edit-phpboard-modal"),
+          ).show();
+        };
+
+        window.deletePhpboardPost = async (type, id) => {
+          let pwd = "";
+          if (!currentUser || (currentUser.status !== "super_admin" && currentUser.is_admin != 1)) {
+            pwd = prompt("Enter post deletion password (leave empty if you posted while logged in):");
+            if (pwd === null) return; // User canceled
+          } else {
+            if (!confirm(`Permanently delete this ${type}?`)) return;
+          }
+
+          const res = await fetchData("?action=delete_phpboard_post", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: `type=${type}&id=${id}&password=${encodeURIComponent(pwd)}`,
+          });
+
+          if (res && res.status === "success") {
+            requestCache.clear();
+            showToast(`${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully.`, "success");
+            if (type === "thread" && currentView.type === "phpboard_thread") {
+              loadView({
+                type: "phpboard_channel",
+                param: currentView.param,
+                sort: "newest",
+                filter: "",
+              });
+            } else {
+              loadView(currentView);
+            }
+          } else {
+            showToast(res?.message || "Failed to delete post. Invalid password.", "error");
+          }
+        };
+
         const editPhpBoardForm = document.getElementById("edit-phpboard-form");
         if (editPhpBoardForm) {
           editPhpBoardForm.addEventListener("submit", async (e) => {
@@ -120976,251 +123798,113 @@ SOFTWARE.</div>
             dBtn.classList.toggle("text-danger", data.my_reaction === "dislike");
           }
     
+          // Initialize PMP Toolbar in Blog Comments Header Form
+          const topToolbarSlot = document.querySelector("#blog-comment-form .pmp-toolbar-slot");
+          if (topToolbarSlot && !topToolbarSlot.hasChildNodes()) {
+            topToolbarSlot.innerHTML = window.getPmpToolbarHtml();
+          }
+
+          const renderContent = (raw) => {
+            let decoded = decodeHTML(raw || "");
+            let parsed = parseUserText(decoded);
+            if (typeof marked !== "undefined") {
+              try { parsed = marked.parse(parsed); } catch (e) {}
+            }
+            return `<div class="rich-text-content" style="font-size: 0.88rem; line-height: 1.65; word-break: break-word;">${parsed}</div>`;
+          };
+
           const buildTree = (comments, parent = null) => {
             const children = comments.filter((c) => c.parent_id == parent);
             if (children.length === 0) return "";
-    
-            const renderContent = (raw) => {
-              let decoded = decodeHTML(raw || "");
-              let parsed = parseUserText(decoded);
-              if (typeof marked !== "undefined") {
-                try {
-                  parsed = marked.parse(parsed);
-                } catch (e) {}
-              }
-              return `<div class="rich-comment-box" style="font-size: 0.95rem; line-height: 1.6; word-break: break-word; color: #f1f1f1;">${parsed}</div>`;
-            };
-    
-            const styleInjection =
-              parent === null
-                ? `
-                    <style>
-                      .rich-comment-box img, .rich-comment-box video, .rich-comment-box iframe { max-width: 100%; max-height: 400px; border-radius: 12px; margin: 10px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); object-fit: contain; background: #000; transition: transform 0.3s ease; }
-                      .rich-comment-box img:hover { transform: scale(1.02); }
-                      .rich-comment-box a { color: #3ea6ff; text-decoration: none; font-weight: 500; padding: 2px 4px; border-radius: 4px; transition: all 0.2s ease; }
-                      .rich-comment-box a:hover { color: #fff; background: rgba(62,166,255,0.2); }
-                      .rich-comment-box blockquote { border-left: 4px solid #ff0055; padding: 12px 20px; margin: 16px 0; background: linear-gradient(90deg, rgba(255,0,85,0.1) 0%, transparent 100%); border-radius: 0 12px 12px 0; color: #ddd; font-style: italic; font-size: 1.05rem; }
-                      .rich-comment-box pre { background: #080808; padding: 16px; border-radius: 12px; border: 1px solid #222; overflow-x: auto; margin: 16px 0; box-shadow: inset 0 4px 10px rgba(0,0,0,0.5); }
-                      .rich-comment-box code { font-family: 'Consolas', 'Courier New', monospace; background: rgba(255,255,255,0.08); padding: 3px 6px; border-radius: 6px; font-size: 0.85em; color: #ff8888; }
-                      .rich-comment-box ul, .rich-comment-box ol { padding-left: 24px; margin-bottom: 12px; }
-                      .rich-comment-box li { margin-bottom: 6px; }
-                      .rich-comment-box p { margin-bottom: 12px; }
-                      .rich-comment-box p:last-child { margin-bottom: 0; }
-                      .rich-comment-box .mention-link { color: #ff4da6; background: rgba(255,77,166,0.15); padding: 2px 8px; border-radius: 12px; transition: 0.2s; border: 1px solid rgba(255,77,166,0.3); display: inline-block; font-weight: bold; }
-                      .rich-comment-box .mention-link:hover { background: rgba(255,77,166,0.3); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,77,166,0.3); }
-                      .phpmusic-comments-action-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50px; padding: 6px 16px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: rgba(255,255,255,0.05); color: #aaa; border: 1px solid rgba(255,255,255,0.02); cursor: pointer; backdrop-filter: blur(4px); }
-                      .phpmusic-comments-action-btn:hover { background: rgba(255,255,255,0.15); color: #fff; transform: scale(1.05); border-color: rgba(255,255,255,0.1); }
-                      .phpmusic-comments-action-btn:active { transform: scale(0.95); }
-                      .phpmusic-comments-action-btn.active-like { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }
-                      .phpmusic-comments-action-btn.active-dislike { color: #fff; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); text-shadow: 0 0 8px rgba(255,255,255,0.3); }                @keyframes slideFadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-                    </style>
-                  `
-                : "";
-    
-            if (parent === null) {
-              return (
-                styleInjection +
-                children
-                  .map(
-                    (c) => `
-                    <div class="d-flex gap-3 mb-4 position-relative" style="animation: slideFadeIn 0.4s ease forwards;">
-                      <div class="d-flex flex-column align-items-center" style="width: 50px; flex-shrink: 0;">
-                        <div class="position-relative">
-                          <img src="?action=get_profile_picture&id=${c.u_id}"
-                               class="rounded-circle shadow-lg ${c.is_disabled ? "" : "user-profile-link"}"
-                               data-userid="${c.u_id}"
-                               data-artist="${encodeURIComponent(c.artist)}"
-                               style="width:50px; height:50px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 2px solid rgba(255,255,255,0.08); transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;"
-                               onmouseover="this.style.transform='scale(1.15) rotate(5deg)'; this.style.borderColor='var(--ytm-accent)';"
-                               onmouseout="this.style.transform='scale(1) rotate(0deg)'; this.style.borderColor='rgba(255,255,255,0.08)';">
-                          ${c.u_id == currentUser?.id ? `<span class="position-absolute bottom-0 end-0 bg-success border border-secondary rounded-circle shadow-sm" style="width: 14px; height: 14px; z-index: 2;" title="You"></span>` : ""}
-                        </div>
-                      </div>
-  
-                      <div class="flex-grow-1" style="min-width: 0;">
-                        <div class="d-flex justify-content-between align-items-start mb-2">
-                          <div class="d-flex align-items-center flex-wrap gap-2">
-                            <span class="fw-bolder text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                  data-userid="${c.u_id}"
-                                  data-artist="${encodeURIComponent(c.artist)}"
-                                  style="font-size: 1rem; cursor:${c.is_disabled ? "default" : "pointer"}; letter-spacing: 0.3px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);"
-                                  onmouseover="this.style.textDecoration='underline'"
-                                  onmouseout="this.style.textDecoration='none'">
-                              ${escapeHTML(c.artist)}
-                            </span>
-                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.75rem; opacity: 0.8; background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 50px;">
-                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                            </span>
-                          </div>
-                          ${
-                            currentUser &&
-                            (currentUser.id == c.u_id ||
-                              currentUser.status === "super_admin" ||
-                              currentUser.is_admin == 1)
-                              ? `
-                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                              </ul>
-                            </div>
-                          `
-                              : ""
-                          }
-                        </div>
-  
-                        <div class="p-3 mb-3 rounded-4">
-                          ${renderContent(c.content)}
-                        </div>
-  
-                        ${
-                          currentUser
-                            ? `
-                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" title="Like">
-                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"} fs-5"></i>
-                            <span>${c.like_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" title="Dislike">
-                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"} fs-5"></i>
-                            <span>${c.dislike_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${c.id}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" title="Reply to ${escapeHTML(c.artist)}">
-                            <i class="bi bi-chat-left-text fs-5"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
-                          </button>
-                        </div>
-                        `
-                            : `
-                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.9rem;">
-                          <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info fs-5"></i> ${c.like_count || 0}</span>
-                          <span class="d-flex align-items-center gap-2 bg-dark px-3 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger fs-5"></i> ${c.dislike_count || 0}</span>
-                        </div>
-                        `
-                        }
-                        <div class="mt-4">${buildTree(comments, c.id)}</div>
-                      </div>
-                    </div>
-                  `,
-                )
-                .join("")
-              );
-            } else {
-              const repliesHtml = children
-                .map((c) => {
-                  let replyQuoteHtml = "";
-                  if (c.reply_to_id && c.reply_content && c.reply_to_id != parent) {
-                    const cleanRep = decodeHTML(c.reply_content).replace(
-                      /<[^>]*>?/gm,
-                      "",
-                    );
-                    replyQuoteHtml = `
-                      <div class="chat-reply-quote mb-2" onclick="const target=document.querySelector('.reply-anchor-${c.reply_to_id}'); if(target) target.scrollIntoView({behavior:'smooth', block:'center'});" title="Click to jump to post" style="background: rgba(0,0,0,0.2); border-left: 3px solid var(--ytm-accent); padding: 6px 10px; border-radius: 0 6px 6px 0; font-size: 0.85rem; cursor: pointer;">
-                        <strong class="text-info">${escapeHTML(c.reply_sender || "Someone")}</strong><br>
-                        <span class="text-truncate d-block text-secondary">${escapeHTML(cleanRep)}</span>
-                      </div>
-                    `;
-                  }
-                  return `
-                    <div class="d-flex gap-3 mb-3 position-relative border-start border-top border-dark border-2 rounded-4 p-2 reply-anchor-${c.id}" style="animation: slideFadeIn 0.3s ease forwards; --bs-border-opacity: .5;">
-                      <div class="d-flex flex-column align-items-center" style="width: 36px; flex-shrink: 0;">
-                        <img src="?action=get_profile_picture&id=${c.u_id}"
-                             class="rounded-circle shadow-sm ${c.is_disabled ? "" : "user-profile-link"}"
-                             data-userid="${c.u_id}"
-                             data-artist="${encodeURIComponent(c.artist)}"
-                             style="width:36px; height:36px; object-fit:cover; cursor:${c.is_disabled ? "default" : "pointer"}; border: 1px solid rgba(255,255,255,0.15); transition: transform 0.3s;"
-                             onmouseover="this.style.transform='scale(1.15)'"
-                             onmouseout="this.style.transform='scale(1)'">
-                        ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `<div class="mt-2" style="width: 2px; flex-grow: 1; background: linear-gradient(to bottom, rgba(255,255,255,0.1), transparent); border-radius: 2px;"></div>` : ""}
-                      </div>
-  
-                      <div class="flex-grow-1" style="min-width: 0;">
-                        <div class="d-flex justify-content-between align-items-start mb-1">
-                          <div class="d-flex align-items-center flex-wrap gap-2">
-                            <span class="fw-bold text-white ${c.is_disabled ? "" : "user-profile-link"}"
-                                  data-userid="${c.u_id}"
-                                  data-artist="${encodeURIComponent(c.artist)}"
-                                  style="font-size: 0.85rem; cursor:${c.is_disabled ? "default" : "pointer"}; text-shadow: 0 1px 2px rgba(0,0,0,0.5);"
-                                  onmouseover="this.style.textDecoration='underline'"
-                                  onmouseout="this.style.textDecoration='none'">
-                              ${escapeHTML(c.artist)}
-                            </span>
-                            <span class="text-secondary d-flex align-items-center gap-1 fw-medium" style="font-size: 0.7rem; opacity: 0.7;">
-                              <i class="bi bi-clock"></i> ${timeAgo(c.created_at)}
-                            </span>
-                          </div>
-                          ${
-                            currentUser &&
-                            (currentUser.id == c.u_id ||
-                              currentUser.status === "super_admin" ||
-                              currentUser.is_admin == 1)
-                              ? `
-                            <div class="position-relative flex-shrink-0 ms-2 custom-opt-dropdown">
-                              <button class="btn btn-link text-secondary p-0 border-0 custom-opt-toggle" type="button"><i class="bi bi-three-dots-vertical fs-5"></i></button>
-                              <ul class="dropdown-menu dropdown-menu-dark shadow-lg border-secondary custom-opt-menu" style="position: absolute; right: 0; top: 100%; display: none; z-index: 1060; min-width: 150px;">
-                                <li><button class="dropdown-item edit-blog-comment-btn" data-id="${c.id}" data-content="${escapeHTML(c.content)}"><i class="bi bi-pencil"></i> Edit</button></li>
-                                <li><button class="dropdown-item text-danger delete-blog-comment-btn" data-id="${c.id}"><i class="bi bi-trash2"></i> Delete</button></li>
-                              </ul>
-                            </div>
-                          `
-                              : ""
-                          }
-                        </div>
-  
-                        <div class="p-2 mb-2">
-                          ${replyQuoteHtml}
-                          ${renderContent(c.content)}
-                        </div>
-  
-                        ${
-                          currentUser
-                            ? `
-                        <div class="d-flex align-items-center flex-wrap gap-2 mt-1">
-                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "like" ? "active-like" : ""}" data-id="${c.id}" data-reaction="like" style="padding: 4px 12px; font-size: 0.85rem;">
-                            <i class="bi ${c.my_reaction === "like" ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up"}"></i>
-                            <span>${c.like_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn blog-comment-react-btn ${c.my_reaction === "dislike" ? "active-dislike" : ""}" data-id="${c.id}" data-reaction="dislike" style="padding: 4px 12px; font-size: 0.85rem;">
-                            <i class="bi ${c.my_reaction === "dislike" ? "bi-hand-thumbs-down-fill" : "bi-hand-thumbs-down"}"></i>
-                            <span>${c.dislike_count || 0}</span>
-                          </button>
-  
-                          <button class="phpmusic-comments-action-btn blog-reply-btn" data-id="${c.id}" data-root-id="${parent}" data-username="${escapeHTML(c.artist)}" data-content="${escapeHTML(c.content)}" style="padding: 4px 12px; font-size: 0.85rem;">
-                            <i class="bi bi-chat-left-text"></i> Reply ${children.filter((ch) => ch.parent_id == c.id).length > 0 ? `(${children.filter((ch) => ch.parent_id == c.id).length})` : ""}
-                          </button>
-                        </div>
-                        `
-                            : `
-                        <div class="d-flex align-items-center gap-3 text-secondary fw-bold" style="font-size: 0.8rem;">
-                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-up-fill text-info"></i> ${c.like_count || 0}</span>
-                          <span class="d-flex align-items-center gap-1 bg-dark px-2 py-1 rounded-pill border border-secondary shadow-sm"><i class="bi bi-hand-thumbs-down-fill text-danger"></i> ${c.dislike_count || 0}</span>
-                        </div>
-                        `
-                        }
-                        <div class="mt-2">${buildTree(comments, c.id)}</div>
-                      </div>
-                    </div>
-                  `;
-              })
-              .join("");
-    
+
+            return children.map((c) => {
+              const canManage = currentUser && (currentUser.id == c.u_id || currentUser.status === "super_admin" || currentUser.is_admin == 1);
+              const repliesHTML = buildTree(comments, c.id);
+
               return `
-                <div class="ps-3 ms-2 position-relative mt-2" style="border-left: 2px solid rgba(255,255,255,0.1); border-radius: 0 0 0 12px;">
-                  <button class="btn btn-link text-info text-decoration-none fw-bold d-inline-flex align-items-center gap-2 toggle-replies-btn mb-3 p-0" data-target="blog-comment-reply-container-${parent}" style="font-size: 0.95rem; transition: 0.2s;" onmouseover="this.style.textShadow='0 0 12px rgba(0, 188, 212, 0.6)'" onmouseout="this.style.textShadow='none'">
-                    <div class="d-flex align-items-center justify-content-center bg-info text-dark rounded-circle shadow-sm" style="width: 24px; height: 24px;">
-                      <i class="bi bi-chevron-down" style="font-size: 0.85rem;"></i>
+                <div class="comment-tree-node" id="blog-comm-${c.id}">
+                  <img src="?action=get_profile_picture&id=${c.u_id}" class="rounded-circle shadow-sm flex-shrink-0 user-profile-link" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="width:36px; height:36px; object-fit:cover; background:#1e1e24;" alt="" onerror="this.src='?action=get_app_icon'">
+                  <div style="flex:1; min-width:0;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                      <span class="user-profile-link fw-bold text-white hover-underline" data-userid="${c.u_id}" data-artist="${encodeURIComponent(c.artist)}" style="font-size:0.85rem; cursor:pointer;">${escapeHTML(c.artist)}</span>
+                      <span style="font-size:0.75rem; color:var(--ytm-secondary-text);">${timeAgo(c.created_at)}</span>
                     </div>
-                    View ${children.length} ${children.length === 1 ? "reply" : "replies"}
-                  </button>
-                  <div id="blog-comment-reply-container-${parent}" class="d-none mt-2 pt-2">
-                    ${repliesHtml}
+                    <div style="margin-top:0.25rem;" id="comm-text-${c.id}">
+                      ${renderContent(c.content)}
+                    </div>
+
+                    <div class="comment-actions-bar">
+                      <button type="button" class="btn-action-react ${c.my_reaction === 'like' ? 'active' : ''}" onclick="window.handleBlogCommentReaction(${c.id}, 'like', this)">
+                        <i class="bi ${c.my_reaction === 'like' ? 'bi-hand-thumbs-up-fill' : 'bi-hand-thumbs-up'}"></i>
+                        <span>${c.like_count || 0}</span>
+                      </button>
+                      <button type="button" class="btn-action-react ${c.my_reaction === 'dislike' ? 'active' : ''}" onclick="window.handleBlogCommentReaction(${c.id}, 'dislike', this)">
+                        <i class="bi ${c.my_reaction === 'dislike' ? 'bi-hand-thumbs-down-fill' : 'bi-hand-thumbs-down'}"></i>
+                        <span>${c.dislike_count || 0}</span>
+                      </button>
+
+                      ${currentUser ? `<a href="javascript:;" class="btn-action-reply" onclick="window.togglePmpReplyBox('blog', ${c.id})"><i class="bi bi-reply-fill"></i> Reply</a>` : ''}
+                      ${canManage ? `
+                        <a href="javascript:;" onclick="window.openPmpEditComment('blog', ${c.id})"><i class="bi bi-pencil"></i> Edit</a>
+                        <a href="javascript:;" class="btn-action-delete" onclick="window.deletePmpComment('blog', ${c.id})"><i class="bi bi-trash2"></i> Delete</a>
+                      ` : ''}
+                    </div>
+
+                    <!-- Inline Reply Accordion Box -->
+                    <div id="blog-reply-box-${c.id}" style="display:none; margin-top:0.6rem;">
+                      <form onsubmit="window.submitPmpReply(event, 'blog', '${window.activeBlogPublicId}', ${c.id})" style="display:flex; flex-direction:column; gap:0.4rem;">
+                        <div class="unified-editor-box">
+                          <div class="editor-tab-header">
+                            <div class="d-flex align-items-center gap-1">
+                              <button type="button" class="editor-tab-btn active" onclick="window.switchPmpCommentTab(this, 'edit')">
+                                <i class="bi bi-pencil-square"></i> Edit
+                              </button>
+                              <button type="button" class="editor-tab-btn" onclick="window.switchPmpCommentTab(this, 'preview')">
+                                <i class="bi bi-eye"></i> Preview
+                              </button>
+                            </div>
+                          </div>
+                          <div class="comment-edit-pane" style="display:flex; flex-direction:column; flex:1;">
+                            <div class="pmp-toolbar-slot"></div>
+                            <textarea name="content" class="form-control text-white border-0 shadow-none p-2" placeholder="Write reply..." required style="min-height:70px; resize:vertical; background:transparent !important; font-size:0.88rem; line-height:1.5;"></textarea>
+                          </div>
+                          <div class="comment-preview-pane rich-text-content" style="display:none; min-height:70px; padding:0.8rem; overflow-y:auto;"></div>
+                        </div>
+                        <div style="display:flex; justify-content:flex-end; gap:0.4rem;">
+                          <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3 py-1 fw-bold" style="font-size:0.75rem;" onclick="window.togglePmpReplyBox('blog', ${c.id})">Cancel</button>
+                          <button type="submit" class="btn btn-sm btn-danger rounded-pill px-3 py-1 fw-bold" style="font-size:0.75rem;">Reply</button>
+                        </div>
+                      </form>
+                    </div>
+
+                    ${repliesHTML ? `<div class="comment-replies-list">${repliesHTML}</div>` : ''}
                   </div>
                 </div>
               `;
+            }).join('');
+          };
+
+          window.handleBlogCommentReaction = async (commentId, reaction, btnEl) => {
+            if (!currentUser) return showToast("Please login", "error");
+            const icon = btnEl.querySelector("i");
+            const span = btnEl.querySelector("span");
+            let count = parseInt(span.textContent) || 0;
+            const isFilled = icon.classList.contains("bi-hand-thumbs-up-fill") || icon.classList.contains("bi-hand-thumbs-down-fill");
+
+            if (isFilled) {
+              icon.className = `bi bi-hand-thumbs-${reaction}`;
+              btnEl.classList.remove("active");
+              span.textContent = Math.max(0, count - 1);
+            } else {
+              icon.className = `bi bi-hand-thumbs-${reaction}-fill`;
+              btnEl.classList.add("active");
+              span.textContent = count + 1;
             }
+
+            fetchData("?action=toggle_blog_comment_reaction", {
+              method: "POST",
+              body: JSON.stringify({ comment_id: commentId, reaction: reaction })
+            });
           };
     
           const commentsList = document.getElementById("blog-comments-list");
