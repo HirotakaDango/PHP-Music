@@ -964,6 +964,497 @@ function resolve_song_file_by_bitrate($song_id, $original_file, $preferred_kbps 
   return $file_path;
 }
 
+// PUBLIC NEWS & RELEASES PORTAL (?access=news)
+if (isset($_GET['access']) && $_GET['access'] === 'news') {
+  // Clean any corrupted output buffers to prevent gzip decoding crashes on shared hosts
+  while (ob_get_level() > 0) {
+    @ob_end_clean();
+  }
+
+  $db = get_db();
+
+  // Self-Healing Schema: Guarantee table and indexes exist immediately
+  try {
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS news_articles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        slug TEXT UNIQUE,
+        category TEXT DEFAULT 'Announcements',
+        summary TEXT,
+        content TEXT NOT NULL,
+        cover_image TEXT,
+        author_id INTEGER DEFAULT 0,
+        is_pinned INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'published',
+        views INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_news_status ON news_articles(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_news_pinned ON news_articles(is_pinned, created_at);
+    ");
+  } catch (\Throwable $e) {}
+
+  $article_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+  $slug = trim($_GET['slug'] ?? '');
+  $category = trim($_GET['cat'] ?? '');
+  $search = trim($_GET['search'] ?? '');
+  $p = max(1, (int)($_GET['p'] ?? 1));
+  $limit = 12;
+  $offset = ($p - 1) * $limit;
+
+  $is_admin_viewer = !empty($_SESSION['admin_logged_in']) ? 1 : 0;
+
+  // 1. Single Article View Mode
+  $single_article = null;
+  if ($article_id > 0 || !empty($slug)) {
+    try {
+      $where_id = $article_id > 0 ? "n.id = ?" : "n.slug = ?";
+      $stmt = $db->prepare("
+        SELECT n.*, u.artist as author_name, u.email as author_email
+        FROM news_articles n
+        LEFT JOIN users u ON n.author_id = u.id
+        WHERE {$where_id} AND (n.status = 'published' OR ? = 1)
+        LIMIT 1
+      ");
+      $stmt->execute([$article_id > 0 ? $article_id : $slug, $is_admin_viewer]);
+      $single_article = $stmt->fetch(PDO::FETCH_ASSOC);
+
+      if ($single_article) {
+        $db->prepare("UPDATE news_articles SET views = views + 1 WHERE id = ?")->execute([$single_article['id']]);
+        $single_article['views']++;
+      }
+    } catch (\Throwable $e) {}
+  }
+
+  // 2. Multi-Article List View Mode
+  $categories = ['Announcements', 'Updates', 'Releases', 'Community', 'Security', 'Maintenance'];
+  $where_clauses = ["n.status = 'published'"];
+  $params = [];
+
+  if (!empty($category)) {
+    $where_clauses[] = "n.category = ?";
+    $params[] = $category;
+  }
+  if (!empty($search)) {
+    $where_clauses[] = "(n.title LIKE ? OR n.summary LIKE ? OR n.content LIKE ?)";
+    $term = "%{$search}%";
+    array_push($params, $term, $term, $term);
+  }
+
+  $where_sql = "WHERE " . implode(' AND ', $where_clauses);
+  $total_count = 0;
+  $total_pages = 1;
+  $news_list = [];
+
+  try {
+    $stmt_cnt = $db->prepare("SELECT COUNT(*) FROM news_articles n {$where_sql}");
+    $stmt_cnt->execute($params);
+    $total_count = (int)$stmt_cnt->fetchColumn();
+    $total_pages = max(1, ceil($total_count / $limit));
+
+    $stmt_list = $db->prepare("
+      SELECT n.*, u.artist as author_name
+      FROM news_articles n
+      LEFT JOIN users u ON n.author_id = u.id
+      {$where_sql}
+      ORDER BY n.is_pinned DESC, n.created_at DESC
+      LIMIT " . (int)$limit . " OFFSET " . (int)$offset . "
+    ");
+    $stmt_list->execute($params);
+    $news_list = $stmt_list->fetchAll(PDO::FETCH_ASSOC);
+  } catch (\Throwable $e) {}
+
+  // Open Graph Social Preview Variables
+  $site_name = 'PHP Music';
+  try {
+    $stmt_sname = $db->query("SELECT value FROM site_settings WHERE key = 'site_name' LIMIT 1");
+    if ($stmt_sname) $site_name = $stmt_sname->fetchColumn() ?: 'PHP Music';
+  } catch (\Throwable $e) {}
+
+  $page_title = $single_article ? htmlspecialchars($single_article['title']) . " &bull; {$site_name} News" : "News &amp; Releases &bull; {$site_name}";
+  $meta_desc = $single_article ? htmlspecialchars($single_article['summary'] ?: substr(strip_tags($single_article['content']), 0, 160)) : "Official release notes, announcements, and system updates.";
+  $meta_cover = ($single_article && $single_article['cover_image']) ? $single_article['cover_image'] : '?action=og_image';
+  ?>
+  <!DOCTYPE html>
+  <html lang="en" data-bs-theme="dark">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+      <title><?php echo $page_title; ?></title>
+      <meta name="description" content="<?php echo $meta_desc; ?>">
+      <meta property="og:title" content="<?php echo $page_title; ?>">
+      <meta property="og:description" content="<?php echo $meta_desc; ?>">
+      <meta property="og:image" content="<?php echo htmlspecialchars($meta_cover); ?>">
+      <meta property="og:type" content="article">
+
+      <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+      
+      <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+      <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+        window.mermaid = mermaid;
+      </script>
+
+      <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+          background-color: #050508;
+          color: #f1f1f5;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          min-height: 100dvh;
+          display: flex;
+          flex-direction: column;
+        }
+        .news-navbar {
+          background: rgba(10, 10, 14, 0.85);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          position: sticky;
+          top: 0;
+          z-index: 1000;
+        }
+        .news-card {
+          background: #0e0e14;
+          border: 1px solid rgba(255, 255, 255, 0.07);
+          border-radius: 20px;
+          overflow: hidden;
+          transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+          display: flex;
+          flex-direction: column;
+          height: 100%;
+          text-decoration: none;
+          color: inherit;
+        }
+        .news-card:hover {
+          transform: translateY(-4px);
+          border-color: rgba(255, 0, 68, 0.45);
+          box-shadow: 0 14px 40px rgba(255, 0, 68, 0.12);
+          color: inherit;
+        }
+        .news-cover-wrap {
+          aspect-ratio: 16 / 9;
+          width: 100%;
+          background: #121218;
+          position: relative;
+          overflow: hidden;
+        }
+        .news-cover-img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          transition: transform 0.3s ease;
+        }
+        .news-card:hover .news-cover-img {
+          transform: scale(1.04);
+        }
+        .news-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.25rem;
+          font-size: 0.72rem;
+          font-weight: 700;
+          padding: 0.25rem 0.65rem;
+          border-radius: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.4px;
+        }
+        .badge-cat {
+          background: rgba(56, 189, 248, 0.15);
+          color: #38bdf8;
+          border: 1px solid rgba(56, 189, 248, 0.3);
+        }
+        .badge-pin {
+          background: rgba(251, 191, 36, 0.18);
+          color: #fbbf24;
+          border: 1px solid rgba(251, 191, 36, 0.35);
+        }
+        .markdown-render {
+          font-size: 0.98rem;
+          line-height: 1.75;
+          color: #d8d8e6;
+        }
+        .markdown-render h1, .markdown-render h2, .markdown-render h3 {
+          color: #ffffff;
+          font-weight: 700;
+          margin-top: 2rem;
+          margin-bottom: 1rem;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          padding-bottom: 0.4rem;
+        }
+        .markdown-render p { margin-bottom: 1.25rem; }
+        .markdown-render img {
+          max-width: 100%;
+          height: auto;
+          border-radius: 14px;
+          margin: 1.5rem 0;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .markdown-render pre {
+          background: #09090e !important;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 14px;
+          padding: 1.2rem;
+          overflow-x: auto;
+        }
+        .markdown-render blockquote {
+          border-left: 4px solid #ff0044;
+          background: rgba(255, 0, 68, 0.05);
+          padding: 0.8rem 1.2rem;
+          border-radius: 0 12px 12px 0;
+          margin: 1.5rem 0;
+          font-style: italic;
+        }
+        .markdown-render table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 1.5rem 0;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 12px;
+          overflow: hidden;
+        }
+        .markdown-render th, .markdown-render td {
+          padding: 0.75rem 1rem;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .markdown-render th {
+          background: rgba(255, 255, 255, 0.04);
+          color: #ff0044;
+          font-weight: 700;
+        }
+        .btn-news-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.4rem;
+          padding: 0.45rem 1.1rem;
+          border-radius: 20px;
+          font-size: 0.82rem;
+          font-weight: 600;
+          text-decoration: none;
+          transition: all 0.15s ease;
+          cursor: pointer;
+        }
+        .btn-news-primary { background: #ff0044; color: #fff; border: 1px solid #ff0044; }
+        .btn-news-primary:hover { background: #cc0033; color: #fff; }
+        .btn-news-secondary { background: rgba(255, 255, 255, 0.05); color: #f1f1f5; border: 1px solid rgba(255, 255, 255, 0.12); }
+        .btn-news-secondary:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+      </style>
+    </head>
+    <body>
+      <!-- Top Navigation -->
+      <nav class="news-navbar py-2 px-3 px-md-4">
+        <div class="container-xl d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <a href="?access=news" class="d-flex align-items-center gap-2 text-decoration-none">
+            <div style="width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #ff0044, #990022); display: flex; align-items: center; justify-content: center; color: #fff; box-shadow: 0 4px 12px rgba(255, 0, 68, 0.35);">
+              <i class="bi bi-newspaper fs-5"></i>
+            </div>
+            <div>
+              <span class="fw-bold text-white fs-6 d-block lh-1"><?php echo htmlspecialchars($site_name); ?></span>
+              <span class="text-secondary font-monospace" style="font-size: 0.7rem;">News &amp; Releases</span>
+            </div>
+          </a>
+        </div>
+      </nav>
+
+      <!-- Main Container -->
+      <main class="container-xl py-4 flex-grow-1">
+        <?php if ($single_article): ?>
+          <!-- Single Article Reader -->
+          <div class="mx-auto" style="max-width: 860px;">
+            <div class="mb-4">
+              <a href="?access=news" class="btn-news-pill btn-news-secondary mb-3">
+                <i class="bi bi-arrow-left"></i> Back to News
+              </a>
+
+              <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+                <span class="news-badge badge-cat"><?php echo htmlspecialchars($single_article['category']); ?></span>
+                <?php if ($single_article['is_pinned']): ?>
+                  <span class="news-badge badge-pin"><i class="bi bi-pin-angle-fill"></i> Pinned</span>
+                <?php endif; ?>
+                <span class="text-secondary small font-monospace ms-auto">
+                  <i class="bi bi-eye me-1"></i><?php echo number_format($single_article['views']); ?> reads &bull; <?php echo date('M j, Y', strtotime($single_article['created_at'])); ?>
+                </span>
+              </div>
+
+              <h1 class="fw-bold text-white mb-2" style="font-size: clamp(1.8rem, 3.5vw, 2.5rem); letter-spacing: -0.5px;">
+                <?php echo htmlspecialchars($single_article['title']); ?>
+              </h1>
+
+              <?php if (!empty($single_article['summary'])): ?>
+                <p class="text-secondary fs-5 mb-3" style="line-height: 1.5; font-weight: 400;">
+                  <?php echo htmlspecialchars($single_article['summary']); ?>
+                </p>
+              <?php endif; ?>
+
+              <div class="d-flex align-items-center gap-2 pt-2 border-top border-secondary border-opacity-25 text-secondary small">
+                <span>By <strong class="text-white"><?php echo htmlspecialchars($single_article['author_name'] ?: 'System Team'); ?></strong></span>
+                <?php if (!empty($single_article['updated_at']) && $single_article['updated_at'] !== $single_article['created_at']): ?>
+                  <span>&bull; Updated <?php echo date('M j, Y', strtotime($single_article['updated_at'])); ?></span>
+                <?php endif; ?>
+              </div>
+            </div>
+
+            <?php if (!empty($single_article['cover_image'])): ?>
+              <div class="rounded-4 overflow-hidden mb-4 border border-secondary border-opacity-25 shadow-lg">
+                <img src="<?php echo htmlspecialchars($single_article['cover_image']); ?>" alt="Cover" style="width: 100%; max-height: 440px; object-fit: cover;">
+              </div>
+            <?php endif; ?>
+
+            <!-- Rendered Markdown Body -->
+            <article class="markdown-render" id="article-markdown-body">
+              <div class="text-center py-5 text-secondary"><span class="spinner-border spinner-border-sm me-2 text-danger"></span>Rendering article content...</div>
+            </article>
+            <textarea id="raw-article-markdown" style="display: none;"><?php echo htmlspecialchars($single_article['content']); ?></textarea>
+
+            <div class="pt-4 mt-5 border-top border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <a href="?access=news" class="btn-news-pill btn-news-secondary"><i class="bi bi-arrow-left"></i> All Articles</a>
+              <button type="button" class="btn-news-pill btn-news-secondary" onclick="navigator.clipboard.writeText(window.location.href); this.innerText='Link Copied!';"><i class="bi bi-share"></i> Share Article</button>
+            </div>
+          </div>
+
+          <script>
+            document.addEventListener('DOMContentLoaded', async () => {
+              const raw = document.getElementById('raw-article-markdown')?.value || '';
+              const target = document.getElementById('article-markdown-body');
+              if (!target) return;
+
+              try {
+                marked.use({ gfm: true, breaks: true });
+                let html = marked.parse(raw);
+                target.innerHTML = DOMPurify.sanitize(html);
+
+                target.querySelectorAll('pre code').forEach((el) => {
+                  if (!el.classList.contains('language-mermaid')) {
+                    hljs.highlightElement(el);
+                  }
+                });
+
+                if (window.mermaid) {
+                  const mermaidBlocks = target.querySelectorAll('code.language-mermaid');
+                  for (let i = 0; i < mermaidBlocks.length; i++) {
+                    const block = mermaidBlocks[i];
+                    const code = block.textContent;
+                    const id = 'mermaid_news_' + Date.now() + '_' + i;
+                    try {
+                      const { svg } = await window.mermaid.render(id, code);
+                      const div = document.createElement('div');
+                      div.style.textAlign = 'center';
+                      div.style.margin = '1.5rem 0';
+                      div.style.overflow = 'auto';
+                      div.innerHTML = svg;
+                      block.parentElement.replaceWith(div);
+                    } catch (e) {}
+                  }
+                }
+              } catch (e) {
+                target.innerText = raw;
+              }
+            });
+          </script>
+
+        <?php else: ?>
+          <!-- News Catalog Feed -->
+          <div class="mb-4">
+            <div class="p-4 rounded-4 bg-black border border-secondary border-opacity-25 mb-4 position-relative overflow-hidden" style="background: radial-gradient(circle at top right, rgba(255, 0, 68, 0.15), transparent 70%), #0c0c12;">
+              <h1 class="fw-bold text-white mb-2" style="font-size: clamp(1.6rem, 3vw, 2.2rem);">News &amp; System Releases</h1>
+              <p class="text-secondary small mb-3" style="max-width: 580px;">Follow along with latest feature releases, developer logs, system announcements, and community bulletins.</p>
+              
+              <form method="GET" action="" class="d-flex align-items-center gap-2 flex-wrap">
+                <input type="hidden" name="access" value="news">
+                <div class="d-flex align-items-center bg-dark border border-secondary rounded-pill px-3 flex-grow-1" style="min-width: 220px; max-width: 460px; height: 38px;">
+                  <input type="text" name="search" class="form-control bg-transparent text-white border-0 shadow-none p-0 flex-grow-1" style="font-size: 0.85rem;" placeholder="Search articles, keywords..." value="<?php echo htmlspecialchars($search); ?>">
+                  <button type="submit" class="btn btn-link text-secondary p-0 ms-2 text-decoration-none d-flex align-items-center justify-content-center" title="Search">
+                    <i class="bi bi-search text-secondary" style="font-size: 0.85rem;"></i>
+                  </button>
+                </div>
+                <button type="submit" class="btn-news-pill btn-news-primary d-flex align-items-center gap-2">
+                  <span>Search</span>
+                  <i class="bi bi-search"></i>
+                </button>
+              </form>
+            </div>
+
+            <!-- Category Filter Badges -->
+            <div class="d-flex align-items-center gap-2 overflow-x-auto pb-2 mb-4" style="scrollbar-width: none;">
+              <a href="?access=news<?php echo $search ? '&search=' . urlencode($search) : ''; ?>" class="btn-news-pill <?php echo empty($category) ? 'btn-news-primary' : 'btn-news-secondary'; ?>">All</a>
+              <?php foreach ($categories as $cat): ?>
+                <a href="?access=news&cat=<?php echo urlencode($cat); ?><?php echo $search ? '&search=' . urlencode($search) : ''; ?>" class="btn-news-pill <?php echo $category === $cat ? 'btn-news-primary' : 'btn-news-secondary'; ?>">
+                  <?php echo $cat; ?>
+                </a>
+              <?php endforeach; ?>
+            </div>
+
+            <!-- Articles Grid -->
+            <?php if (empty($news_list)): ?>
+              <div class="text-center py-5 text-secondary">
+                <i class="bi bi-newspaper fs-1 d-block mb-2 opacity-50"></i>
+                <h5>No articles published yet.</h5>
+                <p class="small">Check back soon for latest platform announcements.</p>
+              </div>
+            <?php else: ?>
+              <div class="row g-4">
+                <?php foreach ($news_list as $n):
+                  $cover = $n['cover_image'] ? $n['cover_image'] : '?action=og_image';
+                  $date_str = date('M j, Y', strtotime($n['created_at']));
+                ?>
+                  <div class="col-12 col-md-6 col-lg-4">
+                    <a href="?access=news&id=<?php echo $n['id']; ?>" class="news-card">
+                      <div class="news-cover-wrap">
+                        <img src="<?php echo htmlspecialchars($cover); ?>" class="news-cover-img" alt="Cover" loading="lazy" onerror="this.src='?action=get_app_icon'">
+                        <span class="position-absolute top-0 start-0 m-3 news-badge badge-cat"><?php echo htmlspecialchars($n['category']); ?></span>
+                        <?php if ($n['is_pinned']): ?>
+                          <span class="position-absolute top-0 end-0 m-3 news-badge badge-pin"><i class="bi bi-pin-angle-fill"></i> Pinned</span>
+                        <?php endif; ?>
+                      </div>
+                      <div class="p-3 d-flex flex-column flex-grow-1">
+                        <div class="d-flex align-items-center justify-content-between text-secondary small font-monospace mb-2" style="font-size: 0.72rem;">
+                          <span><i class="bi bi-calendar-event me-1"></i><?php echo $date_str; ?></span>
+                          <span><i class="bi bi-eye me-1"></i><?php echo number_format($n['views']); ?> reads</span>
+                        </div>
+                        <h5 class="fw-bold text-white mb-2" style="font-size: 1.05rem; line-height: 1.35;">
+                          <?php echo htmlspecialchars($n['title']); ?>
+                        </h5>
+                        <p class="text-secondary small mb-3 flex-grow-1" style="line-height: 1.5;">
+                          <?php echo htmlspecialchars($n['summary'] ?: substr(strip_tags($n['content']), 0, 120) . '...'); ?>
+                        </p>
+                        <div class="d-flex align-items-center text-danger fw-bold small mt-auto">
+                          Read Full Article <i class="bi bi-arrow-right ms-1"></i>
+                        </div>
+                      </div>
+                    </a>
+                  </div>
+                <?php endforeach; ?>
+              </div>
+
+              <!-- Pagination -->
+              <?php if ($total_pages > 1): ?>
+                <div class="d-flex justify-content-center align-items-center gap-1 mt-5">
+                  <a href="?access=news&cat=<?php echo urlencode($category); ?>&search=<?php echo urlencode($search); ?>&p=1" class="btn-news-pill btn-news-secondary <?php echo ($p <= 1) ? 'disabled' : ''; ?>">«</a>
+                  <?php for ($i = max(1, $p - 2); $i <= min($total_pages, $p + 2); $i++): ?>
+                    <a href="?access=news&cat=<?php echo urlencode($category); ?>&search=<?php echo urlencode($search); ?>&p=<?php echo $i; ?>" class="btn-news-pill <?php echo ($p == $i) ? 'btn-news-primary' : 'btn-news-secondary'; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a href="?access=news&cat=<?php echo urlencode($category); ?>&search=<?php echo urlencode($search); ?>&p=<?php echo $total_pages; ?>" class="btn-news-pill btn-news-secondary <?php echo ($p >= $total_pages) ? 'disabled' : ''; ?>">»</a>
+                </div>
+              <?php endif; ?>
+            <?php endif; ?>
+          </div>
+        <?php endif; ?>
+      </main>
+
+    </body>
+  </html>
+  <?php
+  exit;
+}
+
 // SERVER REQUIREMENTS & SYSTEM DIAGNOSTICS PAGE (?access=requirements)
 if (isset($_GET['access']) && $_GET['access'] === 'requirements') {
   $checks = [];
@@ -1698,19 +2189,33 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.5');
-define('PAGE_SIZE', 25);
-define('ADMIN_PAGE_SIZE', 20);
+define('APP_VERSION', '12.6');
 
-// Dynamically fetch songs daily upload limit from database
+// Dynamically fetch custom page size limits and daily quotas from database
+$custom_page_size = 25;
+$custom_admin_page_size = 20;
 $daily_upload_limit_val = 10;
+
 try {
   $db_limit_chk = get_db();
+  $fetched_page_size = $db_limit_chk->query("SELECT value FROM site_settings WHERE key = 'site_page_size'")->fetchColumn();
+  if ($fetched_page_size !== false && (int)$fetched_page_size > 0) {
+    $custom_page_size = max(5, min(500, (int)$fetched_page_size));
+  }
+
+  $fetched_admin_page_size = $db_limit_chk->query("SELECT value FROM site_settings WHERE key = 'site_admin_page_size'")->fetchColumn();
+  if ($fetched_admin_page_size !== false && (int)$fetched_admin_page_size > 0) {
+    $custom_admin_page_size = max(5, min(500, (int)$fetched_admin_page_size));
+  }
+
   $fetched_limit = $db_limit_chk->query("SELECT value FROM site_settings WHERE key = 'songs_daily_limit'")->fetchColumn();
   if ($fetched_limit !== false) {
     $daily_upload_limit_val = (int)$fetched_limit;
   }
 } catch (Exception $e) {}
+
+define('PAGE_SIZE', $custom_page_size);
+define('ADMIN_PAGE_SIZE', $custom_admin_page_size);
 define('DAILY_UPLOAD_LIMIT', $daily_upload_limit_val);
 
 $auto_scan = true; // Auto scan songs during empty or new files
@@ -1822,10 +2327,14 @@ function get_phpboard_channels_data($db) {
   }
 }
 
-function get_db() {
+function get_db(bool $reset = false): ?PDO {
   static $db = null;
-  if ($db !== null) return $db; 
-  
+  if ($reset) {
+    $db = null;
+    return null;
+  }
+  if ($db !== null) return $db;
+
   try {
     // Removed ATTR_PERSISTENT as it causes permanent database locking bugs in SQLite
     $db = new PDO('sqlite:' . DB_FILE, null, null, [
@@ -33401,6 +33910,89 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // SAVE / UPDATE NEWS ARTICLE
+    if (isset($_POST['save_news_article'])) {
+      $db = get_db();
+      $art_id = !empty($_POST['article_id']) ? (int)$_POST['article_id'] : 0;
+      $title = trim(htmlspecialchars($_POST['title'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $category = trim(htmlspecialchars($_POST['category'] ?? 'Announcements', ENT_QUOTES, 'UTF-8'));
+      $summary = trim(htmlspecialchars($_POST['summary'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $content = trim($_POST['content'] ?? '');
+      $status = in_array($_POST['status'] ?? '', ['published', 'draft', 'archived'], true) ? $_POST['status'] : 'published';
+      $is_pinned = !empty($_POST['is_pinned']) ? 1 : 0;
+      $cover_image = trim($_POST['cover_image'] ?? '');
+
+      if (!empty($_FILES['cover_file']['tmp_name']) && is_uploaded_file($_FILES['cover_file']['tmp_name'])) {
+        $cover_dir = MUSIC_DIR . '/uploads/news';
+        if (!is_dir($cover_dir)) @mkdir($cover_dir, 0755, true);
+        $raw_data = @file_get_contents($_FILES['cover_file']['tmp_name']);
+        if ($raw_data) {
+          $fn = 'news_' . date('Ymd_His') . '_' . substr(md5(uniqid()), 0, 6) . '.webp';
+          $dest = $cover_dir . '/' . $fn;
+          $webp = process_image_to_webp($raw_data, 1280, 80, false);
+          if ($webp && @file_put_contents($dest, $webp)) {
+            $cover_image = 'uploads/news/' . $fn;
+          }
+        }
+      }
+
+      $slug = trim($_POST['slug'] ?? '');
+      if (empty($slug)) {
+        $slug = strtolower(trim(preg_replace('/[^A-Za-z0-9-]+/', '-', $title)));
+        $slug = trim($slug, '-');
+      }
+      if (empty($slug)) $slug = 'news-' . time();
+
+      $author_id = (int)($_SESSION['admin_id'] ?? 0);
+
+      if ($art_id > 0) {
+        $stmt = $db->prepare("UPDATE news_articles SET title = ?, slug = ?, category = ?, summary = ?, content = ?, cover_image = ?, is_pinned = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+        $stmt->execute([$title, $slug, $category, $summary, $content, $cover_image, $is_pinned, $status, $art_id]);
+        log_admin_activity($db, $_SESSION['admin_email'], "Updated News Article #{$art_id}: {$title}", 0);
+        $_SESSION['admin_flash_msg'] = "Article '{$title}' updated successfully.";
+      } else {
+        $stmt = $db->prepare("INSERT INTO news_articles (title, slug, category, summary, content, cover_image, author_id, is_pinned, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$title, $slug, $category, $summary, $content, $cover_image, $author_id, $is_pinned, $status]);
+        $new_id = $db->lastInsertId();
+        log_admin_activity($db, $_SESSION['admin_email'], "Published News Article #{$new_id}: {$title}", 0);
+        $_SESSION['admin_flash_msg'] = "News article '{$title}' published.";
+      }
+      header('Location: ?access=admin&page=news_management');
+      exit;
+    }
+
+    // DELETE NEWS ARTICLE
+    if (isset($_POST['delete_news_article'])) {
+      $db = get_db();
+      $del_ids = isset($_POST['article_ids']) && is_array($_POST['article_ids']) ? array_map('intval', $_POST['article_ids']) : [(int)($_POST['article_id'] ?? 0)];
+      $del_ids = array_filter($del_ids);
+
+      if (!empty($del_ids)) {
+        $placeholders = implode(',', array_fill(0, count($del_ids), '?'));
+        $stmt = $db->prepare("SELECT cover_image FROM news_articles WHERE id IN ({$placeholders})");
+        $stmt->execute($del_ids);
+        while ($img = $stmt->fetchColumn()) {
+          if ($img && file_exists(MUSIC_DIR . '/' . $img)) @unlink(MUSIC_DIR . '/' . $img);
+        }
+        $db->prepare("DELETE FROM news_articles WHERE id IN ({$placeholders})")->execute($del_ids);
+        log_admin_activity($db, $_SESSION['admin_email'], "Deleted " . count($del_ids) . " news article(s)", 0);
+        $_SESSION['admin_flash_msg'] = "Deleted " . count($del_ids) . " article(s).";
+      }
+      header('Location: ?access=admin&page=news_management');
+      exit;
+    }
+
+    // TOGGLE NEWS PIN STATE
+    if (isset($_POST['toggle_news_pin'])) {
+      $db = get_db();
+      $pid = (int)$_POST['article_id'];
+      $db->prepare("UPDATE news_articles SET is_pinned = CASE WHEN is_pinned = 1 THEN 0 ELSE 1 END WHERE id = ?")->execute([$pid]);
+      log_admin_activity($db, $_SESSION['admin_email'], "Toggled pin status on News Article #{$pid}", 0);
+      $_SESSION['admin_flash_msg'] = "Pin status updated.";
+      header('Location: ?access=admin&page=news_management');
+      exit;
+    }
+
     // SAVE GENERAL SYSTEM SETTINGS & BRANDING
     if (isset($_POST['save_general_settings'])) {
       $db = get_db();
@@ -33418,9 +34010,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $feat_dms = !empty($_POST['feature_direct_messages']) ? '1' : '0';
       $feat_artworks = !empty($_POST['feature_artworks']) ? '1' : '0';
 
+      $site_page_size = max(5, min(500, (int)($_POST['site_page_size'] ?? 25)));
+      $site_admin_page_size = max(5, min(500, (int)($_POST['site_admin_page_size'] ?? 20)));
+
       $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
       $stmt->execute(['site_name', $site_name]);
       $stmt->execute(['site_tagline', $site_tagline]);
+      $stmt->execute(['site_page_size', (string)$site_page_size]);
+      $stmt->execute(['site_admin_page_size', (string)$site_admin_page_size]);
       $stmt->execute(['site_announcement', $announcement]);
       $stmt->execute(['site_announcement_type', $announcement_type]);
       $stmt->execute(['site_announcement_active', $announcement_active]);
@@ -33431,7 +34028,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $stmt->execute(['feature_direct_messages', $feat_dms]);
       $stmt->execute(['feature_artworks', $feat_artworks]);
 
-      log_admin_activity($db, $_SESSION['admin_email'], 'Saved General System Settings & Module Toggles', 0);
+      log_admin_activity($db, $_SESSION['admin_email'], "Saved General System Settings (Page Limit: {$site_page_size}, Admin Limit: {$site_admin_page_size})", 0);
       $_SESSION['admin_flash_msg'] = "System branding and feature settings saved successfully.";
       header('Location: ?access=admin&page=settings');
       exit;
@@ -33607,12 +34204,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $db->exec("PRAGMA wal_checkpoint(TRUNCATE);");
       } catch (\Throwable $e) {}
 
-      $db = null; // Release database handle
+      // Close open PDO handle to release filesystem locks
+      get_db(true);
+      $db = null;
 
       $renamed = @rename($cur_db_path, $new_db_path);
       if ($renamed) {
-        if (file_exists($cur_db_path . '-wal')) @rename($cur_db_path . '-wal', $new_db_path . '-wal');
-        if (file_exists($cur_db_path . '-shm')) @rename($cur_db_path . '-shm', $new_db_path . '-shm');
+        if (file_exists($cur_db_path . '-wal')) {
+          if (filesize($cur_db_path . '-wal') === 0) {
+            @unlink($cur_db_path . '-wal');
+          } else {
+            @rename($cur_db_path . '-wal', $new_db_path . '-wal');
+          }
+        }
+        if (file_exists($cur_db_path . '-shm')) {
+          @unlink($cur_db_path . '-shm');
+        }
 
         @file_put_contents(__DIR__ . '/.db_config.ini', $new_name);
 
@@ -33642,23 +34249,33 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $filename = 'music_db_' . date('Ymd_His') . ($note ? "_{$note}" : '') . '.sqlite';
       $dest = $bk_dir . '/' . $filename;
 
-      // Attempt to safely flush WAL to main DB file before backup
+      // 1. Flush and truncate WAL frames into the primary database file
       try {
-        $db->exec("PRAGMA wal_checkpoint(PASSIVE);");
+        $db->exec("PRAGMA wal_checkpoint(TRUNCATE);");
       } catch (\Throwable $e) {
-        // Silently bypass lock errors during checkpoint
+        try { $db->exec("PRAGMA wal_checkpoint(RESTART);"); } catch (\Throwable $ex) {
+          try { $db->exec("PRAGMA wal_checkpoint(PASSIVE);"); } catch (\Throwable $ey) {}
+        }
       }
 
       $backup_success = false;
-      
-      // 1. Try safe online backup via VACUUM INTO
+
+      // 2. Try online atomic backup via VACUUM INTO (SQLite 3.27+)
       try {
         $db->exec("VACUUM INTO " . $db->quote($dest));
         $backup_success = true;
       } catch (\Throwable $e) {
-        // 2. Fallback to direct filesystem copy if SQLite is locked
+        // 3. Fallback: Re-checkpoint and copy file directly
+        try { $db->exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (\Throwable $ex) {}
         if (@copy(DB_FILE, $dest)) {
           $backup_success = true;
+          // Normalize snapshot so it does not retain WAL dependency
+          try {
+            $destPdo = new PDO('sqlite:' . $dest, null, null, [PDO::ATTR_TIMEOUT => 5]);
+            $destPdo->exec("PRAGMA journal_mode = DELETE;");
+            $destPdo->exec("VACUUM;");
+            $destPdo = null;
+          } catch (\Throwable $ex) {}
         }
       }
 
@@ -33681,16 +34298,42 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $src = MUSIC_DIR . '/.file_version/db_backups/' . $safe_file;
 
       if (file_exists($src)) {
-        // Create emergency backup of current DB before overwrite
         $bk_dir = MUSIC_DIR . '/.file_version/db_backups';
-        @copy(DB_FILE, $bk_dir . '/pre_restore_' . date('Ymd_His') . '.sqlite');
+        $preRestoreDest = $bk_dir . '/pre_restore_' . date('Ymd_His') . '.sqlite';
 
-        // Copy snapshot over live DB
+        // 1. Checkpoint current live DB before replacement
         try {
           $db->exec("PRAGMA wal_checkpoint(TRUNCATE);");
         } catch (\Throwable $e) {}
+
+        // 2. Snapshot current state as emergency fallback
+        try {
+          $db->exec("VACUUM INTO " . $db->quote($preRestoreDest));
+        } catch (\Throwable $e) {
+          @copy(DB_FILE, $preRestoreDest);
+        }
+
+        // 3. Fully close active database connection to release OS file locks
+        get_db(true);
+        $db = null;
+
+        // 4. Remove stale WAL and shared-memory files to prevent corruption during replay
+        $walFile = DB_FILE . '-wal';
+        $shmFile = DB_FILE . '-shm';
+        if (file_exists($walFile)) @unlink($walFile);
+        if (file_exists($shmFile)) @unlink($shmFile);
+
+        // 5. Overwrite live DB with snapshot
         @copy($src, DB_FILE);
-        log_admin_activity($db, $_SESSION['admin_email'], "Restored database from snapshot: {$safe_file}", 0);
+
+        // 6. Reconnect and reinitialize clean WAL journal
+        try {
+          $newPdo = get_db();
+          $newPdo->exec("PRAGMA journal_mode = WAL;");
+          $newPdo->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+          log_admin_activity($newPdo, $_SESSION['admin_email'], "Restored database from snapshot: {$safe_file}", 0);
+        } catch (\Throwable $e) {}
+
         $_SESSION['admin_flash_msg'] = "Database restored successfully from {$safe_file}.";
       } else {
         $_SESSION['admin_flash_msg'] = "Snapshot file not found.";
@@ -34238,8 +34881,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $db = get_db();
       $before_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
       try {
+        // Flush WAL frames into base file before running VACUUM
+        try { $db->exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (\Throwable $e) {}
         $db->exec("PRAGMA temp_store = FILE;");
         $db->exec("VACUUM;");
+        // Re-truncate WAL to reclaim empty disk frames
+        try { $db->exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (\Throwable $e) {}
         clearstatcache(true, DB_FILE);
         $after_size = file_exists(DB_FILE) ? filesize(DB_FILE) : 0;
         $saved = max(0, $before_size - $after_size);
@@ -36063,7 +36710,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
+  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'news_management', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -36124,6 +36771,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'api' => 'API Keys & Analytics',
     'playground' => 'Interactive API Playground',
     'update' => 'System & Codebase Update',
+    'news_management' => 'News & Announcements Studio',
     'settings' => 'General System Settings & Branding',
     'security' => 'Security, IP Firewall & Threat Defense',
     'pwa' => 'PWA Management',
@@ -37459,6 +38107,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo ($active_p === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Studio</span></a>
               <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('news_management', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=news_management" title="News Management" class="nav-link <?php echo ($active_p === 'news_management') ? 'active' : ''; ?>"><i class="bi bi-newspaper"></i><span>News Studio</span></a>
+              <?php endif; ?>
               <?php if ($is_super_admin_check || in_array('phpboard', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=phpboard" title="PHPBoard Imageboard" class="nav-link <?php echo ($active_p === 'phpboard') ? 'active' : ''; ?>"><i class="bi bi-chat-square-quote-fill"></i><span>PHPBoard Studio</span></a>
               <?php endif; ?>
@@ -38707,6 +39358,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $db = get_db();
             $s_name = $db->query("SELECT value FROM site_settings WHERE key = 'site_name'")->fetchColumn() ?: 'PHP Music';
             $s_tagline = $db->query("SELECT value FROM site_settings WHERE key = 'site_tagline'")->fetchColumn() ?: 'Self-Hosted Music Streaming & Audio Cloud';
+            $s_page_size = (int)($db->query("SELECT value FROM site_settings WHERE key = 'site_page_size'")->fetchColumn() ?: PAGE_SIZE);
+            $s_admin_page_size = (int)($db->query("SELECT value FROM site_settings WHERE key = 'site_admin_page_size'")->fetchColumn() ?: ADMIN_PAGE_SIZE);
             $s_ann = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement'")->fetchColumn() ?: '';
             $s_ann_type = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement_type'")->fetchColumn() ?: 'info';
             $s_ann_on = $db->query("SELECT value FROM site_settings WHERE key = 'site_announcement_active'")->fetchColumn() === '1';
@@ -38766,7 +39419,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.5'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.6'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -38792,6 +39445,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <div class="col-12 col-md-6">
                     <label class="form-label text-secondary small fw-bold mb-1">SITE TAGLINE</label>
                     <input type="text" name="site_tagline" class="admin-pill-input w-100" value="<?php echo htmlspecialchars($s_tagline); ?>">
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pagination & Item Display Limits -->
+              <div class="admin-card p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-list-ol text-success"></i> Pagination &amp; Item Display Limits
+                  </h5>
+                  <span class="admin-badge admin-badge-success">Data Density</span>
+                </div>
+                <div class="row g-3">
+                  <div class="col-12 col-md-6">
+                    <label class="form-label text-secondary small fw-bold mb-1">PLAYER &amp; PUBLIC CATALOG LIMIT (ITEMS / PAGE)</label>
+                    <input type="number" name="site_page_size" class="admin-pill-input w-100 font-monospace" min="5" max="500" value="<?php echo $s_page_size; ?>" required>
+                    <small class="text-secondary d-block mt-1">Controls how many songs, albums, artists, and playlists load per page in the client player (Default: 25).</small>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label class="form-label text-secondary small fw-bold mb-1">ADMIN DASHBOARD TABLES LIMIT (ROWS / PAGE)</label>
+                    <input type="number" name="site_admin_page_size" class="admin-pill-input w-100 font-monospace" min="5" max="500" value="<?php echo $s_admin_page_size; ?>" required>
+                    <small class="text-secondary d-block mt-1">Controls how many records display per page across Users, Songs, Artworks, Logs, and Drives in this panel (Default: 20).</small>
                   </div>
                 </div>
               </div>
@@ -40134,7 +40809,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               $stmt_all_c = $db->query("SELECT DISTINCT country FROM site_analytics WHERE country IS NOT NULL AND country != '' AND country != 'XX' ORDER BY country ASC");
               if ($stmt_all_c) $all_logged_countries = $stmt_all_c->fetchAll(PDO::FETCH_COLUMN);
             } catch (\Throwable $e) {}
-            $analytics_limit = 25;
+            $analytics_limit = ADMIN_PAGE_SIZE;
             $analytics_offset = ($analytics_page - 1) * $analytics_limit;
 
             $date_where = "1=1";
@@ -41061,7 +41736,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $udm_search = trim($_GET['search'] ?? '');
             $udm_sort = $_GET['sort'] ?? 'quota_desc';
             $udm_page = max(1, (int)($_GET['p'] ?? 1));
-            $udm_limit = 25;
+            $udm_limit = ADMIN_PAGE_SIZE;
             $udm_offset = ($udm_page - 1) * $udm_limit;
 
             $users_drive_base = MUSIC_DIR . '/users_drive';
@@ -41718,7 +42393,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <tbody>
                       <?php
                         $rep_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                        $rep_limit = 25;
+                        $rep_limit = ADMIN_PAGE_SIZE;
                         $rep_offset = ($rep_page - 1) * $rep_limit;
 
                         $where_sql = ($active_report_tab === 'resolved') ? "WHERE r.status = 'resolved'" : "WHERE r.status = 'pending'";
@@ -41863,7 +42538,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $rg_diff_filter = strtolower(trim($_GET['diff'] ?? ''));
             $rg_search = trim($_GET['search'] ?? '');
             $rg_page = max(1, (int)($_GET['p'] ?? 1));
-            $rg_limit = 25;
+            $rg_limit = ADMIN_PAGE_SIZE;
             $rg_offset = ($rg_page - 1) * $rg_limit;
 
             $date_clause = "1=1";
@@ -42525,7 +43200,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <tbody>
                       <?php
                         $app_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                        $app_limit = 25;
+                        $app_limit = ADMIN_PAGE_SIZE;
                         $app_offset = ($app_page - 1) * $app_limit;
 
                         $where_sql = ($active_appeal_tab === 'history') ? "WHERE a.status != 'pending'" : "WHERE a.status = 'pending'";
@@ -43135,7 +43810,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $bm_filter = $_GET['bitrate_filter'] ?? '';
             $bm_sort = $_GET['sort'] ?? 'bitrate_desc';
             $bm_page = max(1, (int)($_GET['p'] ?? 1));
-            $bm_limit = 25;
+            $bm_limit = ADMIN_PAGE_SIZE;
             $bm_offset = ($bm_page - 1) * $bm_limit;
 
             // Global Bitrate Analytics
@@ -43585,7 +44260,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $type_filter = $_GET['type'] ?? '';
             $rating_filter = $_GET['rating'] ?? ($active_art_tab === 'moderation' ? 'r18' : '');
             $a_page = max(1, (int)($_GET['p'] ?? 1));
-            $a_limit = 24;
+            $a_limit = ADMIN_PAGE_SIZE;
             $a_offset = ($a_page - 1) * $a_limit;
 
             // Global Metrics from PHPMusicPost
@@ -43712,7 +44387,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 $db = get_db();
                 $raw_filter = $_GET['raw_filter'] ?? 'linked';
                 $raw_page = max(1, (int)($_GET['p'] ?? 1));
-                $raw_limit = 25;
+                $raw_limit = ADMIN_PAGE_SIZE;
                 $raw_offset = ($raw_page - 1) * $raw_limit;
                 $raw_search = trim($_GET['search'] ?? '');
 
@@ -44341,7 +45016,498 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               new bootstrap.Modal(document.getElementById('adminEditArtworkModal')).show();
             }
           </script>
-        
+
+        <?php elseif (($_GET['page'] ?? '') === 'news_management'): ?>
+          <?php
+            $db = get_db();
+            $nm_search = trim($_GET['search'] ?? '');
+            $nm_cat = trim($_GET['cat'] ?? '');
+            $nm_status = trim($_GET['status'] ?? '');
+            $nm_page = max(1, (int)($_GET['p'] ?? 1));
+            $nm_limit = defined('ADMIN_PAGE_SIZE') ? ADMIN_PAGE_SIZE : 20;
+            $nm_offset = ($nm_page - 1) * $nm_limit;
+
+            $total_news = (int)($db->query("SELECT COUNT(*) FROM news_articles")->fetchColumn() ?: 0);
+            $published_news = (int)($db->query("SELECT COUNT(*) FROM news_articles WHERE status = 'published'")->fetchColumn() ?: 0);
+            $draft_news = (int)($db->query("SELECT COUNT(*) FROM news_articles WHERE status = 'draft'")->fetchColumn() ?: 0);
+            $total_reads = (int)($db->query("SELECT SUM(views) FROM news_articles")->fetchColumn() ?: 0);
+
+            $where_clauses = ["1=1"];
+            $params = [];
+
+            if ($nm_search !== '') {
+              $where_clauses[] = "(n.title LIKE ? OR n.summary LIKE ? OR n.content LIKE ? OR n.slug LIKE ?)";
+              $term = "%{$nm_search}%";
+              array_push($params, $term, $term, $term, $term);
+            }
+            if ($nm_cat !== '') {
+              $where_clauses[] = "n.category = ?";
+              $params[] = $nm_cat;
+            }
+            if ($nm_status !== '') {
+              $where_clauses[] = "n.status = ?";
+              $params[] = $nm_status;
+            }
+
+            $where_sql = "WHERE " . implode(' AND ', $where_clauses);
+
+            $stmt_cnt = $db->prepare("SELECT COUNT(*) FROM news_articles {$where_sql}");
+            $stmt_cnt->execute($params);
+            $total_filtered = (int)$stmt_cnt->fetchColumn();
+            $total_pages = max(1, ceil($total_filtered / $nm_limit));
+
+            $stmt_list = $db->prepare("
+              SELECT n.*, u.artist as author_name
+              FROM news_articles n
+              LEFT JOIN users u ON n.author_id = u.id
+              {$where_sql}
+              ORDER BY n.is_pinned DESC, n.created_at DESC
+              LIMIT {$nm_limit} OFFSET {$nm_offset}
+            ");
+            $stmt_list->execute($params);
+            $articles = $stmt_list->fetchAll(PDO::FETCH_ASSOC);
+
+            $categories = ['Announcements', 'Updates', 'Releases', 'Community', 'Security', 'Maintenance'];
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">News &amp; Announcements Studio</h1>
+              <div class="small text-secondary mt-1">Publish platform updates, release notes, and community announcements with full Markdown and Mermaid support.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <a href="?access=news" target="_blank" class="admin-btn-pill">
+                <i class="bi bi-box-arrow-up-right text-info"></i> View Public Portal
+              </a>
+              <button type="button" class="admin-btn-pill admin-btn-primary" onclick="openCreateNewsModal()">
+                <i class="bi bi-plus-circle-fill"></i> New Article
+              </button>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metrics KPI Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Articles</span>
+                    <span class="text-danger"><i class="bi bi-newspaper fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_news); ?></div>
+                  <small class="text-secondary"><?php echo number_format($published_news); ?> live &bull; <?php echo number_format($draft_news); ?> drafts</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Published Live</span>
+                    <span class="text-success"><i class="bi bi-broadcast fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($published_news); ?></div>
+                  <small class="text-secondary">Visible to public &amp; logged-in users</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Draft Staging</span>
+                    <span class="text-warning"><i class="bi bi-pencil-square fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($draft_news); ?></div>
+                  <small class="text-secondary">Unpublished working drafts</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Cumulative Reads</span>
+                    <span class="text-info"><i class="bi bi-eye-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_reads); ?></div>
+                  <small class="text-secondary">Total article impressions</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Filter Toolbar -->
+            <form method="GET" action="" class="admin-toolbar-wrap d-flex align-items-center justify-content-between gap-2 flex-wrap mb-3">
+              <input type="hidden" name="access" value="admin">
+              <input type="hidden" name="page" value="news_management">
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <select name="cat" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="">All Categories</option>
+                  <?php foreach ($categories as $cat): ?>
+                    <option value="<?php echo $cat; ?>" <?php echo $nm_cat === $cat ? 'selected' : ''; ?>><?php echo $cat; ?></option>
+                  <?php endforeach; ?>
+                </select>
+                <select name="status" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="">All Statuses</option>
+                  <option value="published" <?php echo $nm_status === 'published' ? 'selected' : ''; ?>>Published</option>
+                  <option value="draft" <?php echo $nm_status === 'draft' ? 'selected' : ''; ?>>Draft</option>
+                  <option value="archived" <?php echo $nm_status === 'archived' ? 'selected' : ''; ?>>Archived</option>
+                </select>
+              </div>
+              <div class="position-relative" style="min-width: 220px;">
+                <input type="text" name="search" class="admin-pill-input w-100 ps-3 pe-4" placeholder="Search news..." value="<?php echo htmlspecialchars($nm_search); ?>">
+                <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-2 text-danger p-0"><i class="bi bi-search"></i></button>
+              </div>
+            </form>
+
+            <!-- Articles Table Console -->
+            <div class="admin-card mb-4">
+              <div class="table-responsive">
+                <table class="admin-table align-middle text-nowrap">
+                  <thead>
+                    <tr>
+                      <th style="width: 50px;">Cover</th>
+                      <th>Article Title</th>
+                      <th>Category</th>
+                      <th>Status</th>
+                      <th>Views</th>
+                      <th>Author</th>
+                      <th>Published Date</th>
+                      <th class="text-end" style="width: 170px;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php if (empty($articles)): ?>
+                      <tr><td colspan="8" class="text-center py-5 text-secondary">No news articles found. Create your first post!</td></tr>
+                    <?php else: foreach ($articles as $art):
+                      $art_json = htmlspecialchars(json_encode($art), ENT_QUOTES, 'UTF-8');
+                      $cover = $art['cover_image'] ? $art['cover_image'] : '?action=get_app_icon';
+                    ?>
+                      <tr>
+                        <td>
+                          <img src="<?php echo htmlspecialchars($cover); ?>" class="rounded" style="width: 44px; height: 44px; object-fit: cover; background: #000; border: 1px solid rgba(255,255,255,0.1);" onerror="this.src='?action=get_app_icon'">
+                        </td>
+                        <td>
+                          <div class="d-flex align-items-center gap-2">
+                            <?php if ($art['is_pinned']): ?>
+                              <span class="badge bg-warning text-dark font-monospace px-1 py-0" style="font-size: 0.65rem;"><i class="bi bi-pin-angle-fill"></i> PINNED</span>
+                            <?php endif; ?>
+                            <strong class="text-white text-truncate d-block" style="max-width: 260px;" title="<?php echo htmlspecialchars($art['title']); ?>">
+                              <?php echo htmlspecialchars($art['title']); ?>
+                            </strong>
+                          </div>
+                          <small class="text-secondary font-monospace" style="font-size: 0.72rem;">/<?php echo htmlspecialchars($art['slug']); ?></small>
+                        </td>
+                        <td>
+                          <span class="admin-badge admin-badge-info"><?php echo htmlspecialchars($art['category']); ?></span>
+                        </td>
+                        <td>
+                          <?php if ($art['status'] === 'published'): ?>
+                            <span class="admin-badge admin-badge-success">Published</span>
+                          <?php elseif ($art['status'] === 'draft'): ?>
+                            <span class="admin-badge admin-badge-warning">Draft</span>
+                          <?php else: ?>
+                            <span class="admin-badge admin-badge-secondary">Archived</span>
+                          <?php endif; ?>
+                        </td>
+                        <td class="font-monospace text-secondary small">
+                          <i class="bi bi-eye me-1 text-info"></i><?php echo number_format($art['views']); ?>
+                        </td>
+                        <td class="small text-white">
+                          <?php echo htmlspecialchars($art['author_name'] ?: 'System'); ?>
+                        </td>
+                        <td class="text-secondary small font-monospace">
+                          <?php echo date('M j, Y H:i', strtotime($art['created_at'])); ?>
+                        </td>
+                        <td class="text-end">
+                          <div class="d-flex align-items-center justify-content-end gap-1">
+                            <a href="?access=news&id=<?php echo $art['id']; ?>" target="_blank" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;" title="View Live Article">
+                              <i class="bi bi-box-arrow-up-right"></i>
+                            </a>
+                            <form method="POST" action="?access=admin&page=news_management" class="m-0 d-inline">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="article_id" value="<?php echo $art['id']; ?>">
+                              <button type="submit" name="toggle_news_pin" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; <?php echo $art['is_pinned'] ? 'color:#fbbf24;border-color:#fbbf24;' : ''; ?>" title="<?php echo $art['is_pinned'] ? 'Unpin' : 'Pin to Top'; ?>">
+                                <i class="bi <?php echo $art['is_pinned'] ? 'bi-pin-angle-fill' : 'bi-pin-angle'; ?>"></i>
+                              </button>
+                            </form>
+                            <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick='openEditNewsModal(<?php echo $art_json; ?>)'>
+                              <i class="bi bi-pencil-fill"></i>
+                            </button>
+                            <form method="POST" action="?access=admin&page=news_management" class="m-0 d-inline" onsubmit="return confirm('Permanently delete this article?');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="delete_news_article" value="1">
+                              <input type="hidden" name="article_id" value="<?php echo $art['id']; ?>">
+                              <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Delete Article">
+                                <i class="bi bi-trash"></i>
+                              </button>
+                            </form>
+                          </div>
+                        </td>
+                      </tr>
+                    <?php endforeach; endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Pagination -->
+            <?php if ($total_pages > 1): ?>
+              <div class="admin-pagination mb-4">
+                <a class="admin-page-btn <?php echo ($nm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=news_management&cat=<?php echo urlencode($nm_cat); ?>&status=<?php echo urlencode($nm_status); ?>&search=<?php echo urlencode($nm_search); ?>&p=1">«</a>
+                <a class="admin-page-btn <?php echo ($nm_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=news_management&cat=<?php echo urlencode($nm_cat); ?>&status=<?php echo urlencode($nm_status); ?>&search=<?php echo urlencode($nm_search); ?>&p=<?php echo $nm_page - 1; ?>">‹</a>
+                <?php
+                  $sp = max(1, $nm_page - 2);
+                  $ep = min($total_pages, $sp + 4);
+                  if ($ep - $sp < 4) $sp = max(1, $ep - 4);
+                  for ($i = $sp; $i <= $ep; $i++):
+                ?>
+                  <a class="admin-page-btn <?php echo ($nm_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=news_management&cat=<?php echo urlencode($nm_cat); ?>&status=<?php echo urlencode($nm_status); ?>&search=<?php echo urlencode($nm_search); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                <?php endfor; ?>
+                <a class="admin-page-btn <?php echo ($nm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=news_management&cat=<?php echo urlencode($nm_cat); ?>&status=<?php echo urlencode($nm_status); ?>&search=<?php echo urlencode($nm_search); ?>&p=<?php echo $nm_page + 1; ?>">›</a>
+                <a class="admin-page-btn <?php echo ($nm_page >= $total_pages) ? 'disabled' : ''; ?>" href="?access=admin&page=news_management&cat=<?php echo urlencode($nm_cat); ?>&status=<?php echo urlencode($nm_status); ?>&search=<?php echo urlencode($nm_search); ?>&p=<?php echo $total_pages; ?>">»</a>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- News Composer / Editor Modal with Full Markdown Toolbar -->
+          <div class="modal fade" id="adminNewsModal" tabindex="-1" data-bs-backdrop="static">
+            <div class="modal-dialog modal-dialog-centered modal-xl" style="max-width: 1050px;">
+              <div class="modal-content" style="background-color: #0d0d12; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;">
+                <div class="modal-header border-0 pb-2 border-bottom border-secondary border-opacity-25">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2" id="newsModalTitle">
+                    <i class="bi bi-pencil-square text-danger"></i> Compose News Article
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=news_management" enctype="multipart/form-data" id="news-editor-form">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_news_article" value="1">
+                  <input type="hidden" name="article_id" id="news-article-id" value="0">
+
+                  <div class="modal-body p-4 text-start">
+                    <div class="row g-3 mb-3">
+                      <div class="col-12 col-md-8">
+                        <label class="form-label text-secondary small fw-bold mb-1">HEADLINE TITLE</label>
+                        <input type="text" name="title" id="news-title-inp" class="admin-pill-input w-100 font-monospace" placeholder="e.g. Version 13.0 Released with Studio Upgrades" required>
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <label class="form-label text-secondary small fw-bold mb-1">CATEGORY</label>
+                        <select name="category" id="news-cat-inp" class="admin-pill-select w-100">
+                          <?php foreach ($categories as $cat): ?>
+                            <option value="<?php echo $cat; ?>"><?php echo $cat; ?></option>
+                          <?php endforeach; ?>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                      <div class="col-12 col-md-4">
+                        <label class="form-label text-secondary small fw-bold mb-1">URL SLUG (OPTIONAL)</label>
+                        <input type="text" name="slug" id="news-slug-inp" class="admin-pill-input w-100 font-monospace" placeholder="auto-generated-from-title">
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <label class="form-label text-secondary small fw-bold mb-1">PUBLICATION STATUS</label>
+                        <select name="status" id="news-status-inp" class="admin-pill-select w-100">
+                          <option value="published">Published (Live)</option>
+                          <option value="draft">Draft (Private)</option>
+                          <option value="archived">Archived</option>
+                        </select>
+                      </div>
+                      <div class="col-12 col-md-4 d-flex align-items-center">
+                        <div class="p-2 px-3 rounded-4 bg-black border border-secondary border-opacity-25 w-100 d-flex align-items-center justify-content-between mt-auto" style="height: 40px;">
+                          <label class="form-check-label text-white small fw-bold m-0" for="news-pin-inp"><i class="bi bi-pin-angle-fill text-warning me-1"></i> Pin to Top</label>
+                          <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="is_pinned" id="news-pin-inp" value="1" style="cursor: pointer;">
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">SUMMARY / EXCERPT (OPTIONAL)</label>
+                      <input type="text" name="summary" id="news-summary-inp" class="admin-pill-input w-100" placeholder="Brief 1-2 sentence lead snippet for lists and social cards">
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                      <div class="col-12 col-md-6">
+                        <label class="form-label text-secondary small fw-bold mb-1">COVER IMAGE URL (OPTIONAL)</label>
+                        <input type="text" name="cover_image" id="news-cover-url-inp" class="admin-pill-input w-100 font-monospace" placeholder="https://... or uploads/news/cover.webp">
+                      </div>
+                      <div class="col-12 col-md-6">
+                        <label class="form-label text-secondary small fw-bold mb-1">OR UPLOAD NEW COVER IMAGE</label>
+                        <input type="file" name="cover_file" class="form-control bg-dark text-white border-secondary" accept="image/*" style="border-radius: 20px; font-size: 0.8rem;">
+                      </div>
+                    </div>
+
+                    <!-- Exact Markdown Formatting Toolbar Specified by User -->
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <label class="form-label text-secondary small fw-bold mb-0">ARTICLE MARKDOWN BODY</label>
+                      <button type="button" class="btn btn-sm btn-link text-info text-decoration-none p-0 small" onclick="toggleNewsPreview()"><i class="bi bi-eye"></i> Toggle Live Preview</button>
+                    </div>
+
+                    <div class="rounded-3 border border-secondary border-opacity-25 overflow-hidden">
+                      <div class="hdm-toolbar" id="hdm-toolbar" style="background:#141418; border-bottom:1px solid rgba(255,255,255,0.08); display:flex; align-items:center; gap:0.3rem; padding:0.35rem 0.6rem; overflow-x:auto; scrollbar-width:none;">
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('bold')" title="Bold (Ctrl+B)"><svg viewBox="0 0 24 24"><path d="M15.6 10.79c.97-.67 1.65-1.77 1.65-2.79 0-2.26-1.75-4-4-4H7v14h7.04c2.09 0 3.71-1.7 3.71-3.79 0-1.52-.86-2.82-2.15-3.42zM10 6.5h3c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-3v-3zm3.5 9H10v-3h3.5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('italic')" title="Italic (Ctrl+I)"><svg viewBox="0 0 24 24"><path d="M10 4v3h2.21l-3.42 8H6v3h8v-3h-2.21l3.42-8H18V4z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('underline')" title="Underline"><svg viewBox="0 0 24 24"><path d="M12 17c3.31 0 6-2.69 6-6V3h-2.5v8c0 1.93-1.57 3.5-3.5 3.5S8.5 12.93 8.5 11V3H6v8c0 3.31 2.69 6 6 6zm-7 2v2h14v-2H5z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('strikethrough')" title="Strikethrough"><svg viewBox="0 0 24 24"><path d="M10 19h4v-3h-4v3zM5 4v3h5v3h4V7h5V4H5zM3 14h18v-2H3v2z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('mark')" title="Highlight"><svg viewBox="0 0 24 24"><path d="M15.24 3.76L13.77 2.3c-.39-.39-1.02-.39-1.41 0L3 11.66V16h4.34l9.31-9.31c.39-.39.39-1.02 0-1.41l-1.41-1.52zM6.21 14H5v-1.21l7.35-7.35 1.21 1.21L6.21 14zM20 18H4v2h16v-2z"/></svg></button>
+                        <div style="width:1px;height:16px;background:rgba(255,255,255,0.15);"></div>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('h1')" title="Heading 1" style="font-weight:700; font-size:0.85rem;">H1</button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('h2')" title="Heading 2" style="font-weight:700; font-size:0.85rem;">H2</button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('h3')" title="Heading 3" style="font-weight:700; font-size:0.85rem;">H3</button>
+                        <div style="width:1px;height:16px;background:rgba(255,255,255,0.15);"></div>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('align-left')" title="Align Left"><svg viewBox="0 0 24 24"><path d="M15 15H3v2h12v-2zm0-8H3v2h12V7zM3 13h18v-2H3v2zm0 8h18v-2H3v2zM3 3v2h18V3H3z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('align-center')" title="Align Center"><svg viewBox="0 0 24 24"><path d="M7 15v2h10v-2H7zm-4 6h18v-2H3v2zm0-8h18v-2H3v2zm4-6v2h10V7H7zM3 3v2h18V3H3z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('align-right')" title="Align Right"><svg viewBox="0 0 24 24"><path d="M3 21h18v-2H3v2zm6-4h12v-2H9v2zm-6-4h18v-2H3v2zm6-4h12V7H9v2zM3 3v2h18V3H3z"/></svg></button>
+                        <div style="width:1px;height:16px;background:rgba(255,255,255,0.15);"></div>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('ul')" title="Bulleted List"><svg viewBox="0 0 24 24"><path d="M4 10.5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5zm0-6c-.83 0-1.5.67-1.5 1.5S3.17 7.5 4 7.5 5.5 6.83 5.5 6 4.83 4.5 4 4.5zm0 12c-.83 0-1.5.68-1.5 1.5s.68 1.5 1.5 1.5 1.5-.68 1.5-1.5-.67-1.5-1.5-1.5zM7 19h14v-2H7v2zm0-6h14v-2H7v2zm0-8v2h14V5H7z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('ol')" title="Numbered List"><svg viewBox="0 0 24 24"><path d="M2 17h2v.5H3v1h1v.5H2v1h3v-4H2v1zm1-9h1V4H2v1h1v3zm-1 3h1.8L2 13.1v.9h3v-1H3.2L5 10.9V10H2v1zm5-6v2h14V5H7zm0 14h14v-2H7v2zm0-6h14v-2H7v2z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('task')" title="Task Checklist"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM17.99 9l-1.41-1.42-6.59 6.59-2.58-2.57-1.42 1.41 4 4z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('quote')" title="Blockquote"><svg viewBox="0 0 24 24"><path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('codeblock')" title="Code Block"><svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('link')" title="Insert Link"><svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('image')" title="Insert Image"><svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('table')" title="Table"><svg viewBox="0 0 24 24"><path d="M20 3H5C3.9 3 3 3.9 3 5v14c0 1.1.9 2 2 2h15c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 2v3H5V5h15zm-5 5v4h-4v-4h4zM5 10h4v4H5v-4zm0 6h4v3H5v-3zm6 3v-3h4v3h-4zm6 0v-3h3v3h-3zm3-5h-3v-4h3v4z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('hr')" title="Horizontal Rule"><svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('details')" title="Spoiler / Collapse"><svg viewBox="0 0 24 24"><path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('mermaid')" title="Mermaid Diagram" style="color:var(--md-sys-color-primary);"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.66 0 3 1.34 3 3 0 .74-.27 1.41-.71 1.93l1.85 3.19.86-.5V12h2v4.5l-2 1.15-2-1.15V15.3l-1.85-3.19C12.72 12.19 12.38 12.2 12 12.2c-.38 0-.72-.01-1.15-.09L9 15.3v1.2l-2 1.15-2-1.15V12h2v1.62l.86.5 1.85-3.19C9.27 10.41 9 9.74 9 9c0-1.66 1.34-3 3-3z"/></svg></button>
+                        <button type="button" class="btn-icon" onclick="hdmEngine.insertSyntax('youtube')" title="YouTube Video"><svg viewBox="0 0 24 24"><path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73z"/></svg></button>
+                      </div>
+
+                      <div class="row g-0">
+                        <div class="col-12" id="news-editor-col">
+                          <textarea name="content" id="news-content-textarea" class="form-control bg-black text-white border-0 font-monospace p-3" rows="14" style="font-size: 0.85rem; line-height: 1.6; resize: vertical;" placeholder="# Article Heading&#10;&#10;Write your markdown content here..." required></textarea>
+                        </div>
+                        <div class="col-12 col-md-6 d-none p-3 bg-dark bg-opacity-25 border-start border-secondary border-opacity-25 overflow-y-auto" id="news-preview-col" style="max-height: 380px;">
+                          <div id="news-preview-content" class="text-white small markdown-body"></div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2 mt-4" style="height: 42px;">
+                      <i class="bi bi-cloud-upload-fill me-1"></i> Save Article
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            // Dedicated News Markdown Insertion Engine
+            window.hdmEngine = {
+              insertSyntax: function(type) {
+                const ta = document.getElementById('news-content-textarea');
+                if (!ta) return;
+                const start = ta.selectionStart;
+                const end = ta.selectionEnd;
+                const text = ta.value;
+                const sel = text.substring(start, end);
+                let before = '', after = '', ph = '';
+
+                switch (type) {
+                  case 'bold': before = '**'; after = '**'; ph = 'bold text'; break;
+                  case 'italic': before = '*'; after = '*'; ph = 'italic text'; break;
+                  case 'underline': before = '<u>'; after = '</u>'; ph = 'underlined text'; break;
+                  case 'strikethrough': before = '~~'; after = '~~'; ph = 'strikethrough'; break;
+                  case 'mark': before = '<mark>'; after = '</mark>'; ph = 'highlight'; break;
+                  case 'h1': before = '# '; ph = 'Heading 1'; break;
+                  case 'h2': before = '## '; ph = 'Heading 2'; break;
+                  case 'h3': before = '### '; ph = 'Heading 3'; break;
+                  case 'align-left': before = '<div align="left">\n\n'; after = '\n\n</div>'; ph = 'Left aligned'; break;
+                  case 'align-center': before = '<div align="center">\n\n'; after = '\n\n</div>'; ph = 'Centered'; break;
+                  case 'align-right': before = '<div align="right">\n\n'; after = '\n\n</div>'; ph = 'Right aligned'; break;
+                  case 'ul': before = '- '; ph = 'List item'; break;
+                  case 'ol': before = '1. '; ph = 'Numbered item'; break;
+                  case 'task': before = '- [ ] '; ph = 'Task to do'; break;
+                  case 'quote': before = '> '; ph = 'Blockquote'; break;
+                  case 'codeblock': before = '```javascript\n'; after = '\n```'; ph = '// your code here'; break;
+                  case 'link': before = '['; after = '](https://example.com)'; ph = 'Link text'; break;
+                  case 'image': before = '!['; after = '](https://example.com/image.webp)'; ph = 'Image Alt'; break;
+                  case 'table':
+                    before = '\n| Header 1 | Header 2 | Header 3 |\n| :--- | :---: | ---: |\n| Item 1 | Item 2 | Item 3 |\n';
+                    break;
+                  case 'hr': before = '\n\n---\n\n'; break;
+                  case 'details': before = '<details>\n<summary>Spoiler summary</summary>\n\n'; after = '\n\n</details>'; ph = 'Hidden content'; break;
+                  case 'mermaid': before = '```mermaid\ngraph TD;\n  A[Start]-->B[Update Live];\n  B-->C[Done];\n'; after = '```'; break;
+                  case 'youtube': before = 'https://www.youtube.com/watch?v='; ph = 'dQw4w9WgXcQ'; break;
+                }
+
+                const replace = before + (sel || ph) + after;
+                ta.value = text.substring(0, start) + replace + text.substring(end);
+                ta.focus();
+                ta.selectionStart = start + before.length;
+                ta.selectionEnd = start + before.length + (sel || ph).length;
+
+                if (document.getElementById('news-preview-col') && !document.getElementById('news-preview-col').classList.contains('d-none')) {
+                  renderNewsPreviewContent();
+                }
+              }
+            };
+
+            function openCreateNewsModal() {
+              document.getElementById('newsModalTitle').innerHTML = '<i class="bi bi-pencil-square text-danger me-2"></i> Compose News Article';
+              document.getElementById('news-article-id').value = '0';
+              document.getElementById('news-title-inp').value = '';
+              document.getElementById('news-slug-inp').value = '';
+              document.getElementById('news-cat-inp').value = 'Announcements';
+              document.getElementById('news-status-inp').value = 'published';
+              document.getElementById('news-summary-inp').value = '';
+              document.getElementById('news-cover-url-inp').value = '';
+              document.getElementById('news-content-textarea').value = '';
+              document.getElementById('news-pin-inp').checked = false;
+              new bootstrap.Modal(document.getElementById('adminNewsModal')).show();
+            }
+
+            function openEditNewsModal(art) {
+              document.getElementById('newsModalTitle').innerHTML = '<i class="bi bi-pencil-square text-info me-2"></i> Edit Article #' + art.id;
+              document.getElementById('news-article-id').value = art.id;
+              document.getElementById('news-title-inp').value = art.title || '';
+              document.getElementById('news-slug-inp').value = art.slug || '';
+              document.getElementById('news-cat-inp').value = art.category || 'Announcements';
+              document.getElementById('news-status-inp').value = art.status || 'published';
+              document.getElementById('news-summary-inp').value = art.summary || '';
+              document.getElementById('news-cover-url-inp').value = art.cover_image || '';
+              document.getElementById('news-content-textarea').value = art.content || '';
+              document.getElementById('news-pin-inp').checked = (parseInt(art.is_pinned) === 1);
+              new bootstrap.Modal(document.getElementById('adminNewsModal')).show();
+            }
+
+            function toggleNewsPreview() {
+              const prevCol = document.getElementById('news-preview-col');
+              const editCol = document.getElementById('news-editor-col');
+              if (!prevCol || !editCol) return;
+              const isHidden = prevCol.classList.contains('d-none');
+              if (isHidden) {
+                editCol.className = 'col-12 col-md-6';
+                prevCol.classList.remove('d-none');
+                renderNewsPreviewContent();
+              } else {
+                editCol.className = 'col-12';
+                prevCol.classList.add('d-none');
+              }
+            }
+
+            function renderNewsPreviewContent() {
+              const ta = document.getElementById('news-content-textarea');
+              const container = document.getElementById('news-preview-content');
+              if (!ta || !container) return;
+              let raw = ta.value;
+              if (typeof marked !== 'undefined') {
+                try {
+                  marked.use({ gfm: true, breaks: true });
+                  container.innerHTML = DOMPurify.sanitize(marked.parse(raw));
+                } catch(e) {
+                  container.innerText = raw;
+                }
+              } else {
+                container.innerText = raw;
+              }
+            }
+
+            document.getElementById('news-content-textarea')?.addEventListener('input', () => {
+              if (document.getElementById('news-preview-col') && !document.getElementById('news-preview-col').classList.contains('d-none')) {
+                renderNewsPreviewContent();
+              }
+            });
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'phpboard'): ?>
           <?php
             $db = get_db();
@@ -44350,7 +45516,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $pb_search = trim($_GET['search'] ?? '');
             $pb_channel = trim($_GET['channel'] ?? '');
             $pb_page = max(1, (int)($_GET['p'] ?? 1));
-            $pb_limit = 25;
+            $pb_limit = ADMIN_PAGE_SIZE;
             $pb_offset = ($pb_page - 1) * $pb_limit;
 
             $total_channels = count($board_data['allowed']);
@@ -44931,7 +46097,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $cm_search = trim($_GET['search'] ?? '');
             $cm_sort = $_GET['sort'] ?? 'newest';
             $cm_page = max(1, (int)($_GET['p'] ?? 1));
-            $cm_limit = 25;
+            $cm_limit = ADMIN_PAGE_SIZE;
             $cm_offset = ($cm_page - 1) * $cm_limit;
 
             $table = 'comments';
@@ -45298,7 +46464,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <tbody>
                       <?php
                         $log_page = isset($_GET['p']) ? max(1, (int)$_GET['p']) : 1;
-                        $log_limit = 25;
+                        $log_limit = ADMIN_PAGE_SIZE;
                         $log_offset = ($log_page - 1) * $log_limit;
 
                         $where_clauses = [];
@@ -45377,7 +46543,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $storage_search = trim($_GET['search'] ?? '');
             $storage_sort = $_GET['sort'] ?? 'total_desc';
             $storage_page = max(1, (int)($_GET['p'] ?? 1));
-            $storage_limit = 20;
+            $storage_limit = ADMIN_PAGE_SIZE;
 
             if (!function_exists('format_admin_bytes')) {
               function format_admin_bytes($bytes, $precision = 2) {
@@ -46035,7 +47201,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             $api_search = trim($_GET['search'] ?? '');
             $api_status_filter = $_GET['status'] ?? '';
             $api_page = max(1, (int)($_GET['p'] ?? 1));
-            $api_limit = 25;
+            $api_limit = ADMIN_PAGE_SIZE;
             $api_offset = ($api_page - 1) * $api_limit;
 
             // Global Metrics
@@ -46913,7 +48079,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.5';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.6';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -49401,32 +50567,118 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               fclose($out); exit;
             }
             function dbm_export_sql(PDO $pdo, string|null $table = null): void {
+              // 1. Flush WAL journal memory to disk to guarantee complete, uncorrupted backup snapshots
+              try {
+                $pdo->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+              } catch (Throwable $e) {
+                try { $pdo->exec("PRAGMA wal_checkpoint(PASSIVE);"); } catch (Throwable $ex) {}
+              }
+
               header('Content-Type: application/sql; charset=UTF-8');
-              $fname = $table ? $table . '.sql' : 'dump.sql';
+              $fname = $table ? $table . '.sql' : 'dump_' . date('Ymd_His') . '.sql';
               header('Content-Disposition: attachment; filename="' . rawurlencode($fname) . '"');
-              echo "-- SQLite Manager Export\n-- Generated: " . date('Y-m-d H:i:s') . "\n\nPRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n";
+
+              echo "-- DBLiteAdmin / PHP Music SQL Dump\n";
+              echo "-- Exported: " . date('Y-m-d H:i:s') . "\n";
+              echo "PRAGMA foreign_keys = OFF;\n";
+              echo "BEGIN TRANSACTION;\n\n";
+
               $tables = $table ? [['name' => $table, 'type' => 'table']] : dbm_get_tables($pdo);
               foreach ($tables as $t) {
-                $sql = dbm_get_table_sql($pdo, $t['name']);
+                $tName = $t['name'];
+                $sql = dbm_get_table_sql($pdo, $tName);
                 if ($sql) {
-                  echo "-- " . $t['type'] . ": " . $t['name'] . "\n" . $sql . ";\n\n";
+                  echo "-- Table structure for: " . dbm_quote_ident($tName) . "\n";
+                  echo "DROP TABLE IF EXISTS " . dbm_quote_ident($tName) . ";\n";
+                  echo $sql . ";\n\n";
+
                   if ($t['type'] === 'table') {
-                    $stmt = $pdo->prepare('SELECT * FROM ' . dbm_quote_ident($t['name'])); $stmt->execute();
-                    $colNames = array_column(dbm_get_table_info($pdo, $t['name']), 'name');
-                    while ($row = $stmt->fetch()) {
+                    $stmt = $pdo->prepare('SELECT * FROM ' . dbm_quote_ident($tName));
+                    $stmt->execute();
+                    $colNames = array_column(dbm_get_table_info($pdo, $tName), 'name');
+
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                      $cols = array_map('dbm_quote_ident', $colNames);
                       $vals = [];
-                      foreach ($row as $v) {
-                        if ($v === null) $vals[] = 'NULL'; elseif (is_numeric($v)) $vals[] = $v; else $vals[] = "'" . str_replace("'", "''", $v) . "'";
+                      foreach ($colNames as $cName) {
+                        $val = $row[$cName] ?? null;
+                        if ($val === null) {
+                          $vals[] = 'NULL';
+                        } elseif (is_int($val) || is_float($val) || (is_numeric($val) && !str_starts_with((string)$val, '0'))) {
+                          $vals[] = $val;
+                        } elseif (dbm_is_binary((string)$val)) {
+                          // Encode binary/media/BLOB data to safe hex literals X'...'
+                          $vals[] = "X'" . bin2hex((string)$val) . "'";
+                        } else {
+                          $vals[] = "'" . str_replace("'", "''", (string)$val) . "'";
+                        }
                       }
-                      echo "INSERT INTO " . dbm_quote_ident($t['name']) . " (" . implode(', ', array_map('dbm_quote_ident', $colNames)) . ") VALUES (" . implode(', ', $vals) . ");\n";
+                      echo "INSERT INTO " . dbm_quote_ident($tName) . " (" . implode(', ', $cols) . ") VALUES (" . implode(', ', $vals) . ");\n";
                     }
                     echo "\n";
                   }
                 }
               }
+
               $stmt = $pdo->query("SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'");
-              foreach ($stmt->fetchAll() as $idx) { if ($idx['sql']) echo $idx['sql'] . ";\n"; }
-              echo "\nCOMMIT;\nPRAGMA foreign_keys = ON;\n"; exit;
+              foreach ($stmt->fetchAll() as $idx) {
+                if (!empty($idx['sql'])) echo $idx['sql'] . ";\n";
+              }
+
+              echo "\nCOMMIT;\nPRAGMA foreign_keys = ON;\n";
+              exit;
+            }
+
+            function dbm_run_emulated_query(PDO $pdo, string $sql, string &$currentDb): array {
+              $t0 = microtime(true);
+              $q = rtrim(trim($sql), ';');
+
+              try {
+                if (preg_match('/^USE\s+[`\'"]?([a-zA-Z0-9_\.\-]+)[`\'"]?$/i', $q, $m)) {
+                  $currentDb = $m[1];
+                  return ['type' => 'info', 'message' => "Database context changed to '{$currentDb}'", 'reconnect' => true, 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^SHOW\s+DATABASES$/i', $q)) {
+                  $rows = array_map(fn($d) => ['Database' => $d['name']], dbm_list_databases());
+                  return ['type' => 'select', 'rows' => $rows, 'count' => count($rows), 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^SHOW\s+(?:FULL\s+)?TABLES$/i', $q)) {
+                  $rows = $pdo->query("SELECT name AS 'Tables' FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+                  return ['type' => 'select', 'rows' => $rows, 'count' => count($rows), 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^(?:DESCRIBE|DESC|SHOW\s+COLUMNS\s+FROM)\s+[`\'"]?([a-zA-Z0-9_\-]+)[`\'"]?$/i', $q, $m)) {
+                  $cols = dbm_get_table_info($pdo, $m[1]);
+                  $rows = array_map(fn($c) => [
+                    'Field' => $c['name'],
+                    'Type' => $c['type'] ?: 'TEXT',
+                    'Null' => $c['notnull'] ? 'NO' : 'YES',
+                    'Key' => $c['pk'] ? 'PRI' : '',
+                    'Default' => $c['dflt_value'] ?? 'NULL'
+                  ], $cols);
+                  return ['type' => 'select', 'rows' => $rows, 'count' => count($rows), 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^SHOW\s+CREATE\s+TABLE\s+[`\'"]?([a-zA-Z0-9_\-]+)[`\'"]?$/i', $q, $m)) {
+                  $stmt = $pdo->prepare("SELECT name AS 'Table', sql AS 'Create Table' FROM sqlite_master WHERE type='table' AND name = ?");
+                  $stmt->execute([$m[1]]);
+                  return ['type' => 'select', 'rows' => $stmt->fetchAll(PDO::FETCH_ASSOC), 'count' => 1, 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^SELECT\s+DATABASE\(\)/i', $q)) {
+                  return ['type' => 'select', 'rows' => [['DATABASE()' => $currentDb]], 'count' => 1, 'time' => microtime(true) - $t0];
+                }
+                if (preg_match('/^SELECT\s+VERSION\(\)/i', $q)) {
+                  return ['type' => 'select', 'rows' => [['VERSION()' => $pdo->query("SELECT sqlite_version()")->fetchColumn() . '-DBLiteAdmin']], 'count' => 1, 'time' => microtime(true) - $t0];
+                }
+
+                if (preg_match('/^\s*(SELECT|PRAGMA|EXPLAIN|WITH)\b/i', trim($sql))) {
+                  $rows = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+                  return ['type' => 'select', 'rows' => $rows, 'count' => count($rows), 'time' => microtime(true) - $t0];
+                }
+
+                $affected = $pdo->exec($sql);
+                return ['type' => 'dml', 'affected' => $affected !== false ? $affected : 0, 'time' => microtime(true) - $t0];
+              } catch (Throwable $e) {
+                return ['type' => 'error', 'error' => $e->getMessage(), 'time' => microtime(true) - $t0];
+              }
             }
             function dbm_import_sql(PDO $pdo, string $sql): array {
               $errors = []; $statements = []; $lines = explode("\n", $sql); $stmt = '';
@@ -49511,9 +50763,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             exit;
           }
           if ($dbm_action === 'download_db' && $dbPath) {
+            if ($dbm_pdo) {
+              try {
+                $dbm_pdo->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+              } catch (\Throwable $e) {
+                try { $dbm_pdo->exec("PRAGMA wal_checkpoint(PASSIVE);"); } catch (\Throwable $ex) {}
+              }
+            }
+            clearstatcache(true, $dbPath);
             while (ob_get_level()) ob_end_clean();
-            header('Content-Type: application/octet-stream'); header('Content-Disposition: attachment; filename="' . rawurlencode(basename($dbPath)) . '"');
-            header('Content-Length: ' . filesize($dbPath)); readfile($dbPath); exit;
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . rawurlencode(basename($dbPath)) . '"');
+            header('Content-Length: ' . filesize($dbPath));
+            readfile($dbPath);
+            exit;
           }
           if ($dbm_action === 'blob' && $dbm_pdo && $curTable !== '' && isset($_GET['col']) && isset($_GET['rowid'])) {
             while (ob_get_level()) ob_end_clean();
@@ -49546,24 +50809,60 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               case 'exec_sql':
                 $sql = trim($_POST['sql'] ?? '');
                 if ($sql && $dbm_pdo) {
-                  try {
-                    $start = microtime(true); $lower = ltrim(strtolower($sql));
-                    if (str_starts_with($lower, 'select') || str_starts_with($lower, 'pragma') || str_starts_with($lower, 'with') || str_starts_with($lower, 'explain')) {
-                      $stmt = $dbm_pdo->prepare($sql); $stmt->execute(); $rows = $stmt->fetchAll();
-                      $elapsed = round((microtime(true) - $start) * 1000, 2);
-                      $_SESSION['dbm_sql_result'] = ['rows' => $rows, 'sql' => $sql, 'time' => $elapsed, 'count' => count($rows)];
-                      dbm_flash_set('success', 'Query returned ' . count($rows) . ' row(s) in ' . $elapsed . ' ms.');
-                    } else {
-                      $affected = $dbm_pdo->exec($sql);
-                      $elapsed = round((microtime(true) - $start) * 1000, 2);
-                      $_SESSION['dbm_sql_result'] = ['rows' => null, 'sql' => $sql, 'time' => $elapsed, 'count' => $affected];
-                      dbm_flash_set('success', 'Query OK. ' . $affected . ' row(s) affected in ' . $elapsed . ' ms.');
-                    }
-                  } catch (PDOException $e) {
-                    $_SESSION['dbm_sql_result'] = ['error' => $e->getMessage(), 'sql' => $sql]; dbm_flash_set('error', 'SQL Error: ' . $e->getMessage());
+                  $res = dbm_run_emulated_query($dbm_pdo, $sql, $dbName);
+                  if ($res['type'] === 'select') {
+                    $rows = $res['rows'] ?? [];
+                    $elapsed = round($res['time'] * 1000, 2);
+                    $_SESSION['dbm_sql_result'] = ['rows' => $rows, 'sql' => $sql, 'time' => $elapsed, 'count' => count($rows)];
+                    dbm_flash_set('success', 'Query returned ' . count($rows) . ' row(s) in ' . $elapsed . ' ms.');
+                  } elseif ($res['type'] === 'dml') {
+                    $affected = $res['affected'] ?? 0;
+                    $elapsed = round($res['time'] * 1000, 2);
+                    $_SESSION['dbm_sql_result'] = ['rows' => null, 'sql' => $sql, 'time' => $elapsed, 'count' => $affected];
+                    dbm_flash_set('success', 'Query OK. ' . $affected . ' row(s) affected in ' . $elapsed . ' ms.');
+                  } elseif ($res['type'] === 'info') {
+                    dbm_flash_set('success', $res['message']);
+                  } else {
+                    $_SESSION['dbm_sql_result'] = ['error' => $res['error'], 'sql' => $sql];
+                    dbm_flash_set('error', 'SQL Error: ' . $res['error']);
                   }
                 }
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'sql']));
+              case 'add_relation':
+                if ($dbm_pdo && !empty($_POST['from_table']) && !empty($_POST['from_col']) && !empty($_POST['to_table']) && !empty($_POST['to_col'])) {
+                  $ft = trim($_POST['from_table']);
+                  $fc = trim($_POST['from_col']);
+                  $tt = trim($_POST['to_table']);
+                  $tc = trim($_POST['to_col']);
+                  $onDel = in_array($_POST['on_delete'] ?? '', ['CASCADE', 'SET NULL', 'RESTRICT', 'NO ACTION'], true) ? $_POST['on_delete'] : 'NO ACTION';
+
+                  try {
+                    $schemaSql = $dbm_pdo->query("SELECT sql FROM sqlite_master WHERE type='table' AND name = " . $dbm_pdo->quote($ft))->fetchColumn();
+                    if ($schemaSql) {
+                      $tempTable = $ft . '_alter_' . time();
+                      $fkClause = ", FOREIGN KEY (" . dbm_quote_ident($fc) . ") REFERENCES " . dbm_quote_ident($tt) . " (" . dbm_quote_ident($tc) . ") ON DELETE {$onDel}";
+                      $newSchema = preg_replace('/\)\s*$/', "{$fkClause})", trim((string)$schemaSql), 1);
+                      $tempCreate = preg_replace('/^CREATE\s+TABLE\s+([^\s\(]+)/i', "CREATE TABLE " . dbm_quote_ident($tempTable), $newSchema, 1);
+
+                      $dbm_pdo->beginTransaction();
+                      $dbm_pdo->exec("PRAGMA foreign_keys = OFF;");
+                      $dbm_pdo->exec($tempCreate);
+                      $dbm_pdo->exec("INSERT INTO " . dbm_quote_ident($tempTable) . " SELECT * FROM " . dbm_quote_ident($ft) . ";");
+                      $dbm_pdo->exec("DROP TABLE " . dbm_quote_ident($ft) . ";");
+                      $dbm_pdo->exec("ALTER TABLE " . dbm_quote_ident($tempTable) . " RENAME TO " . dbm_quote_ident($ft) . ";");
+                      $dbm_pdo->commit();
+                      $dbm_pdo->exec("PRAGMA foreign_keys = ON;");
+                      dbm_flash_set('success', "Foreign key relation [{$ft}.{$fc} -> {$tt}.{$tc}] created successfully.");
+                    } else {
+                      dbm_flash_set('error', "Could not load table definition for '{$ft}'.");
+                    }
+                  } catch (Throwable $e) {
+                    if ($dbm_pdo->inTransaction()) $dbm_pdo->rollBack();
+                    $dbm_pdo->exec("PRAGMA foreign_keys = ON;");
+                    dbm_flash_set('error', 'Relation Error: ' . $e->getMessage());
+                  }
+                }
+                dbm_redirect(dbm_self_url(['db' => $dbName, 'view' => 'erd']));
               case 'import_sql':
                 if ($dbm_pdo && !empty($_FILES['sql_file']['tmp_name'])) {
                   $sql = file_get_contents($_FILES['sql_file']['tmp_name']);
@@ -49733,21 +51032,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 dbm_redirect(dbm_self_url(['db' => $dbName, 'table' => $curTable, 'page' => (int)($_POST['page'] ?? 1), 'search' => $_POST['search'] ?? '', 'limit' => (int)($_POST['limit'] ?? 25)]));
               case 'export_tables_mass':
                 if ($dbm_pdo && !empty($_POST['check'])) {
+                  try {
+                    $dbm_pdo->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+                  } catch (\Throwable $e) {
+                    try { $dbm_pdo->exec("PRAGMA wal_checkpoint(PASSIVE);"); } catch (\Throwable $ex) {}
+                  }
+
                   while (ob_get_level()) ob_end_clean();
                   header('Content-Type: application/sql; charset=UTF-8');
-                  header('Content-Disposition: attachment; filename="backup_tables_' . date('Y-m-d_H-i-s') . '.sql"');
-                  echo "-- Mass Table Backup\n\nPRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n";
+                  header('Content-Disposition: attachment; filename="backup_tables_' . date('Ymd_His') . '.sql"');
+                  echo "-- Mass Table Backup\n";
+                  echo "-- Exported: " . date('Y-m-d H:i:s') . "\n\n";
+                  echo "PRAGMA foreign_keys = OFF;\n";
+                  echo "BEGIN TRANSACTION;\n\n";
+
                   foreach ($_POST['check'] as $t) {
                     $sql = dbm_get_table_sql($dbm_pdo, $t);
                     if ($sql) {
-                      echo "-- Table: $t\n" . $sql . ";\n\n";
-                      $stmt = $dbm_pdo->prepare('SELECT * FROM ' . dbm_quote_ident($t)); $stmt->execute();
+                      echo "-- Table structure for: " . dbm_quote_ident($t) . "\n";
+                      echo "DROP TABLE IF EXISTS " . dbm_quote_ident($t) . ";\n";
+                      echo $sql . ";\n\n";
+                      $stmt = $dbm_pdo->prepare('SELECT * FROM ' . dbm_quote_ident($t));
+                      $stmt->execute();
                       $colNames = array_column(dbm_get_table_info($dbm_pdo, $t), 'name');
-                      // Low end RAM chunking protection: Output directly to stream buffer
-                      while ($row = $stmt->fetch()) {
+
+                      while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                         $vals = [];
-                        foreach ($row as $v) {
-                          if ($v === null) $vals[] = 'NULL'; elseif (is_numeric($v)) $vals[] = $v; else $vals[] = "'" . str_replace("'", "''", $v) . "'";
+                        foreach ($colNames as $cName) {
+                          $v = $row[$cName] ?? null;
+                          if ($v === null) {
+                            $vals[] = 'NULL';
+                          } elseif (is_int($v) || is_float($v) || (is_numeric($v) && !str_starts_with((string)$v, '0'))) {
+                            $vals[] = $v;
+                          } elseif (dbm_is_binary((string)$v)) {
+                            $vals[] = "X'" . bin2hex((string)$v) . "'";
+                          } else {
+                            $vals[] = "'" . str_replace("'", "''", (string)$v) . "'";
+                          }
                         }
                         echo "INSERT INTO " . dbm_quote_ident($t) . " (" . implode(', ', array_map('dbm_quote_ident', $colNames)) . ") VALUES (" . implode(', ', $vals) . ");\n";
                       }
@@ -50172,6 +51493,177 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             .dbm-sql-editor-wrap { border: 1px solid var(--dbm-border2); border-radius: 6px; overflow: hidden; }
             .dbm-sql-editor-wrap .CodeMirror { height: 250px; background: var(--dbm-bg3); color: var(--dbm-text); font-size: 0.9rem; }
             
+            /* Interactive ERD Diagram Styles */
+            .erd-viewport {
+              position: relative;
+              width: 100%;
+              height: calc(100vh - 220px);
+              min-height: 520px;
+              background: #09090d;
+              border-radius: 16px;
+              border: 1px solid var(--dbm-border);
+              overflow: hidden;
+              touch-action: none;
+              cursor: default;
+              user-select: none;
+            }
+            #erd-svg {
+              position: absolute;
+              inset: 0;
+              width: 100%;
+              height: 100%;
+              pointer-events: none;
+              z-index: 2;
+            }
+            #erd-canvas {
+              position: absolute;
+              width: 3800px;
+              height: 3800px;
+              top: 0;
+              left: 0;
+              z-index: 3;
+              transform-origin: 0 0;
+            }
+            .erd-controls {
+              position: absolute;
+              right: 1rem;
+              top: 1rem;
+              z-index: 10;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              gap: 4px;
+              background: rgba(18, 18, 24, 0.92);
+              padding: 6px;
+              border-radius: 14px;
+              border: 1px solid var(--dbm-border2);
+              box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+              backdrop-filter: blur(10px);
+            }
+            .erd-controls-row {
+              display: flex;
+              align-items: center;
+              gap: 4px;
+            }
+            .erd-ctrl-btn {
+              background: #181818;
+              color: #f1f1f1;
+              border: 1px solid var(--dbm-border2);
+              width: 32px;
+              height: 32px;
+              border-radius: 8px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              cursor: pointer;
+              font-size: .75rem;
+              font-weight: 700;
+              transition: all .15s ease;
+            }
+            .erd-ctrl-btn:hover {
+              background: #ff0000;
+              color: #ffffff;
+              border-color: #ff0000;
+            }
+            .erd-ctrl-btn:active {
+              transform: scale(0.92);
+            }
+            .erd-card {
+              position: absolute;
+              width: 250px;
+              background: #121216;
+              border: 1px solid #2d2d38;
+              border-radius: 14px;
+              box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+              cursor: grab;
+              user-select: none;
+              z-index: 4;
+              transition: border-color 0.15s ease, box-shadow 0.15s ease;
+            }
+            .erd-card:active {
+              cursor: grabbing;
+              border-color: #ff0000;
+              box-shadow: 0 0 0 2px rgba(255, 0, 0, 0.35);
+            }
+            .erd-header {
+              padding: .65rem .9rem;
+              background: #181820;
+              border-radius: 14px 14px 0 0;
+              display: flex;
+              align-items: center;
+              gap: .5rem;
+              border-bottom: 1px solid #282830;
+            }
+            .erd-header-icon {
+              color: #ff0000;
+              display: flex;
+            }
+            .erd-header-title {
+              font-weight: 700;
+              font-size: .88rem;
+              color: #ffffff;
+              flex: 1;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+            .erd-link {
+              color: var(--dbm-text3);
+              display: flex;
+              align-items: center;
+              text-decoration: none;
+            }
+            .erd-link:hover {
+              color: #ffffff;
+            }
+            .erd-body {
+              padding: .4rem 0;
+              font-size: .78rem;
+              max-height: 240px;
+              overflow-y: auto;
+            }
+            .erd-row {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              padding: .32rem .85rem;
+              transition: background .12s;
+            }
+            .erd-row:hover {
+              background: rgba(255, 255, 255, 0.05);
+            }
+            .erd-col-name {
+              display: flex;
+              align-items: center;
+              gap: .3rem;
+              font-weight: 500;
+              color: #e2e2ec;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+            .erd-col-type {
+              color: #8e9099;
+              font-size: .72rem;
+              font-family: monospace;
+              flex-shrink: 0;
+            }
+            .badge-pk {
+              color: #fbbf24;
+              display: inline-flex;
+              align-items: center;
+              font-weight: bold;
+              font-size: .7rem;
+            }
+            .badge-fk {
+              background: rgba(56, 189, 248, 0.18);
+              color: #38bdf8;
+              font-size: .65rem;
+              padding: 1px 4px;
+              border-radius: 4px;
+              font-weight: 700;
+              border: 1px solid rgba(56, 189, 248, 0.35);
+            }
             .dbm-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
             .dbm-stat-card { background: var(--dbm-bg2); border: 1px solid var(--dbm-border); border-radius: var(--dbm-radius); padding: 1rem 1.25rem; }
             .dbm-stat-card .dbm-stat-label { font-size: 0.75rem; font-weight: 700; color: var(--dbm-text3); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -50699,70 +52191,101 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </form>
 
                   <?php elseif ($dbm_view === 'erd'): 
-                    // Automatically construct Mermaid ER Diagram mapping all tables and foreign keys
-                    $mermaidLines = ["erDiagram"];
+                    $schemaGraph = [];
+                    $allFks = [];
                     foreach ($dbm_tables as $tbl) {
-                      $tname = $tbl['name'];
-                      $cleanTName = preg_replace('/[^\w]/', '_', $tname);
-                      $cols = dbm_get_table_info($dbm_pdo, $tname);
-                      $fkeys = dbm_get_foreign_keys($dbm_pdo, $tname);
-
-                      $mermaidLines[] = "  {$cleanTName} {";
-                      foreach ($cols as $c) {
-                        $colType = strtolower(preg_replace('/[^\w]/', '', $c['type'])) ?: 'text';
-                        $colName = preg_replace('/[^\w]/', '_', $c['name']);
-                        $keyTag = $c['pk'] ? 'PK' : '';
-                        $mermaidLines[] = "    {$colType} {$colName} {$keyTag}";
-                      }
-                      $mermaidLines[] = "  }";
-
-                      foreach ($fkeys as $fk) {
-                        $refT = preg_replace('/[^\w]/', '_', $fk['table']);
-                        $mermaidLines[] = "  {$cleanTName} }o--|| {$refT} : \"{$fk['from']}\"";
-                      }
+                      $t = $tbl['name'];
+                      $cList = dbm_get_table_info($dbm_pdo, $t);
+                      $fkList = dbm_get_foreign_keys($dbm_pdo, $t);
+                      $schemaGraph[$t] = [
+                        'columns' => array_map(fn($c) => ['name' => $c['name'], 'type' => $c['type'] ?: 'TEXT', 'pk' => (bool)$c['pk']], $cList),
+                        'fks' => array_map(function($f) use ($t, &$allFks) {
+                          $item = ['fromTable' => $t, 'fromCol' => $f['from'], 'toTable' => $f['table'], 'toCol' => $f['to'], 'on_delete' => $f['on_delete'] ?? 'NO ACTION'];
+                          $allFks[] = $item;
+                          return $item;
+                        }, $fkList)
+                      ];
                     }
-                    $mermaidCode = implode("\n", $mermaidLines);
                   ?>
-                    <div class="dbm-card p-4">
-                      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <div class="dbm-card p-3 mb-3">
+                      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <div>
-                          <h2 class="fs-5 text-white fw-bold m-0"><i class="bi bi-diagram-2 text-warning me-2"></i>Database ER Diagram &amp; Relationships</h2>
-                          <div class="text-secondary small mt-1">Graphical map of tables, column definitions, primary keys, and foreign keys.</div>
+                          <h2 class="fs-5 text-white fw-bold m-0 d-flex align-items-center gap-2">
+                            <i class="bi bi-diagram-2-fill text-danger"></i> Visual Database Relationships &amp; ERD
+                          </h2>
+                          <div class="text-secondary small mt-1">
+                            <?= count($allFks) ?> active relationship(s) across <?= count($dbm_tables) ?> tables. Drag tables to reorganize; connections update in real time.
+                          </div>
                         </div>
-                        <div class="d-flex gap-2">
-                          <button class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="navigator.clipboard.writeText(document.getElementById('dbm-mermaid-raw').innerText); alert('Mermaid syntax copied to clipboard!');"><i class="bi bi-copy"></i> Copy Code</button>
+                        <div class="d-flex align-items-center gap-2">
+                          <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-primary" onclick="document.getElementById('dbm-addRelationModal').classList.add('open')">
+                            <i class="bi bi-plus-circle-fill"></i> Add Relation (GUI)
+                          </button>
+                          <button type="button" class="dbm-btn dbm-btn-sm dbm-btn-outline" onclick="autoLayoutDiagram()">
+                            <i class="bi bi-grid-3x3-gap-fill"></i> Auto Layout
+                          </button>
                         </div>
                       </div>
-
-                      <div id="dbm-erd-render-box" class="p-3 rounded-3" style="background:#000; border: 1px solid var(--dbm-border); min-height: 480px; overflow: auto; display: flex; justify-content: center; align-items: center;">
-                        <div class="text-secondary small py-5 text-center"><span class="spinner-border spinner-border-sm me-2 text-danger"></span>Rendering diagram...</div>
-                      </div>
-
-                      <pre id="dbm-mermaid-raw" style="display:none;"><?= dbm_e($mermaidCode) ?></pre>
                     </div>
 
-                    <script>
-                      (function renderERD() {
-                        const code = document.getElementById('dbm-mermaid-raw')?.innerText;
-                        const container = document.getElementById('dbm-erd-render-box');
-                        if (!container || !code) return;
+                    <div class="erd-viewport" id="erd-viewport">
+                      <div class="erd-controls">
+                        <button type="button" class="erd-ctrl-btn" onclick="panErd(0, 80)" title="Pan Up">▲</button>
+                        <div class="erd-controls-row">
+                          <button type="button" class="erd-ctrl-btn" onclick="panErd(80, 0)" title="Pan Left">◀</button>
+                          <button type="button" class="erd-ctrl-btn" onclick="resetErdPan()" title="Reset Pan">●</button>
+                          <button type="button" class="erd-ctrl-btn" onclick="panErd(-80, 0)" title="Pan Right">▶</button>
+                        </div>
+                        <button type="button" class="erd-ctrl-btn" onclick="panErd(0, -80)" title="Pan Down">▼</button>
+                        <div class="erd-controls-row" style="margin-top:4px; border-top:1px solid rgba(255,255,255,0.08); padding-top:4px">
+                          <button type="button" class="erd-ctrl-btn" onclick="zoomErd(0.15)" title="Zoom In">+</button>
+                          <button type="button" class="erd-ctrl-btn" id="erd-zoom-btn" onclick="resetErdZoom()" title="Reset Zoom" style="width:auto; padding:0 6px; font-size:.7rem">100%</button>
+                          <button type="button" class="erd-ctrl-btn" onclick="zoomErd(-0.15)" title="Zoom Out">−</button>
+                        </div>
+                      </div>
 
-                        const tryRender = async () => {
-                          if (window.mermaid) {
-                            try {
-                              const id = 'erd_svg_' + Date.now();
-                              const { svg } = await window.mermaid.render(id, code);
-                              container.innerHTML = svg;
-                            } catch (e) {
-                              container.innerHTML = '<div class="alert alert-danger m-0">Failed to render ERD diagram: ' + e.message + '</div>';
-                            }
-                          } else {
-                            setTimeout(tryRender, 200);
-                          }
-                        };
-                        tryRender();
-                      })();
-                    </script>
+                      <svg id="erd-svg"></svg>
+
+                      <div id="erd-canvas">
+                        <?php
+                          $cardIdx = 0;
+                          $totalCards = count($schemaGraph);
+                          $erdCols = max(1, min(4, (int)ceil(sqrt($totalCards ?: 1))));
+                          foreach ($schemaGraph as $tName => $tData):
+                            $cPos = $cardIdx % $erdCols;
+                            $rPos = (int)floor($cardIdx / $erdCols);
+                            $initX = 40 + ($cPos * 290);
+                            $initY = 40 + ($rPos * 280);
+                            $cardIdx++;
+                        ?>
+                          <div class="erd-card" data-table="<?= htmlspecialchars($tName) ?>" id="node-<?= htmlspecialchars($tName) ?>" style="left:<?= $initX ?>px; top:<?= $initY ?>px">
+                            <div class="erd-header">
+                              <span class="erd-header-icon"><i class="bi bi-table"></i></span>
+                              <span class="erd-header-title"><?= htmlspecialchars($tName) ?></span>
+                              <a href="<?= dbm_e(dbm_self_url(['db' => $dbName, 'table' => $tName])) ?>" class="erd-link" title="Browse Records"><i class="bi bi-box-arrow-up-right"></i></a>
+                            </div>
+                            <div class="erd-body">
+                              <?php foreach ($tData['columns'] as $c): 
+                                $isFk = false;
+                                foreach ($tData['fks'] as $fk) {
+                                  if ($fk['fromCol'] === $c['name']) { $isFk = true; break; }
+                                }
+                              ?>
+                                <div class="erd-row" data-col="<?= htmlspecialchars($c['name']) ?>">
+                                  <span class="erd-col-name">
+                                    <?php if ($c['pk']): ?><span class="badge-pk" title="Primary Key"><i class="bi bi-key-fill"></i></span><?php endif; ?>
+                                    <?php if ($isFk): ?><span class="badge-fk" title="Foreign Key">FK</span><?php endif; ?>
+                                    <?= htmlspecialchars($c['name']) ?>
+                                  </span>
+                                  <span class="erd-col-type"><?= htmlspecialchars($c['type']) ?></span>
+                                </div>
+                              <?php endforeach; ?>
+                            </div>
+                          </div>
+                        <?php endforeach; ?>
+                      </div>
+                    </div>
+                    <script id="erd-fks-json" type="application/json"><?= json_encode($allFks, JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
 
                   <?php elseif ($dbm_view === 'structure'): 
                     $cols    = dbm_get_table_info($dbm_pdo, $curTable);
@@ -50995,6 +52518,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                         </div>
                       </div>
                       <div class="dbm-card-body">
+                        <!-- Quick SQL Query Helper Chips -->
+                        <div class="d-flex gap-2 flex-wrap mb-3">
+                          <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('SHOW TABLES;')">SHOW TABLES</button>
+                          <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('SHOW DATABASES;')">SHOW DATABASES</button>
+                          <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('SELECT sqlite_version();')">VERSION()</button>
+                          <?php if (!empty($curTable)): ?>
+                            <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('DESCRIBE <?= dbm_e($curTable) ?>;')">DESCRIBE <?= dbm_e($curTable) ?></button>
+                            <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('SHOW CREATE TABLE <?= dbm_e($curTable) ?>;')">SHOW CREATE</button>
+                            <button type="button" class="dbm-btn dbm-btn-xs dbm-btn-outline" onclick="dbmInsertSnippet('SELECT * FROM <?= dbm_e(dbm_quote_ident($curTable)) ?> LIMIT 50;')">SELECT 50</button>
+                          <?php endif; ?>
+                        </div>
+
                         <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName, 'view' => 'sql'])) ?>" id="dbm-sql-form">
                           <?= dbm_csrf_field() ?>
                           <input type="hidden" name="dbm_action" value="exec_sql">
@@ -51214,6 +52749,70 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 <div class="dbm-modal-footer">
                   <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-cloneTableModal').classList.remove('open')">Cancel</button>
                   <button type="submit" class="dbm-btn dbm-btn-primary">Duplicate Table</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Add Foreign Key Relationship Modal (GUI Table Rebuilder) -->
+          <div class="dbm-modal-backdrop" id="dbm-addRelationModal">
+            <div class="dbm-modal" style="max-width: 520px;">
+              <div class="d-flex align-items-center justify-content-between mb-3 pb-2 border-bottom border-secondary border-opacity-25">
+                <h2 class="fs-5 text-white fw-bold m-0"><i class="bi bi-diagram-3-fill text-danger me-2"></i>Add Foreign Key Relation (GUI)</h2>
+                <button type="button" class="btn-close btn-close-white" onclick="document.getElementById('dbm-addRelationModal').classList.remove('open')"></button>
+              </div>
+              <p class="text-secondary small mb-3">Rebuilds table schema with an active foreign key constraint while preserving all current data.</p>
+              <form method="post" action="<?= dbm_e(dbm_self_url(['db' => $dbName])) ?>">
+                <?= dbm_csrf_field() ?>
+                <input type="hidden" name="dbm_action" value="add_relation">
+                
+                <div class="dbm-form-group mb-3">
+                  <label class="form-label text-secondary small fw-bold mb-1">CHILD TABLE (FROM TABLE)</label>
+                  <select name="from_table" id="rel-from-table" class="dbm-form-select w-100" onchange="loadRelColumns('from', this.value)" required>
+                    <option value="">Select Child Table...</option>
+                    <?php foreach ($dbm_tables as $tbl): ?>
+                      <option value="<?= htmlspecialchars($tbl['name']) ?>"><?= htmlspecialchars($tbl['name']) ?></option>
+                    <?php endforeach; ?>
+                  </select>
+                </div>
+
+                <div class="dbm-form-group mb-3">
+                  <label class="form-label text-secondary small fw-bold mb-1">FOREIGN KEY COLUMN (FROM COLUMN)</label>
+                  <select name="from_col" id="rel-from-col" class="dbm-form-select w-100" required>
+                    <option value="">Select Child Table First...</option>
+                  </select>
+                </div>
+
+                <div class="dbm-form-group mb-3">
+                  <label class="form-label text-secondary small fw-bold mb-1">PARENT TABLE (TO TABLE)</label>
+                  <select name="to_table" id="rel-to-table" class="dbm-form-select w-100" onchange="loadRelColumns('to', this.value)" required>
+                    <option value="">Select Referenced Table...</option>
+                    <?php foreach ($dbm_tables as $tbl): ?>
+                      <option value="<?= htmlspecialchars($tbl['name']) ?>"><?= htmlspecialchars($tbl['name']) ?></option>
+                    <?php endforeach; ?>
+                  </select>
+                </div>
+
+                <div class="dbm-form-group mb-3">
+                  <label class="form-label text-secondary small fw-bold mb-1">REFERENCED COLUMN (TO COLUMN - PRIMARY KEY)</label>
+                  <select name="to_col" id="rel-to-col" class="dbm-form-select w-100" required>
+                    <option value="">Select Parent Table First...</option>
+                  </select>
+                </div>
+
+                <div class="dbm-form-group mb-3">
+                  <label class="form-label text-secondary small fw-bold mb-1">ON DELETE ACTION</label>
+                  <select name="on_delete" class="dbm-form-select w-100">
+                    <option value="NO ACTION">NO ACTION (Standard)</option>
+                    <option value="CASCADE">CASCADE (Delete child rows automatically)</option>
+                    <option value="SET NULL">SET NULL (Set column to NULL on delete)</option>
+                    <option value="RESTRICT">RESTRICT (Block delete if referenced)</option>
+                  </select>
+                </div>
+
+                <div class="dbm-modal-footer">
+                  <button type="button" class="dbm-btn dbm-btn-outline" onclick="document.getElementById('dbm-addRelationModal').classList.remove('open')">Cancel</button>
+                  <button type="submit" class="dbm-btn dbm-btn-primary">Apply Relation via GUI</button>
                 </div>
               </form>
             </div>
@@ -51449,6 +53048,178 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
           <script>
             // DB Manager Script Initialization
+            // Interactive ERD Graphics Engine
+            let erdPanX = 0, erdPanY = 0, erdScale = 1;
+
+            function panErd(dx, dy) {
+              erdPanX += dx;
+              erdPanY += dy;
+              applyErdTransform();
+            }
+
+            function resetErdPan() {
+              erdPanX = 0;
+              erdPanY = 0;
+              applyErdTransform();
+            }
+
+            function zoomErd(delta) {
+              erdScale = Math.min(2.5, Math.max(0.3, erdScale + delta));
+              applyErdTransform();
+            }
+
+            function resetErdZoom() {
+              erdScale = 1;
+              applyErdTransform();
+            }
+
+            function applyErdTransform() {
+              const canvas = document.getElementById('erd-canvas');
+              if (canvas) {
+                canvas.style.transformOrigin = '0 0';
+                canvas.style.transform = `translate(${erdPanX}px, ${erdPanY}px) scale(${erdScale})`;
+              }
+              const zoomBtn = document.getElementById('erd-zoom-btn');
+              if (zoomBtn) zoomBtn.textContent = `${Math.round(erdScale * 100)}%`;
+              drawRelations();
+            }
+
+            function autoLayoutDiagram() {
+              const nodes = Array.from(document.querySelectorAll('.erd-card'));
+              if (!nodes.length) return;
+              const cols = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(nodes.length))));
+              nodes.forEach((node, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                node.style.left = `${40 + col * 290}px`;
+                node.style.top = `${40 + row * 280}px`;
+              });
+              resetErdPan();
+            }
+
+            function loadRelColumns(type, tableName) {
+              const target = document.getElementById(`rel-${type}-col`);
+              if (!target || !tableName) return;
+              const card = document.querySelector(`.erd-card[data-table="${tableName}"]`);
+              if (!card) {
+                target.innerHTML = '<option value="">No columns found</option>';
+                return;
+              }
+              const cols = Array.from(card.querySelectorAll('.erd-row')).map(r => r.getAttribute('data-col'));
+              target.innerHTML = cols.map(c => `<option value="${c}">${c}</option>`).join('');
+            }
+
+            function drawRelations() {
+              const svg = document.getElementById('erd-svg');
+              const canvas = document.getElementById('erd-canvas');
+              if (!svg || !canvas || !window.erdFks) return;
+
+              const vRect = svg.getBoundingClientRect();
+              let lines = `
+                <defs>
+                  <marker id="erd-arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 1 L 10 5 L 0 9 z" fill="#ff0000"/>
+                  </marker>
+                </defs>
+              `;
+
+              window.erdFks.forEach(fk => {
+                const fromRow = document.querySelector(`.erd-card[data-table="${fk.fromTable}"] .erd-row[data-col="${fk.fromCol}"]`);
+                const toCard = document.querySelector(`.erd-card[data-table="${fk.toTable}"]`);
+                const toRow = toCard?.querySelector(`.erd-row[data-col="${fk.toCol}"]`) || toCard;
+
+                if (!fromRow || !toRow) return;
+
+                const r1 = fromRow.getBoundingClientRect();
+                const r2 = toRow.getBoundingClientRect();
+
+                const x1 = r1.right - vRect.left;
+                const y1 = r1.top + r1.height / 2 - vRect.top;
+                const x2 = r2.left - vRect.left;
+                const y2 = r2.top + r2.height / 2 - vRect.top;
+
+                const dx = Math.max(35, Math.abs(x2 - x1) * 0.45);
+                lines += `<path d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}" stroke="#ff0000" stroke-width="2" fill="none" marker-end="url(#erd-arrow)" opacity="0.85"/>`;
+              });
+
+              svg.innerHTML = lines;
+            }
+
+            function initErd() {
+              const viewport = document.getElementById('erd-viewport');
+              const canvas = document.getElementById('erd-canvas');
+              if (!viewport || !canvas) return;
+
+              const fksEl = document.getElementById('erd-fks-json');
+              if (fksEl) {
+                try {
+                  window.erdFks = JSON.parse(fksEl.textContent || '[]');
+                } catch (e) {
+                  window.erdFks = [];
+                }
+              }
+
+              resetErdPan();
+              requestAnimationFrame(() => {
+                drawRelations();
+                setTimeout(drawRelations, 60);
+              });
+
+              let activeNode = null;
+              let isPanning = false;
+              let startX, startY, initialLeft, initialTop;
+
+              viewport.onwheel = (e) => {
+                e.preventDefault();
+                const d = e.deltaY < 0 ? 0.1 : -0.1;
+                zoomErd(d);
+              };
+
+              viewport.onmousedown = (e) => {
+                const card = e.target.closest('.erd-card');
+                if (card) {
+                  activeNode = card;
+                  startX = e.clientX;
+                  startY = e.clientY;
+                  initialLeft = parseInt(activeNode.style.left, 10) || 0;
+                  initialTop = parseInt(activeNode.style.top, 10) || 0;
+                } else if (!e.target.closest('.erd-controls')) {
+                  isPanning = true;
+                  startX = e.clientX - erdPanX;
+                  startY = e.clientY - erdPanY;
+                  viewport.style.cursor = 'grabbing';
+                }
+              };
+
+              window.addEventListener('mousemove', (e) => {
+                if (activeNode) {
+                  const dx = (e.clientX - startX) / erdScale;
+                  const dy = (e.clientY - startY) / erdScale;
+                  activeNode.style.left = `${Math.max(10, initialLeft + dx)}px`;
+                  activeNode.style.top = `${Math.max(10, initialTop + dy)}px`;
+                  drawRelations();
+                } else if (isPanning) {
+                  erdPanX = e.clientX - startX;
+                  erdPanY = e.clientY - startY;
+                  applyErdTransform();
+                }
+              });
+
+              window.addEventListener('mouseup', () => {
+                activeNode = null;
+                if (isPanning) {
+                  isPanning = false;
+                  if (viewport) viewport.style.cursor = 'default';
+                }
+              });
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+              if (document.getElementById('erd-viewport')) {
+                initErd();
+              }
+            });
+
             function dbmToggleCheckAll(source, className) {
               const checkboxes = document.querySelectorAll('.' + className);
               checkboxes.forEach(cb => cb.checked = source.checked);
@@ -71160,6 +72931,24 @@ function init_db($db) {
       FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (reported_id) REFERENCES users(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS news_articles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      slug TEXT UNIQUE,
+      category TEXT DEFAULT 'Announcements',
+      summary TEXT,
+      content TEXT NOT NULL,
+      cover_image TEXT,
+      author_id INTEGER DEFAULT 0,
+      is_pinned INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'published',
+      views INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_news_status ON news_articles(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_news_pinned ON news_articles(is_pinned, created_at);
     CREATE TABLE IF NOT EXISTS ban_appeals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
@@ -78575,7 +80364,7 @@ if (isset($_GET['action'])) {
       $feed = [];
       
       $act_page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-      $act_limit = 25;
+      $act_limit = ADMIN_PAGE_SIZE;
       $act_offset = ($act_page - 1) * $act_limit;
       $db_fetch_limit = $act_offset + $act_limit; // Fetch enough to cover the current page offset slice
 
@@ -79529,8 +81318,14 @@ if (isset($_GET['action'])) {
         putenv("SQLITE_TMPDIR=" . $temp_dir);
         @$db->exec("PRAGMA temp_store_directory = " . $db->quote($temp_dir) . ";");
         
+        // Flush WAL frames into base file before VACUUM
+        try { $db->exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (\Throwable $e) {}
+
         $db->exec("VACUUM");
-        
+
+        // Re-truncate WAL after VACUUM
+        try { $db->exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch (\Throwable $e) {}
+
         // 4. Clean up and restore memory pragma
         @$db->exec("PRAGMA temp_store_directory = '';");
         $db->exec("PRAGMA temp_store = MEMORY;");
@@ -88549,6 +90344,10 @@ function perform_cover_scan($db) {
             <a href="#" class="nav-link logged-in-only" id="nav-cover-scan" data-bs-toggle="modal" data-bs-target="#cover-scan-modal" style="display: none !important;">
               <i class="bi bi-image-fill"></i>
               <span>Re-scan Covers</span>
+            </a>
+            <a href="?access=news" class="nav-link" id="nav-news">
+              <i class="bi bi-newspaper"></i>
+              <span>News</span>
             </a>
             <a href="?access=admin" class="nav-link logged-in-only" id="nav-admin-panel" style="display: none !important;">
               <i class="bi bi-shield-lock-fill"></i>
