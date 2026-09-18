@@ -2189,7 +2189,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.6');
+define('APP_VERSION', '12.7');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -20878,16 +20878,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       }
   
       if ($feed === 'rankings') {
-        $rankingPeriod = $_GET['period'] ?? 'daily';
+        $rankingPeriod = $_GET['period'] ?? 'day';
         $now = time();
-        $timeLimit = $now - (86400 * 30);
-        if ($rankingPeriod === 'daily') $timeLimit = $now - 86400;
-        elseif ($rankingPeriod === 'weekly') $timeLimit = $now - (86400 * 7);
-        elseif ($rankingPeriod === 'monthly') $timeLimit = $now - (86400 * 30);
-  
-        $where[] = "a.created_at >= ?";
-        $params[] = $timeLimit;
-        $orderSql = "(a.like_count * 3 + a.view_count * 0.1) DESC";
+        $timeLimit = 0;
+        if ($rankingPeriod === 'day' || $rankingPeriod === 'daily') $timeLimit = $now - 86400;
+        elseif ($rankingPeriod === 'week' || $rankingPeriod === 'weekly') $timeLimit = $now - (86400 * 7);
+        elseif ($rankingPeriod === 'month' || $rankingPeriod === 'monthly') $timeLimit = $now - (86400 * 30);
+        elseif ($rankingPeriod === 'year' || $rankingPeriod === 'yearly') $timeLimit = $now - (86400 * 365);
+        elseif ($rankingPeriod === 'all' || $rankingPeriod === 'all_time') $timeLimit = 0;
+        else $timeLimit = $now - 86400;
+
+        // If there are posts matching active filters in this timeframe, filter strictly.
+        // Otherwise, gracefully include recent posts so rankings are never empty!
+        if ($timeLimit > 0) {
+          $chkWhere = implode(' AND ', $where);
+          $chkSql = "SELECT COUNT(*) FROM artworks a WHERE {$chkWhere} AND a.created_at >= ?";
+          $chkParams = array_merge($params, [$timeLimit]);
+          $chkStmt = $db->prepare($chkSql);
+          $chkStmt->execute($chkParams);
+          $strictCount = (int)$chkStmt->fetchColumn();
+          if ($strictCount >= 1) {
+            $where[] = "a.created_at >= ?";
+            $params[] = $timeLimit;
+          }
+        }
+
+        // Smart Popularity Score:
+        // Rewards views and likes, while giving an immediate freshness boost (+40 pts)
+        // to brand new posts created within 24-48 hours. Ties (e.g. 0 views) are sorted by created_at DESC.
+        $orderSql = "(COALESCE(a.view_count, 0) * 1.5 + COALESCE(a.like_count, 0) * 4 + (CASE WHEN a.created_at >= ({$now} - 86400) THEN 40 WHEN a.created_at >= ({$now} - 172800) THEN 20 ELSE 0 END)) DESC, a.created_at DESC";
       }
   
       $whereSql = implode(' AND ', $where);
@@ -22176,7 +22195,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $thumbCandidate = $config['thumb_dir'] . DIRECTORY_SEPARATOR . 'thumb_' . basename($file) . '.jpg';
         }
         if (!file_exists($thumbCandidate) && file_exists($rawPath)) {
-          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRel . '.jpg';
+          $targetThumb = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $osRelPath . '.jpg';
           if (!is_dir(dirname($targetThumb))) @mkdir(dirname($targetThumb), 0755, true);
           if (artworkCreateThumbnail($rawPath, $targetThumb, $config['thumb_width'], $config['thumb_quality'])) {
             $thumbCandidate = $targetThumb;
@@ -22758,11 +22777,640 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           transform: translateY(10px);
         }
     
+        /* Layout Modes, Dynamic Gap & GPU-Accelerated Container */
+        :root {
+          --hd-grid-gap: 14px;
+          --hd-card-radius: 12px;
+        }
+        .art-grid,
+        .art-grid.layout-grid,
+        .art-grid.layout-columns,
+        .art-grid.layout-justified,
+        .art-grid.layout-list,
+        .art-grid .masonry-col {
+          gap: var(--hd-grid-gap, 14px) !important;
+        }
         .art-grid {
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+        }
+        .art-grid.layout-grid,
+        .art-grid:not(.layout-columns):not(.layout-justified):not(.layout-list) {
           display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+          grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+        }
+        .art-grid[data-cols="1"] { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="5"] { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="6"] { grid-template-columns: repeat(6, minmax(0, 1fr)) !important; }
+        .art-grid[data-cols="8"] { grid-template-columns: repeat(8, minmax(0, 1fr)) !important; }
+
+        .art-grid .art-card {
+          border-radius: var(--hd-card-radius, 12px) !important;
+          content-visibility: auto;
+          contain-intrinsic-size: 240px;
+          contain: layout style paint;
+          transform: translateZ(0);
+          backface-visibility: hidden;
+        }
+        .art-grid.layout-columns {
+          display: flex;
+          align-items: flex-start;
+          width: 100%;
+        }
+        .art-grid.layout-columns .masonry-col {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+        }
+        .art-grid.layout-justified {
+          display: flex;
+          flex-wrap: wrap;
+          align-content: flex-start;
+          width: 100%;
+        }
+
+        /* Top Right Views & Favorites: Clean Frameless Floating Indicators */
+        .card-top-right-bar {
+          position: absolute;
+          top: 8px;
+          right: 8px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          z-index: 5;
+          pointer-events: none;
+        }
+        .card-top-right-bar .page-pill {
+          background: rgba(0, 0, 0, 0.72);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          color: #ffffff;
+          font-size: 0.68rem;
+          font-weight: 700;
+          padding: 2px 5.5px;
+          border-radius: 6px;
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          pointer-events: auto;
+        }
+        .card-top-right-bar .stat-pill {
+          background: none !important;
+          border: none !important;
+          box-shadow: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+          padding: 0 !important;
+          color: #ffffff;
+          font-size: 0.72rem;
+          font-weight: 700;
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          line-height: 1;
+          pointer-events: auto;
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+        }
+        .card-top-right-bar .stat-pill svg {
+          stroke: rgba(0, 0, 0, 0.6);
+          stroke-width: 0.8px;
+          paint-order: stroke fill;
+        }
+        .card-top-right-bar .like-pill {
+          cursor: pointer;
+          transition: transform 0.15s ease, color 0.15s ease;
+        }
+        .card-top-right-bar .like-pill:hover {
+          color: var(--like);
+          transform: scale(1.12);
+        }
+        .card-top-right-bar .like-pill.active {
+          color: var(--like) !important;
+        }
+        .card-top-right-bar .like-pill.active svg {
+          fill: var(--like);
+          stroke: rgba(0, 0, 0, 0.4);
+          stroke-width: 0.8px;
+        }
+
+        /* Frameless Clean R-18 Text Indicator */
+        .badge-flag.badge-r18,
+        .badge-flag:not(.video):not(.manga):not(.novel):not(.ai) {
+          background: none !important;
+          border: none !important;
+          box-shadow: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+          padding: 0 !important;
+          color: var(--r18) !important;
+          font-size: 0.74rem !important;
+          font-weight: 900 !important;
+          letter-spacing: 0.6px;
+          line-height: 1;
+          -webkit-text-stroke: 0.5px rgba(0, 0, 0, 0.45);
+          paint-order: stroke fill;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+          filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+        }
+        .art-card:not(.list-mode) .art-card-stats {
+          display: none !important;
+        }
+
+        /* User Drive Grid Settings Dropdown & Sliders */
+        .slider-box-container {
+          padding: 0.35rem 0;
+          display: flex;
+          flex-direction: column;
+          gap: 0.3rem;
+        }
+        .slider-box-header {
+          display: flex;
+          justify-content: space-between;
+          font-size: 0.74rem;
+          color: var(--text-secondary);
+          font-weight: 600;
+        }
+        .slider-box-input {
+          width: 100%;
+          height: 5px;
+          background: var(--bg-surface-hover);
+          outline: none;
+          -webkit-appearance: none;
+          appearance: none;
+          border-radius: 3px;
+          cursor: pointer;
+        }
+        .slider-box-input::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 15px;
+          height: 15px;
+          background: var(--accent);
+          border: 2px solid #ffffff;
+          border-radius: 50%;
+          cursor: pointer;
+          box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
+        }
+        .slider-box-input::-moz-range-thumb {
+          width: 15px;
+          height: 15px;
+          background: var(--accent);
+          border: 2px solid #ffffff;
+          border-radius: 50%;
+          cursor: pointer;
+        }
+        @media (max-width: 768px) {
+          .art-grid.layout-grid,
+          .art-grid:not(.layout-columns):not(.layout-justified):not(.layout-list) {
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: var(--hd-grid-gap, 10px) !important;
+          }
+        }
+        .art-grid.layout-grid .art-card:not(.ratio-9-16) {
+          aspect-ratio: 1 / 1;
+        }
+        .art-grid.layout-grid .art-card:not(.ratio-9-16) .art-thumb-wrap {
+          height: 100%;
+          aspect-ratio: 1 / 1 !important;
+        }
+
+        /* Columns (Masonry) Layout */
+        .art-grid.layout-columns {
+          display: flex;
+          gap: 1.15rem;
+          align-items: flex-start;
+          width: 100%;
+        }
+        @media (max-width: 768px) {
+          .art-grid.layout-columns {
+            gap: 0.75rem;
+          }
+        }
+        .art-grid.layout-columns .masonry-col {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
           gap: 1.15rem;
         }
+        @media (max-width: 768px) {
+          .art-grid.layout-columns .masonry-col {
+            gap: 0.75rem;
+          }
+        }
+        .art-grid.layout-columns .art-card {
+          width: 100%;
+          height: auto;
+          aspect-ratio: auto !important;
+        }
+        .art-grid.layout-columns .art-thumb-wrap {
+          aspect-ratio: auto !important;
+          height: auto !important;
+        }
+        .art-grid.layout-columns .art-thumb-wrap img {
+          height: auto !important;
+          object-fit: contain !important;
+        }
+
+        /* Justified Layout */
+        .art-grid.layout-justified {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.75rem;
+          align-content: flex-start;
+          width: 100%;
+        }
+        .art-grid.layout-justified .art-card {
+          height: 220px !important;
+          flex-grow: var(--card-grow, 1);
+          flex-shrink: 0;
+          flex-basis: auto;
+          width: auto !important;
+          min-width: 130px;
+          max-width: 100%;
+          aspect-ratio: var(--card-ratio, auto);
+        }
+        .art-grid.layout-justified .art-thumb-wrap {
+          height: 100% !important;
+          width: 100% !important;
+          aspect-ratio: auto !important;
+        }
+
+        /* List Layout */
+        .art-grid.layout-list {
+          display: flex;
+          flex-direction: column;
+          gap: 0.65rem;
+        }
+        .art-grid.layout-list .art-card {
+          display: flex;
+          flex-direction: row;
+          align-items: center;
+          padding: 0.55rem 0.85rem;
+          gap: 0.85rem;
+          aspect-ratio: auto !important;
+          height: auto !important;
+          min-height: 58px;
+          background: var(--bg-surface);
+          border: 1px solid var(--border-subtle);
+          border-radius: 12px;
+        }
+        .art-grid.layout-list .art-thumb-wrap {
+          width: 48px !important;
+          height: 48px !important;
+          min-height: 48px !important;
+          aspect-ratio: 1 / 1 !important;
+          border-radius: 8px;
+          flex-shrink: 0;
+        }
+        .art-grid.layout-list .art-card-info {
+          position: static !important;
+          background: none !important;
+          padding: 0 !important;
+          flex: 1;
+          display: flex;
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.8rem;
+          min-width: 0;
+          pointer-events: auto !important;
+        }
+        .art-grid.layout-list .art-card-title {
+          font-size: 0.88rem;
+          font-weight: 600;
+          color: var(--text-primary);
+          text-shadow: none !important;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .art-grid.layout-list .art-card-author {
+          font-size: 0.76rem;
+          color: var(--text-secondary);
+          text-shadow: none !important;
+        }
+        .art-grid.layout-list .art-card-stats {
+          font-size: 0.75rem;
+          color: var(--text-muted);
+          text-shadow: none !important;
+          flex-shrink: 0;
+          gap: 0.75rem;
+        }
+        /* Completely hide all floating overlays & badges inside thumbnails in list view */
+        .art-grid.layout-list .card-top-right-bar,
+        .art-grid.layout-list .badge-flag,
+        .art-grid.layout-list .badge-page-count,
+        .art-grid.layout-list .safe-blur-overlay,
+        .art-card.list-mode .card-top-right-bar,
+        .art-card.list-mode .badge-flag,
+        .art-card.list-mode .badge-page-count,
+        .art-card.list-mode .safe-blur-overlay {
+          display: none !important;
+        }
+
+        /* Popular Artworks Rankings Hero Banner */
+        .popular-hero-banner {
+          position: relative;
+          border-radius: 20px;
+          overflow: hidden;
+          margin-bottom: 2rem;
+          padding: 1.5rem 2rem 1.1rem 2rem;
+          box-shadow: var(--shadow-lg);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .popular-hero-bg {
+          position: absolute;
+          inset: -30px;
+          background-size: cover;
+          background-position: center 25%;
+          filter: blur(34px) brightness(0.42);
+          transform: scale(1.15);
+          z-index: 1;
+          transition: background-image 0.35s ease;
+        }
+        .popular-hero-overlay {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(180deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.7) 100%);
+          z-index: 2;
+        }
+        .popular-hero-content {
+          position: relative;
+          z-index: 3;
+          display: flex;
+          flex-direction: column;
+          gap: 0.85rem;
+        }
+        .popular-hero-top-nav {
+          display: flex;
+          justify-content: flex-end;
+          align-items: center;
+          gap: 1.8rem;
+          flex-wrap: wrap;
+        }
+        .popular-period-tabs {
+          display: flex;
+          gap: 1.2rem;
+          align-items: center;
+          border-bottom: 2px solid rgba(255, 255, 255, 0.18);
+          padding: 0 0 6px 0;
+          overflow-x: auto;
+          overflow-y: hidden !important;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
+          white-space: nowrap;
+          box-sizing: border-box;
+        }
+        .popular-period-tabs::-webkit-scrollbar {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+        .period-tab-btn {
+          font-size: 0.92rem;
+          font-weight: 700;
+          color: rgba(255, 255, 255, 0.65);
+          background: none;
+          border: none;
+          border-bottom: 2px solid transparent;
+          cursor: pointer;
+          padding: 0 2px 6px 2px;
+          margin-bottom: -8px;
+          transition: color 0.15s ease, border-color 0.15s ease;
+          text-transform: lowercase;
+          white-space: nowrap;
+          flex-shrink: 0;
+          box-sizing: border-box;
+        }
+        .period-tab-btn:hover {
+          color: #ffffff;
+        }
+        .period-tab-btn.active {
+          color: #ffffff;
+          border-bottom: 2px solid #ffffff;
+        }
+        .popular-view-more {
+          display: flex;
+          align-items: center;
+          gap: 3px;
+          color: #ffffff;
+          font-size: 0.92rem;
+          font-weight: 600;
+          text-decoration: none;
+          opacity: 0.85;
+          transition: opacity 0.15s ease, transform 0.15s ease;
+        }
+        .popular-view-more:hover {
+          opacity: 1;
+          transform: translateX(2px);
+        }
+        .popular-hero-text {
+          display: flex;
+          flex-direction: column;
+          gap: 0.25rem;
+        }
+        .popular-hero-title {
+          font-size: 1.55rem;
+          font-weight: 800;
+          color: #ffffff;
+          margin: 0;
+          letter-spacing: -0.5px;
+        }
+        .popular-hero-sub {
+          font-size: 0.84rem;
+          color: rgba(255, 255, 255, 0.85);
+          margin: 0;
+          line-height: 1.45;
+          max-width: 850px;
+        }
+        .popular-carousel-wrapper {
+          position: relative;
+          width: 100%;
+          display: flex;
+          align-items: center;
+          margin: 0.4rem 0;
+        }
+        .popular-carousel-track {
+          display: flex;
+          gap: 1.15rem;
+          overflow-x: auto;
+          scroll-behavior: smooth;
+          scrollbar-width: none;
+          width: 100%;
+          padding: 6px 2px 10px 2px;
+        }
+        .popular-carousel-track::-webkit-scrollbar {
+          display: none;
+        }
+        .popular-carousel-arrow {
+          position: absolute;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 44px;
+          height: 44px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.55);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 10;
+          cursor: pointer;
+          transition: background 0.15s ease, transform 0.15s ease;
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+        }
+        .popular-carousel-arrow:hover {
+          background: rgba(0, 0, 0, 0.85);
+          transform: translateY(-50%) scale(1.08);
+        }
+        .popular-carousel-arrow.left { left: -18px; }
+        .popular-carousel-arrow.right { right: -18px; }
+        
+        /* Ranked Card Component (Matching UI Screenshot) */
+        .popular-card {
+          flex: 0 0 200px;
+          width: 200px;
+          border-radius: 12px;
+          overflow: hidden;
+          background: #ffffff;
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          transition: transform 0.2s ease, box-shadow 0.2s ease;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .popular-card:hover {
+          transform: translateY(-4px);
+          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.7);
+        }
+        .popular-card-thumb {
+          position: relative;
+          width: 100%;
+          aspect-ratio: 1 / 1;
+          background: #18181c;
+          overflow: hidden;
+        }
+        .popular-card-thumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+        .popular-card-rank-badge {
+          position: absolute;
+          top: 8px;
+          left: 8px;
+          font-size: 0.72rem;
+          font-weight: 800;
+          padding: 2.5px 7.5px;
+          border-radius: 4px;
+          line-height: 1.2;
+          z-index: 3;
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+        }
+        .popular-card-rank-badge.rank-1 { background: #eab308; color: #000000; }
+        .popular-card-rank-badge.rank-2 { background: #94a3b8; color: #ffffff; }
+        .popular-card-rank-badge.rank-3 { background: #c2410c; color: #ffffff; }
+        .popular-card-rank-badge.rank-other { background: rgba(148, 163, 184, 0.65); color: #ffffff; backdrop-filter: blur(4px); }
+        .popular-card-views {
+          display: none !important;
+        }
+        .popular-card-info {
+          background: #ffffff;
+          color: #111111;
+          padding: 0.65rem 0.85rem;
+          display: flex;
+          align-items: center;
+          gap: 0.65rem;
+        }
+        .popular-card-avatar {
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          background: #ffffff;
+          border: 1.5px solid #e2e8f0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 800;
+          font-size: 0.85rem;
+          color: #0f172a;
+          flex-shrink: 0;
+          overflow: hidden;
+        }
+        .popular-card-avatar img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        .popular-card-text {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          gap: 1px;
+        }
+        .popular-card-title {
+          font-size: 0.88rem;
+          font-weight: 800;
+          color: #0f172a;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .popular-card-author {
+          font-size: 0.76rem;
+          color: #64748b;
+          font-weight: 500;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .popular-hero-attribution {
+          align-self: flex-end;
+          font-size: 0.88rem;
+          color: rgba(255, 255, 255, 0.88);
+          font-weight: 500;
+          text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+        }
+
+        @media (max-width: 768px) {
+          .popular-hero-banner {
+            padding: 1.1rem 1rem 0.9rem 1rem;
+            border-radius: 14px;
+            margin-bottom: 1.4rem;
+          }
+          .popular-hero-top-nav {
+            justify-content: space-between;
+            gap: 0.6rem;
+          }
+          .popular-period-tabs {
+            gap: 0.9rem;
+            overflow-x: auto;
+            width: 100%;
+          }
+          .period-tab-btn {
+            font-size: 0.85rem;
+          }
+          .popular-card {
+            flex: 0 0 155px;
+            width: 155px;
+          }
+          .popular-carousel-arrow {
+            display: none;
+          }
+        }
+
         .form-grid-2 {
           display: grid;
           grid-template-columns: 1fr 1fr;
@@ -22777,12 +23425,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           border-radius: 18px;
           padding: 1.8rem;
         }
-  
+
         @media (max-width: 768px) {
-          .art-grid {
-            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-            gap: 0.75rem;
-          }
           .page-container {
             padding: 0.6rem;
           }
@@ -22831,18 +23475,32 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             align-items: stretch !important;
             gap: 0.75rem !important;
           }
+          .feed-header-actions-col {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+          }
           .feed-header-controls {
             width: 100%;
             display: grid !important;
             grid-template-columns: 1fr 1fr;
             gap: 0.5rem !important;
           }
-          .feed-header-controls>* {
+          .feed-header-controls > * {
             width: 100% !important;
             min-width: 0;
           }
           .feed-header-controls .btn-subtle {
             grid-column: span 2;
+          }
+          .feed-header-layout-row {
+            display: flex !important;
+            justify-content: flex-end !important;
+            width: 100%;
+          }
+          .feed-header-layout-row .toolbar-actions {
+            margin-left: auto !important;
           }
           .pagination-bar {
             gap: 0.35rem !important;
@@ -22921,11 +23579,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           box-shadow: var(--shadow-md);
           border-color: var(--border-strong);
         }
+
+        /* Desktop Feed Header Columns & Rows */
+        .feed-header-wrap {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          margin-bottom: 1.4rem;
+          gap: 1rem;
+          width: 100%;
+        }
+        .feed-header-title-block {
+          flex: 1;
+          min-width: 220px;
+        }
+        .feed-header-actions-col {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 0.55rem;
+          flex-shrink: 0;
+        }
+        .feed-header-controls {
+          display: flex;
+          gap: 0.5rem;
+          align-items: center;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+        }
+        .feed-header-layout-row {
+          display: flex;
+          justify-content: flex-end;
+          width: 100%;
+        }
         .art-thumb-wrap {
           width: 100%;
           aspect-ratio: 1 / 1;
-          background: #08080a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 50'%3E%3Ccircle cx='25' cy='25' r='18' fill='none' stroke='%230096fa' stroke-width='3.5' stroke-linecap='round' stroke-dasharray='75' stroke-dashoffset='25'%3E%3CanimateTransform attributeName='transform' type='rotate' from='0 25 25' to='360 25 25' dur='0.8s' repeatCount='indefinite'/%3E%3C/circle%3E%3C/svg%3E") no-repeat center center;
-          background-size: 32px 32px;
+          background: var(--bg-surface-elevated);
           position: relative;
           overflow: hidden;
         }
@@ -23232,16 +23922,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           aspect-ratio: 1 / 1 !important;
         }
     
-        .art-card-info {
-          padding: 0.8rem 0.9rem;
+        /* Seamless Overlay Look (No Container Box) */
+        .art-card:not(.list-mode) .art-card-info {
+          position: absolute;
+          inset: auto 0 0 0;
+          background: linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.48) 60%, transparent 100%);
+          padding: 2.2rem 0.75rem 0.65rem 0.75rem;
+          color: #ffffff;
           display: flex;
           flex-direction: column;
-          gap: 0.35rem;
+          gap: 0.25rem;
+          pointer-events: none;
+          z-index: 4;
+          transition: background 0.2s ease;
+        }
+        .art-card:not(.list-mode):hover .art-card-info {
+          background: linear-gradient(to top, rgba(0, 0, 0, 0.96) 0%, rgba(0, 0, 0, 0.64) 65%, transparent 100%);
+        }
+        .art-card:not(.list-mode) .art-card-info * {
+          pointer-events: auto;
         }
         .art-card-title {
-          font-size: 0.9rem;
+          font-size: 0.88rem;
           font-weight: 700;
-          color: var(--text-primary);
+          color: #ffffff;
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -23249,22 +23954,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         .art-card-author {
           display: flex;
           align-items: center;
-          gap: 0.45rem;
-          font-size: 0.78rem;
-          color: var(--text-secondary);
+          gap: 0.4rem;
+          font-size: 0.76rem;
+          color: rgba(255, 255, 255, 0.85);
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
         }
         .art-card-avatar {
-          width: 22px;
-          height: 22px;
+          width: 20px;
+          height: 20px;
           border-radius: 50%;
           object-fit: cover;
           background: var(--bg-surface-elevated);
         }
         .art-card-tags-preview {
-          display: flex;
-          gap: 0.3rem;
-          overflow: hidden;
-          margin-top: 0.15rem;
+          display: none;
         }
         .art-card-tag-badge {
           font-size: 0.68rem;
@@ -23278,9 +23981,25 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          margin-top: 0.2rem;
-          font-size: 0.74rem;
-          color: var(--text-muted);
+          margin-top: 0.15rem;
+          font-size: 0.72rem;
+          color: rgba(255, 255, 255, 0.8);
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        }
+        .art-card:not(.list-mode) .stat-btn {
+          color: rgba(255, 255, 255, 0.85);
+        }
+        .art-card:not(.list-mode) .stat-btn:hover {
+          color: #ffffff;
+        }
+        .art-card:not(.list-mode) .stat-btn.active.like {
+          color: var(--like) !important;
+        }
+
+        /* Active State for Layout Switcher */
+        .toolbar-actions .btn-icon.active {
+          background: var(--accent-alpha) !important;
+          color: var(--accent) !important;
         }
         .art-card-actions { display: flex; align-items: center; gap: 0.65rem; }
         .stat-btn {
@@ -24623,6 +25342,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       <div class="modal-backdrop" id="modal-backdrop">
         <div class="modal-dialog" id="modal-dialog"></div>
       </div>
+
+      <!-- Grid & Layout Customization Menu (Matching User Drive) -->
+      <div id="dropdown-grid-adjust" style="display:none; position:fixed; z-index:99999; width:270px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 30px); overflow-y:auto; box-sizing:border-box; padding:0.9rem 1.05rem; background:var(--bg-surface); border:1px solid var(--border-strong); border-radius:14px; box-shadow:var(--shadow-lg);">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
+          <span style="font-size:0.75rem; font-weight:700; text-transform:uppercase; color:var(--accent); letter-spacing:0.6px;">Grid &amp; Appearance</span>
+        </div>
+        <div class="slider-box-container">
+          <div class="slider-box-header"><span>Columns</span><span id="slider-cols-val">Auto</span></div>
+          <input type="range" class="slider-box-input" id="slider-cols" min="0" max="8" value="0" oninput="app.setGridCols(this.value)">
+        </div>
+        <div class="slider-box-container">
+          <div class="slider-box-header"><span>Item Gap</span><span id="slider-gap-val">14px</span></div>
+          <input type="range" class="slider-box-input" id="slider-gap" min="2" max="36" value="14" oninput="app.setGridGap(this.value)">
+        </div>
+        <div class="slider-box-container">
+          <div class="slider-box-header"><span>Border Radius</span><span id="slider-radius-val">12px</span></div>
+          <input type="range" class="slider-box-input" id="slider-radius" min="0" max="32" value="12" oninput="app.setGridRadius(this.value)">
+        </div>
+        <div style="height:1px; background:var(--border-subtle); margin:0.5rem 0;"></div>
+        <button type="button" class="btn-subtle" style="width:100%; height:32px; font-size:0.78rem; justify-content:center; gap:0.4rem;" onclick="app.resetGridAdjust()">
+          <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+          <span>Reset Defaults</span>
+        </button>
+      </div>
     
       <div id="toast-slot"></div>
     
@@ -24634,6 +25377,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.needsSetup = <?= $isInitialSetup ? 'true' : 'false' ?>;
             this.csrfToken = <?= json_encode($_SESSION['csrf_token'] ?? '') ?>;
             this.theme = localStorage.getItem('hd_theme') || 'dark';
+            this.layout = localStorage.getItem('hd_art_layout') || 'grid';
+            this.gridCols = parseInt(localStorage.getItem('hd_grid_cols')) || 0;
+            this.gridGap = parseInt(localStorage.getItem('hd_grid_gap')) || 14;
+            this.gridRadius = parseInt(localStorage.getItem('hd_grid_radius')) || 12;
             this.r18Enabled = localStorage.getItem('r18_enabled') !== '0';
             this.safeBlurEnabled = localStorage.getItem('safeblur_enabled') !== '0';
             this.hideAI = localStorage.getItem('hide_ai') !== '0'; // Defaults to TRUE (hidden) unless explicitly toggled off
@@ -24651,6 +25398,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             this.initTheme();
             this.initR18Toggle();
             this.initHideAIToggle();
+            this.applyGridSizing();
             this.bindEvents();
             this.renderUserSlot();
             if (!this.needsSetup) {
@@ -24663,6 +25411,432 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     
           setTitle(pageTitle) {
             document.title = pageTitle ? `${pageTitle} \u2013 ${this.appName}` : `${this.appName} \u2013 Creative Studio`;
+          }
+
+          setLayout(mode) {
+            this.layout = mode;
+            localStorage.setItem('hd_art_layout', mode);
+            this.handleRoute();
+          }
+
+          getColumnsCount() {
+            if (this.gridCols > 0) return this.gridCols;
+            const w = window.innerWidth;
+            if (w < 520) return 2;
+            if (w < 840) return 3;
+            if (w < 1200) return 4;
+            if (w < 1600) return 5;
+            return 6;
+          }
+
+          formatCompactNumber(num) {
+            const n = Number(num || 0);
+            if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+            if (n >= 10000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+            return n.toLocaleString();
+          }
+
+          async loadPopularHero(mountId = 'popular-hero-mount', period = 'day', userId = 0, artistName = '') {
+            const mount = document.getElementById(mountId);
+            if (!mount) return;
+            userId = parseInt(userId, 10) || 0;
+            if (userId > 0) this.userPopularPeriod = period;
+            else this.popularPeriod = period;
+
+            try {
+              const reqPayload = {
+                feed: 'rankings',
+                period: period,
+                limit: 10,
+                rating: this.r18Enabled ? 'all' : 'safe',
+                hide_ai: this.hideAI ? 1 : 0
+              };
+              if (userId > 0) reqPayload.user_id = userId;
+
+              const res = await this.api('artworks_list', reqPayload);
+              const artworks = res.artworks || [];
+              if (!artworks.length) {
+                mount.innerHTML = '';
+                return;
+              }
+
+              const topWork = artworks[0];
+              const topArtist = topWork.artist_name || artistName || 'Artist';
+              const topArtistId = topWork.user_id || userId || 0;
+              const topBgUrl = topWork.cover_file ? `?access=artwork&action=raw&f=${encodeURIComponent(topWork.cover_file)}` : '';
+
+              const periodLabels = {
+                day: 'this day',
+                week: 'this week',
+                month: 'this month',
+                year: 'this year',
+                all: 'all time'
+              };
+
+              const heroTitle = userId > 0 ? `Popular by ${this.escape(topArtist)}` : 'Popular Artworks';
+              const subText = period === 'all'
+                ? (userId > 0 ? `These images are displayed based on total views of all time by this artist.` : 'These images are displayed based on their total view counts of all time. The more views an image has, the higher its ranking in this list.')
+                : (userId > 0 ? `These images are displayed based on view counts from ${periodLabels[period] || 'this day'} by this artist.` : `These images are displayed based on their view counts from ${periodLabels[period] || 'this day'}. The more views an image has, the higher its ranking in this list.`);
+
+              const viewMoreUrl = userId > 0
+                ? `#/user/${userId}?tab=rankings&period=${period === 'all' ? 'all_time' : period}`
+                : `#/rankings?period=${period === 'all' ? 'all_time' : period}`;
+
+              const trackId = `popular-track-${mountId}`;
+
+              const cardsHtml = artworks.map((art, idx) => {
+                const rankNum = idx + 1;
+                let rankClass = 'rank-other';
+                if (rankNum === 1) rankClass = 'rank-1';
+                else if (rankNum === 2) rankClass = 'rank-2';
+                else if (rankNum === 3) rankClass = 'rank-3';
+
+                const thumbUrl = art.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(art.cover_file)}` : '';
+                const initial = (art.artist_name || 'A').charAt(0).toUpperCase();
+
+                return `
+                  <div class="popular-card" onclick="app.nav('#/artwork/${art.id}')">
+                    <div class="popular-card-thumb">
+                      <span class="popular-card-rank-badge ${rankClass}">No. ${rankNum}</span>
+                      <img src="${thumbUrl}" alt="${this.escape(art.title)}" loading="lazy" decoding="async" onerror="this.onerror=null; this.src='?action=get_app_icon&size=128';">
+                    </div>
+                    <div class="popular-card-info">
+                      <div class="popular-card-avatar" title="${this.escape(art.artist_name)}">
+                        ${art.avatar ? `<img src="${art.avatar}" alt="" onerror="this.parentElement.innerHTML='${initial}';">` : initial}
+                      </div>
+                      <div class="popular-card-text">
+                        <div class="popular-card-title" title="${this.escape(art.title)}">${this.escape(art.title)}</div>
+                        <div class="popular-card-author">${this.escape(art.artist_name)}</div>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+
+              mount.innerHTML = `
+                <div class="popular-hero-banner">
+                  <div class="popular-hero-bg" style="background-image: url('${topBgUrl}');"></div>
+                  <div class="popular-hero-overlay"></div>
+                  
+                  <div class="popular-hero-content">
+                    <div class="popular-hero-top-nav">
+                      <div class="popular-period-tabs">
+                        <button type="button" class="period-tab-btn ${period === 'day' ? 'active' : ''}" onclick="app.switchPopularPeriod('day', ${userId}, '${this.escape(artistName)}', '${mountId}')">this day</button>
+                        <button type="button" class="period-tab-btn ${period === 'week' ? 'active' : ''}" onclick="app.switchPopularPeriod('week', ${userId}, '${this.escape(artistName)}', '${mountId}')">this week</button>
+                        <button type="button" class="period-tab-btn ${period === 'month' ? 'active' : ''}" onclick="app.switchPopularPeriod('month', ${userId}, '${this.escape(artistName)}', '${mountId}')">this month</button>
+                        <button type="button" class="period-tab-btn ${period === 'year' ? 'active' : ''}" onclick="app.switchPopularPeriod('year', ${userId}, '${this.escape(artistName)}', '${mountId}')">this year</button>
+                        <button type="button" class="period-tab-btn ${period === 'all' ? 'active' : ''}" onclick="app.switchPopularPeriod('all', ${userId}, '${this.escape(artistName)}', '${mountId}')">all time</button>
+                      </div>
+                      <a href="${viewMoreUrl}" class="popular-view-more">
+                        <span>view more</span>
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+                      </a>
+                    </div>
+
+                    <div class="popular-hero-text">
+                      <h2 class="popular-hero-title">${heroTitle}</h2>
+                      <p class="popular-hero-sub">${subText}</p>
+                    </div>
+
+                    <div class="popular-carousel-wrapper">
+                      <button type="button" class="popular-carousel-arrow left" onclick="app.scrollPopularCarousel(-1, '${trackId}')" title="Previous">
+                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                      </button>
+
+                      <div class="popular-carousel-track" id="${trackId}">
+                        ${cardsHtml}
+                      </div>
+
+                      <button type="button" class="popular-carousel-arrow right" onclick="app.scrollPopularCarousel(1, '${trackId}')" title="Next">
+                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                      </button>
+                    </div>
+
+                    ${userId <= 0 ? `
+                      <div class="popular-hero-attribution">
+                        image by <a href="#/user/${topArtistId}" style="color:#ffffff; font-weight:700; text-decoration:underline; cursor:pointer;" onclick="event.stopPropagation();">${this.escape(topArtist)}</a>
+                      </div>
+                    ` : ''}
+                  </div>
+                </div>
+              `;
+            } catch(e) {
+              console.error('loadPopularHero failed:', e);
+              mount.innerHTML = '';
+            }
+          }
+
+          switchPopularPeriod(period, userId = 0, artistName = '', mountId = 'popular-hero-mount') {
+            this.loadPopularHero(mountId, period, userId, artistName);
+          }
+
+          scrollPopularCarousel(direction, trackId = 'popular-carousel-track') {
+            const track = document.getElementById(trackId);
+            if (track) {
+              const amount = direction * 460;
+              track.scrollBy({ left: amount, behavior: 'smooth' });
+            }
+          }
+
+          renderLayoutToolbarHtml() {
+            return `
+              <div class="toolbar-actions" style="display:inline-flex; align-items:center; gap:0.35rem; background:var(--bg-surface-elevated); padding:0.25rem 0.55rem; border-radius:12px; border:1px solid var(--border-subtle); height:40px; box-sizing:border-box; flex-shrink:0;">
+                <button type="button" class="btn-icon ${this.layout === 'grid' ? 'active' : ''}" style="width:36px; height:36px; border-radius:8px;" onclick="app.setLayout('grid')" title="Grid Layout">
+                  <svg viewBox="0 0 24 24" style="width:19px;height:19px;"><path d="M3 3h8v8H3zm0 10h8v8H3zM13 3h8v8h-8zm0 10h8v8h-8z"/></svg>
+                </button>
+                <button type="button" class="btn-icon ${this.layout === 'columns' ? 'active' : ''}" style="width:36px; height:36px; border-radius:8px;" onclick="app.setLayout('columns')" title="Masonry Layout">
+                  <svg viewBox="0 0 24 24" style="width:19px;height:19px;"><path d="M3 3h8v11H3zm10 0h8v6h-8zM3 16h8v5H3zm10-8h8v13h-8z"/></svg>
+                </button>
+                <button type="button" class="btn-icon ${this.layout === 'justified' ? 'active' : ''}" style="width:36px; height:36px; border-radius:8px;" onclick="app.setLayout('justified')" title="Justified Layout">
+                  <svg viewBox="0 0 24 24" style="width:19px;height:19px;"><path d="M3 4h8v7H3V4zm10 0h8v7h-8V4zm-10 9h5v7H3v-7zm7 0h11v7H10v-7z"/></svg>
+                </button>
+                <button type="button" class="btn-icon ${this.layout === 'list' ? 'active' : ''}" style="width:36px; height:36px; border-radius:8px;" onclick="app.setLayout('list')" title="List View">
+                  <svg viewBox="0 0 24 24" style="width:19px;height:19px;"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+                </button>
+                <div style="width:1px; height:22px; background:var(--border-subtle); margin:0 3px;"></div>
+                <button type="button" class="btn-icon" id="btn-grid-adjust" style="width:36px; height:36px; border-radius:8px;" onclick="app.toggleGridAdjust(event)" title="Grid, Gap &amp; Radius Settings">
+                  <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
+                </button>
+              </div>
+            `;
+          }
+
+          scheduleGridSizing() {
+            if (this.gridSizingScheduled) return;
+            this.gridSizingScheduled = true;
+            requestAnimationFrame(() => {
+              this.applyGridSizing();
+              this.gridSizingScheduled = false;
+            });
+          }
+
+          applyGridSizing() {
+            const gapStr = `${this.gridGap}px`;
+            const radStr = `${this.gridRadius}px`;
+
+            document.documentElement.style.setProperty('--hd-grid-gap', gapStr);
+            document.documentElement.style.setProperty('--hd-card-radius', radStr);
+
+            // Direct DOM variable injection for instant zero-latency reflow
+            document.querySelectorAll('.art-grid').forEach(grid => {
+              grid.style.setProperty('--hd-grid-gap', gapStr);
+              grid.style.setProperty('--hd-card-radius', radStr);
+              if (this.gridCols > 0 && this.layout === 'grid') {
+                grid.setAttribute('data-cols', this.gridCols);
+              } else {
+                grid.removeAttribute('data-cols');
+              }
+            });
+
+            const colsVal = document.getElementById('slider-cols-val');
+            const gapVal = document.getElementById('slider-gap-val');
+            const radiusVal = document.getElementById('slider-radius-val');
+
+            if (colsVal) colsVal.innerText = this.gridCols > 0 ? `${this.gridCols}` : 'Auto';
+            if (gapVal) gapVal.innerText = gapStr;
+            if (radiusVal) radiusVal.innerText = radStr;
+
+            const colsInput = document.getElementById('slider-cols');
+            const gapInput = document.getElementById('slider-gap');
+            const radiusInput = document.getElementById('slider-radius');
+
+            if (colsInput && document.activeElement !== colsInput) colsInput.value = this.gridCols;
+            if (gapInput && document.activeElement !== gapInput) gapInput.value = this.gridGap;
+            if (radiusInput && document.activeElement !== radiusInput) radiusInput.value = this.gridRadius;
+          }
+
+          setGridCols(val) {
+            this.gridCols = parseInt(val, 10) || 0;
+            localStorage.setItem('hd_grid_cols', this.gridCols);
+            this.scheduleGridSizing();
+            if (this.layout === 'columns') {
+              this.handleRoute();
+            }
+          }
+
+          setGridGap(val) {
+            this.gridGap = parseInt(val, 10) || 14;
+            localStorage.setItem('hd_grid_gap', this.gridGap);
+            this.scheduleGridSizing();
+          }
+
+          setGridRadius(val) {
+            this.gridRadius = parseInt(val, 10) || 12;
+            localStorage.setItem('hd_grid_radius', this.gridRadius);
+            this.scheduleGridSizing();
+          }
+
+          resetGridAdjust() {
+            this.gridCols = 0;
+            this.gridGap = 14;
+            this.gridRadius = 12;
+            localStorage.removeItem('hd_grid_cols');
+            localStorage.removeItem('hd_grid_gap');
+            localStorage.removeItem('hd_grid_radius');
+            this.applyGridSizing();
+            this.toast('Grid layout reset to defaults');
+            if (this.layout === 'columns') {
+              this.handleRoute();
+            }
+          }
+
+          toggleGridAdjust(e) {
+            e.stopPropagation();
+            const menu = document.getElementById('dropdown-grid-adjust');
+            if (!menu) return;
+            const isVisible = menu.style.display === 'flex';
+            if (isVisible) {
+              menu.style.display = 'none';
+            } else {
+              this.applyGridSizing();
+              const target = e.currentTarget || document.getElementById('btn-grid-adjust');
+              const rect = target.getBoundingClientRect();
+
+              menu.style.visibility = 'hidden';
+              menu.style.display = 'flex';
+              menu.style.flexDirection = 'column';
+
+              const menuWidth = Math.min(280, window.innerWidth - 20);
+              menu.style.width = `${menuWidth}px`;
+
+              // Clamped right position so dropdown never clips out of screen
+              let rightPos = window.innerWidth - rect.right;
+              if (rightPos < 10) rightPos = 10;
+              if (rightPos + menuWidth > window.innerWidth - 10) {
+                rightPos = Math.max(10, window.innerWidth - menuWidth - 10);
+              }
+              menu.style.right = `${rightPos}px`;
+              menu.style.left = 'auto';
+
+              // Clamped vertical position: flip upwards if button sits near bottom of screen
+              const menuHeight = menu.offsetHeight || 240;
+              let topPos = rect.bottom + 8;
+              if (topPos + menuHeight > window.innerHeight - 10) {
+                topPos = Math.max(10, rect.top - menuHeight - 8);
+              }
+              menu.style.top = `${topPos}px`;
+              menu.style.visibility = 'visible';
+
+              const onOutsideClick = (evt) => {
+                if (!menu.contains(evt.target) && !target.contains(evt.target)) {
+                  menu.style.display = 'none';
+                  window.removeEventListener('click', onOutsideClick);
+                }
+              };
+              setTimeout(() => window.addEventListener('click', onOutsideClick), 10);
+            }
+          }
+
+          renderArtGrid(artworks, options = {}) {
+            if (!artworks || !artworks.length) return '';
+            const cardsHtml = artworks.map(art => this.renderArtworkCardHtml(art, options));
+            if (this.layout === 'columns') {
+              const numCols = this.getColumnsCount();
+              const cols = Array.from({ length: numCols }, () => []);
+              cardsHtml.forEach((html, idx) => {
+                cols[idx % numCols].push(html);
+              });
+              return `<div class="art-grid layout-columns">${cols.map(c => `<div class="masonry-col">${c.join('')}</div>`).join('')}</div>`;
+            } else if (this.layout === 'justified') {
+              return `<div class="art-grid layout-justified">${cardsHtml.join('')}</div>`;
+            } else if (this.layout === 'list') {
+              return `<div class="art-grid layout-list">${cardsHtml.join('')}</div>`;
+            } else {
+              return `<div class="art-grid layout-grid">${cardsHtml.join('')}</div>`;
+            }
+          }
+
+          renderArtworkCardHtml(art, options = {}) {
+            const coverFileName = art.cover_file || '';
+            const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
+            const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
+            const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
+            const isManga = art.type === 'manga' || options.isManga;
+            const isNovel = art.type === 'novel' || options.isNovel;
+            const pageCount = Number(art.page_count || 1);
+            const viewCount = Number(art.view_count || art.total_views || 0);
+            const likeCount = Number(art.like_count || art.total_likes || 0);
+
+            const isSafeBlurCard = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
+            const isList = (this.layout === 'list');
+
+            let cardTarget = `#/artwork/${art.id}`;
+            let ratioClass = '';
+            if (options.cardTarget) {
+              cardTarget = options.cardTarget;
+            } else if (isManga && (art.series_title || art.series_name)) {
+              const sTitle = art.series_title || art.series_name;
+              cardTarget = `#/manga/series/${encodeURIComponent(sTitle)}/userid/${art.user_id}`;
+              ratioClass = 'manga-card ratio-9-16';
+            } else if (isNovel && (art.series_title || art.series_name)) {
+              const sTitle = art.series_title || art.series_name;
+              cardTarget = `#/novel/series/${encodeURIComponent(sTitle)}/userid/${art.user_id}`;
+              ratioClass = 'manga-card ratio-9-16';
+            }
+
+            if (options.ratioClass) ratioClass = options.ratioClass;
+
+            return `
+              <div class="art-card ${ratioClass} ${isList ? 'list-mode' : ''}" onclick="app.nav('${cardTarget}')">
+                <div class="art-thumb-wrap position-relative">
+                  ${isSafeBlurCard ? `
+                    <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
+                      <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                      <span style="font-size:0.68rem; font-weight:800; letter-spacing:0.5px;">R-18 CONTENT</span>
+                    </div>
+                  ` : ''}
+                  ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurCard ? 'safe-blur-target' : ''}" alt="" loading="lazy" decoding="async" onload="${this.layout === 'justified' ? 'if(this.naturalWidth&&this.naturalHeight){const c=this.closest(\'.art-card\');if(c){const r=this.naturalWidth/this.naturalHeight;c.style.setProperty(\'--card-grow\',r);c.style.setProperty(\'--card-ratio\',r);}}' : ''}" onerror="if(!this.dataset.tried){this.dataset.tried=1;this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}';}else{this.onerror=null;this.src='?action=get_app_icon&size=128';}">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
+
+                  <!-- Top-Right Floating Badges: Page Count, Views, Favorites -->
+                  <div class="card-top-right-bar">
+                    ${pageCount > 1 ? `<span class="badge-pill page-pill"><svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</span>` : ''}
+                    ${options.totalChapters ? `<span class="badge-pill page-pill"><svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg> ${options.totalChapters} Ch.</span>` : ''}
+                    <span class="badge-pill stat-pill" title="${viewCount.toLocaleString()} views">
+                      <svg viewBox="0 0 24 24" style="width:11px;height:11px;opacity:0.75;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                      <span>${this.formatCompactNumber(viewCount)}</span>
+                    </span>
+                    <span class="badge-pill stat-pill like-pill ${art.user_liked ? 'active' : ''}" onclick="event.stopPropagation(); app.toggleLike(${art.id || 0}, this)" title="Favorite">
+                      <svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                      <span class="like-count">${this.formatCompactNumber(likeCount)}</span>
+                    </span>
+                  </div>
+
+                  <!-- Top-Left Flags -->
+                  <div style="position:absolute; top:8px; left:8px; display:flex; flex-direction:column; gap:4px; z-index:5;">
+                    ${isVid ? `<div class="badge-flag video" style="position:static;">VIDEO</div>` : ''}
+                    ${isManga ? `<div class="badge-flag manga" style="position:static;">MANGA</div>` : ''}
+                    ${isNovel ? `<div class="badge-flag novel" style="position:static;">NOVEL</div>` : ''}
+                    ${art.rating === 'r18' ? `<div class="badge-flag badge-r18" style="position:static;">R-18</div>` : ''}
+                    ${art.is_ai ? `<div class="badge-flag ai" style="position:static;">AI</div>` : ''}
+                  </div>
+                </div>
+
+                <!-- Clean Bottom Info Overlay (Title & Author) -->
+                <div class="art-card-info">
+                  <div style="display:flex; flex-direction:column; min-width:0; gap:0.15rem;">
+                    <div class="art-card-title" title="${this.escape(art.title || art.series_title || '')}">
+                      <span>${this.escape(art.title || art.series_title || '')}</span>
+                      ${(isList && art.rating === 'r18') ? `<span style="color:var(--r18); font-size:0.7rem; font-weight:800; margin-left:6px;">R-18</span>` : ''}
+                    </div>
+                    <div class="art-card-author">
+                      ${avatarUrl && !options.noAvatar ? `<img src="${avatarUrl}" class="art-card-avatar" alt="" onerror="app.handleAvatarError(this)">` : ''}
+                      <span>${this.escape(art.artist_name || '')}</span>
+                    </div>
+                  </div>
+
+                  <!-- Kept for List View alignment -->
+                  <div class="art-card-stats">
+                    <span>${viewCount.toLocaleString()} views</span>
+                    <div class="art-card-actions">
+                      <span class="stat-btn ${art.user_liked ? 'active like' : ''}" onclick="event.stopPropagation(); app.toggleLike(${art.id || 0}, this)">
+                        <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                        <span>${likeCount}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            `;
           }
 
           renderEditorToolbarHtml() {
@@ -25630,39 +26804,49 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (parody) heading = `Series: ${parody}`;
               this.setTitle(heading);
   
+              const isDefaultHome = (feedType === 'home' && !query && !tag && !character && !parody && !sourceUrl && page === 1);
+  
               let html = `
-                <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
-                  <div>
-                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px;">${heading}</h1>
-                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem;">${res.total} works available</p>
+                ${isDefaultHome ? `<div id="popular-hero-mount"><div class="spinner" style="width:28px;height:28px;margin:2rem auto;"></div></div>` : ''}
+                <div class="feed-header-wrap">
+                  <div class="feed-header-title-block">
+                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px; margin:0;">${heading}</h1>
+                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem; margin-bottom:0;">${res.total} works available</p>
                   </div>
-                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                    <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
-                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
-                      <span>Advanced Search</span>
-                    </button>
-                    ${feedType === 'rankings' ? `
-                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('period', this.value)">
-                        <option value="daily" ${period === 'daily' ? 'selected' : ''}>Daily Top</option>
-                        <option value="weekly" ${period === 'weekly' ? 'selected' : ''}>Weekly Ranking</option>
-                        <option value="monthly" ${period === 'monthly' ? 'selected' : ''}>Monthly Best</option>
+                  <div class="feed-header-actions-col">
+                    <div class="feed-header-controls">
+                      <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
+                        <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                        <span>Advanced Search</span>
+                      </button>
+                      ${feedType === 'rankings' ? `
+                        <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('period', this.value)">
+                          <option value="day" ${period === 'day' || period === 'daily' ? 'selected' : ''}>This Day</option>
+                          <option value="week" ${period === 'week' || period === 'weekly' ? 'selected' : ''}>This Week</option>
+                          <option value="month" ${period === 'month' || period === 'monthly' ? 'selected' : ''}>This Month</option>
+                          <option value="year" ${period === 'year' || period === 'yearly' ? 'selected' : ''}>This Year</option>
+                          <option value="all" ${period === 'all' || period === 'all_time' ? 'selected' : ''}>All Time</option>
+                        </select>
+                      ` : ''}
+                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
+                        <option value="newest" ${sort === 'newest' ? 'selected' : ''}>Newest First</option>
+                        <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
+                        <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
+                        <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                        <option value="views" ${sort === 'views' ? 'selected' : ''}>Most Views</option>
+                        <option value="oldest" ${sort === 'oldest' ? 'selected' : ''}>Oldest</option>
                       </select>
-                    ` : ''}
-                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
-                      <option value="newest" ${sort === 'newest' ? 'selected' : ''}>Newest First</option>
-                      <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
-                      <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
-                      <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
-                      <option value="views" ${sort === 'views' ? 'selected' : ''}>Most Views</option>
-                      <option value="oldest" ${sort === 'oldest' ? 'selected' : ''}>Oldest</option>
-                    </select>
-                    ${(feedType !== 'r18' && this.r18Enabled) ? `
-                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
-                      <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
-                      <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages Only</option>
-                      <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
-                    </select>
-                  ` : ''}
+                      ${(feedType !== 'r18' && this.r18Enabled) ? `
+                        <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                          <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                          <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages Only</option>
+                          <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                        </select>
+                      ` : ''}
+                    </div>
+                    <div class="feed-header-layout-row">
+                      ${this.renderLayoutToolbarHtml()}
+                    </div>
                   </div>
                 </div>
   
@@ -25692,64 +26876,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!res.artworks || !res.artworks.length) {
                 html += `<div class="center-msg">No illustrations or videos found for this criteria.</div>`;
               } else {
-                html += `<div class="art-grid">`;
-                res.artworks.forEach(art => {
-                  const coverFileName = art.cover_file || '';
-                  const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
-                  const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
-                  const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
-                  const isManga = art.type === 'manga';
-                  const isNovel = art.type === 'novel';
-                  const pageCount = Number(art.page_count || 1);
-                  const viewCount = Number(art.view_count || 0);
-                  const likeCount = Number(art.like_count || 0);
-  
-                  const rawTags = (art.tags || '').split(/[,，、]+/).map(s => s.trim()).filter(Boolean);
-                  const previewTags = rawTags.slice(0, 2);
-  
-                  const isSafeBlurCard = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
-                  html += `
-                    <div class="art-card" onclick="app.nav('#/artwork/${art.id}')">
-                      <div class="art-thumb-wrap position-relative">
-                        ${isSafeBlurCard ? `
-                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                            <span style="font-size:0.68rem; font-weight:800; letter-spacing:0.5px;">R-18 CONTENT</span>
-                          </div>
-                        ` : ''}
-                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurCard ? 'safe-blur-target' : ''}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
-                        ${pageCount > 1 ? `<div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</div>` : ''}
-                        ${isVid ? `<div class="badge-flag video">VIDEO</div>` : ''}
-                        ${isManga ? `<div class="badge-flag manga">MANGA</div>` : ''}
-                        ${isNovel ? `<div class="badge-flag novel">NOVEL</div>` : ''}
-                        ${art.rating === 'r18' ? `<div class="badge-flag">R-18</div>` : ''}
-                        ${art.is_ai ? `<div class="badge-flag ai">AI</div>` : ''}
-                      </div>
-                      <div class="art-card-info">
-                        <div class="art-card-title">${this.escape(art.title)}</div>
-                        <div class="art-card-author">
-                          <img src="${avatarUrl}" class="art-card-avatar" alt="" data-artist-name="${this.escape(art.artist_name)}" onerror="app.handleAvatarError(this)">
-                          <span>${this.escape(art.artist_name)}</span>
-                    </div>
-                        ${previewTags.length ? `
-                          <div class="art-card-tags-preview">
-                            ${previewTags.map(t => `<span class="art-card-tag-badge">#${this.escape(t)}</span>`).join('')}
-                          </div>
-                        ` : ''}
-                        <div class="art-card-stats">
-                          <span>${viewCount.toLocaleString()} views</span>
-                          <div class="art-card-actions">
-                            <span class="stat-btn ${art.user_liked ? 'active like' : ''}" onclick="event.stopPropagation(); app.toggleLike(${art.id}, this)">
-                              <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                              <span>${likeCount}</span>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  `;
-                });
-                html += `</div>`;
+                html += this.renderArtGrid(res.artworks);
   
                 if (res.pages > 1) {
                   html += `
@@ -25773,6 +26900,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               }
   
               container.innerHTML = html;
+              if (isDefaultHome) {
+                setTimeout(() => this.loadPopularHero('popular-hero-mount', this.popularPeriod || 'day', 0), 10);
+              }
             } catch(err) {
               container.innerHTML = `<div class="center-msg">${err.message}</div>`;
             }
@@ -25850,31 +26980,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
               const res = await this.api('novel_series_list', reqPayload);
               let html = `
-                <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
-                  <div>
-                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px;"><svg viewBox="0 0 24 24" style="width:24px;height:24px;fill:currentColor;color:#10b981;margin-right:6px;vertical-align:text-bottom;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>Novels &amp; Web Series</h1>
-                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem;">${res.total} series available</p>
+                <div class="feed-header-wrap">
+                  <div class="feed-header-title-block">
+                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px; margin:0;"><svg viewBox="0 0 24 24" style="width:24px;height:24px;fill:currentColor;color:#10b981;margin-right:6px;vertical-align:text-bottom;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>Novels &amp; Web Series</h1>
+                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem; margin-bottom:0;">${res.total} series available</p>
                   </div>
-                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                    <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
-                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
-                      <span>Advanced Search</span>
-                    </button>
-                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
-                      <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
-                      <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
-                      <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
-                      <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
-                      <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
-                      <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
-                    </select>
-                    ${this.r18Enabled ? `
-                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
-                        <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
-                        <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
-                        <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                  <div class="feed-header-actions-col">
+                    <div class="feed-header-controls">
+                      <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
+                        <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                        <span>Advanced Search</span>
+                      </button>
+                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
+                        <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
+                        <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
+                        <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
+                        <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                        <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
+                        <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
                       </select>
-                    ` : ''}
+                      ${this.r18Enabled ? `
+                        <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                          <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                          <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
+                          <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                        </select>
+                      ` : ''}
+                    </div>
+                    <div class="feed-header-layout-row">
+                      ${this.renderLayoutToolbarHtml()}
+                    </div>
                   </div>
                 </div>
 
@@ -25896,37 +27031,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!res.series || !res.series.length) {
                 html += '<div class="center-msg">No novel series published yet.</div>';
               } else {
-                html += '<div class="art-grid">';
-                res.series.forEach(item => {
-                  const coverUrl = item.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}` : '';
-                  const seriesUrl = `#/novel/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
-                  const isSafeBlurNovel = (item.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
-                  html += `
-                    <div class="art-card manga-card ratio-9-16" onclick="app.nav('${seriesUrl}')">
-                      <div class="art-thumb-wrap position-relative" style="aspect-ratio: 9 / 16 !important;">
-                        ${isSafeBlurNovel ? `
-                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
-                          </div>
-                        ` : ''}
-                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurNovel ? 'safe-blur-target' : ''}" alt="" loading="lazy">` : '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-muted);gap:0.4rem;"><svg viewBox="0 0 24 24" style="width:36px;height:36px;opacity:0.4;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg><span>Book Cover</span></div>'}
-                        <div class="badge-page-count"><svg viewBox="0 0 24 24" style="width:12px;height:12px;margin-right:2px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>${item.total_chapters} Ch.</div>
-                        <div class="badge-flag novel">NOVEL</div>
-                        ${item.rating === 'r18' ? '<div class="badge-flag" style="top:32px;">R-18</div>' : '<div class="badge-flag" style="top:32px;background:rgba(34,197,94,0.9);">SAFE</div>'}
-                      </div>
-                      <div class="art-card-info">
-                        <div class="art-card-title">${this.escape(item.series_title)}</div>
-                        <div class="art-card-author"><span>By ${this.escape(item.artist_name)}</span></div>
-                        <div class="art-card-stats">
-                          <span>${(item.total_views || 0).toLocaleString()} views</span>
-                          <span class="text-danger fw-bold"><svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;margin-right:2px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>${item.total_likes || 0}</span>
-                        </div>
-                      </div>
-                    </div>
-                  `;
-                });
-                html += '</div>';
+                html += this.renderArtGrid(res.series.map(item => ({
+                  ...item,
+                  title: item.series_title,
+                  cover_file: item.cover_file,
+                  total_chapters: item.total_chapters
+                })), { isNovel: true, noAvatar: true, ratioClass: 'manga-card ratio-9-16' });
               }
               container.innerHTML = html;
             } catch (err) {
@@ -26163,31 +27273,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
               const res = await this.api('manga_series_list', reqPayload);
               let html = `
-                <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.8rem;">
-                  <div>
-                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px;"><i class="bi bi-book-half text-warning me-2"></i>Manga &amp; Comic Series</h1>
-                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem;">${res.total} series available</p>
+                <div class="feed-header-wrap">
+                  <div class="feed-header-title-block">
+                    <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px; margin:0;"><i class="bi bi-book-half text-warning me-2"></i>Manga &amp; Comic Series</h1>
+                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem; margin-bottom:0;">${res.total} series available</p>
                   </div>
-                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                    <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
-                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
-                      <span>Advanced Search</span>
-                    </button>
-                    <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
-                      <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
-                      <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
-                      <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
-                      <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
-                      <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
-                      <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
-                    </select>
-                    ${this.r18Enabled ? `
-                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
-                        <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
-                        <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
-                        <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                  <div class="feed-header-actions-col">
+                    <div class="feed-header-controls">
+                      <button class="btn-subtle" onclick="app.toggleAdvSearch()" style="gap:0.4rem;">
+                        <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                        <span>Advanced Search</span>
+                      </button>
+                      <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
+                        <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
+                        <option value="my_favorites" ${sort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
+                        <option value="favorites" ${sort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
+                        <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                        <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
+                        <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
                       </select>
-                    ` : ''}
+                      ${this.r18Enabled ? `
+                        <select class="form-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                          <option value="all" ${rating === 'all' ? 'selected' : ''}>All Ratings</option>
+                          <option value="safe" ${rating === 'safe' ? 'selected' : ''}>All Ages (Safe)</option>
+                          <option value="r18" ${rating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                        </select>
+                      ` : ''}
+                    </div>
+                    <div class="feed-header-layout-row">
+                      ${this.renderLayoutToolbarHtml()}
+                    </div>
                   </div>
                 </div>
 
@@ -26209,36 +27324,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!res.series || !res.series.length) {
                 html += '<div class="center-msg">No manga series published yet.</div>';
               } else {
-                html += '<div class="art-grid">';
-                res.series.forEach(item => {
-                  const coverUrl = item.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(item.cover_file)}` : '';
-                  const seriesUrl = `#/manga/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
-                  const isSafeBlurManga = (item.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
-                  html += `
-                    <div class="art-card manga-card ratio-9-16" onclick="app.nav('${seriesUrl}')">
-                      <div class="art-thumb-wrap position-relative" style="aspect-ratio: 9 / 16 !important;">
-                        ${isSafeBlurManga ? `
-                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
-                          </div>
-                        ` : ''}
-                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurManga ? 'safe-blur-target' : ''}" alt="" loading="lazy">` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">No Cover</div>'}
-                        <div class="badge-page-count"><i class="bi bi-journal-text me-1"></i>${item.total_chapters} Ch.</div>
-                        ${item.rating === 'r18' ? '<div class="badge-flag">R-18</div>' : '<div class="badge-flag" style="background:rgba(34,197,94,0.9);">SAFE</div>'}
-                      </div>
-                      <div class="art-card-info">
-                        <div class="art-card-title">${this.escape(item.series_title)}</div>
-                        <div class="art-card-author"><span>By ${this.escape(item.artist_name)}</span></div>
-                        <div class="art-card-stats">
-                          <span>${(item.total_views || 0).toLocaleString()} views</span>
-                          <span class="text-danger fw-bold"><i class="bi bi-heart-fill me-1"></i>${item.total_likes || 0}</span>
-                        </div>
-                      </div>
-                    </div>
-                  `;
-                });
-                html += '</div>';
+                html += this.renderArtGrid(res.series.map(item => ({
+                  ...item,
+                  title: item.series_title,
+                  cover_file: item.cover_file,
+                  total_chapters: item.total_chapters
+                })), { isManga: true, noAvatar: true, ratioClass: 'manga-card ratio-9-16' });
               }
               container.innerHTML = html;
             } catch (err) {
@@ -27400,24 +28491,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 if (!res.matches || !res.matches.length) {
                   html += `<div class="center-msg">No visually similar artworks matched in database.</div>`;
                 } else {
-                  html += `<h3 style="font-size:1.1rem; font-weight:700; margin-bottom:1rem;">Visual Matches (${res.matches.length})</h3><div class="art-grid">`;
-                  res.matches.forEach(m => {
-                    html += `
-                      <div class="art-card" onclick="app.nav('#/artwork/${m.id}')">
-                        <div class="art-thumb-wrap">
-                          <img src="?access=artwork&action=thumb&f=${encodeURIComponent(m.cover_file)}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(m.cover_file)}'">
-                          <div class="badge-flag" style="background:#10b981;">${m.similarity}% Match</div>
-                        </div>
-                        <div class="art-card-info">
-                          <div class="art-card-title">${this.escape(m.title)}</div>
-                          <div class="art-card-author">
-                            <span>${this.escape(m.artist_name)}</span>
-                          </div>
-                        </div>
-                      </div>
-                    `;
-                  });
-                  html += `</div>`;
+                  html += `
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                      <h3 style="font-size:1.1rem; font-weight:700; margin:0;">Visual Matches (${res.matches.length})</h3>
+                      ${this.renderLayoutToolbarHtml()}
+                    </div>
+                  `;
+                  html += this.renderArtGrid(res.matches);
                 }
               }
               html += `</div>`;
@@ -27448,22 +28528,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!res.matches.length) {
                 html += `<div class="center-msg">No visually similar artworks matched in database.</div>`;
               } else {
-                html += `<div class="art-grid">`;
-                res.matches.forEach(m => {
-                  html += `
-                    <div class="art-card" onclick="app.nav('#/artwork/${m.id}')">
-                      <div class="art-thumb-wrap">
-                        <img src="?access=artwork&action=thumb&f=${encodeURIComponent(m.cover_file)}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(m.cover_file)}'">
-                        <div class="badge-flag" style="background:#10b981;">${m.similarity}% Match</div>
-                      </div>
-                      <div class="art-card-info">
-                        <div class="art-card-title">${this.escape(m.title)}</div>
-                        <div class="art-card-author"><span>${this.escape(m.artist_name)}</span></div>
-                      </div>
-                    </div>
-                  `;
-                });
-                html += `</div>`;
+                html += `
+                  <div style="display:flex; justify-content:flex-end; margin-bottom:0.8rem;">
+                    ${this.renderLayoutToolbarHtml()}
+                  </div>
+                `;
+                html += this.renderArtGrid(res.matches);
               }
               html += `</div>`;
               container.innerHTML = html;
@@ -28120,7 +29190,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else if (isLeadVid) {
                 mediaHtml = `
                   <div class="viewer-media-wrap position-relative" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
-                    ${art.rating === 'r18' ? `<div class="badge-flag" style="z-index:10;">R-18</div>` : ''}
                     ${isSafeBlurPost ? `
                       <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
                         <svg viewBox="0 0 24 24" style="width:36px;height:36px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
@@ -28137,7 +29206,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else {
                 mediaHtml = `
                   <div class="viewer-media-wrap position-relative" id="artwork-media-container" style="display:flex; flex-direction:column; background:#000; border-radius:16px; overflow:hidden; border:1px solid var(--border-subtle); box-shadow:var(--shadow-md); width:100%; position:relative;">
-                    ${art.rating === 'r18' ? `<div class="badge-flag" style="z-index:10;">R-18</div>` : ''}
                     <div style="display:flex; justify-content:center; position:relative; align-items:center; width:100%; background:#08080a; cursor:pointer;" data-file="${this.escape(leadImg.file_name || '')}" onclick="app.toggleHdOriginal(this)">
                       ${isSafeBlurPost ? `
                         <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
@@ -29043,6 +30111,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else if (activeTab === 'artworks') {
                 reqData.user_id = prof.id;
                 reqData.type = 'artworks';
+              } else if (activeTab === 'rankings') {
+                reqData.feed = 'rankings';
+                reqData.user_id = prof.id;
+                reqData.period = profParams.get('period') || 'day';
               } else {
                 reqData.user_id = prof.id;
                 reqData.type = 'all';
@@ -29097,6 +30169,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg>
                     <span>Novels</span>
                   </button>
+                  <button type="button" role="tab" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${activeTab === 'rankings' ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${activeTab === 'rankings' ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none; flex-shrink:0;" onclick="app.switchProfileTab('rankings')">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
+                    <span>Rankings</span>
+                  </button>
                   <div style="position:relative; display:inline-flex; flex-shrink:0;">
                     <button type="button" role="tab" id="profile-fav-tab-btn" style="display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1rem; cursor:pointer; font-weight:700; font-size:13.5px; color:${isFavTab ? 'var(--accent)' : 'var(--text-secondary)'}; border-bottom:2px solid ${isFavTab ? 'var(--accent)' : 'transparent'}; white-space:nowrap; transition:all 0.15s ease; background:none; border-top:none; border-left:none; border-right:none;" onclick="app.toggleProfileFavMenu(this, event)">
                       <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -29120,35 +30196,42 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
                 </div>
 
+                ${activeTab === 'all' && !profQ && !profTag && !profChar && !profParody && profPage === 1 ? `<div id="user-popular-hero-mount"><div class="spinner" style="width:28px;height:28px;margin:2rem auto;"></div></div>` : ''}
+
                 <!-- 100% Width Mobile Layout (Matching Feeds: Search + Advanced + Sort + Rating) -->
-                <div class="feed-header-wrap" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem; flex-wrap:wrap; gap:0.75rem;">
-                  <div style="flex:1; width:100%; min-width:240px; max-width:520px;">
+                <div class="feed-header-wrap">
+                  <div class="feed-header-title-block" style="flex:1; max-width:440px;">
                     <div class="search-bar" style="height:36px; width:100%;">
                       <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
                       <input type="text" id="prof-search-input" placeholder="Search works..." value="${this.escape(profQ)}" onkeydown="if(event.key==='Enter') app.updateParam('q', this.value.trim())">
                     </div>
                   </div>
 
-                  <div class="feed-header-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                    <button type="button" class="btn-subtle" onclick="app.toggleProfAdvSearch()" style="height:36px; font-size:0.8rem; gap:0.4rem; padding:0 0.85rem;">
-                      <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
-                      <span>Advanced</span>
-                    </button>
-                    <select class="form-select custom-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
-                      <option value="newest" ${profSort === 'newest' ? 'selected' : ''}>Newest First</option>
-                      <option value="my_favorites" ${profSort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
-                      <option value="favorites" ${profSort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
-                      <option value="popular" ${profSort === 'popular' ? 'selected' : ''}>Most Popular</option>
-                      <option value="views" ${profSort === 'views' ? 'selected' : ''}>Most Views</option>
-                      <option value="oldest" ${profSort === 'oldest' ? 'selected' : ''}>Oldest</option>
-                    </select>
-                    ${this.r18Enabled ? `
-                      <select class="form-select custom-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
-                        <option value="all" ${profRating === 'all' ? 'selected' : ''}>All Ratings</option>
-                        <option value="safe" ${profRating === 'safe' ? 'selected' : ''}>All Ages Only</option>
-                        <option value="r18" ${profRating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                  <div class="feed-header-actions-col">
+                    <div class="feed-header-controls">
+                      <button type="button" class="btn-subtle" onclick="app.toggleProfAdvSearch()" style="height:36px; font-size:0.8rem; gap:0.4rem; padding:0 0.85rem;">
+                        <svg viewBox="0 0 24 24" style="width:15px;height:15px;"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                        <span>Advanced</span>
+                      </button>
+                      <select class="form-select custom-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('sort', this.value)">
+                        <option value="newest" ${profSort === 'newest' ? 'selected' : ''}>Newest First</option>
+                        <option value="my_favorites" ${profSort === 'my_favorites' ? 'selected' : ''}>My Favorites</option>
+                        <option value="favorites" ${profSort === 'favorites' ? 'selected' : ''}>Most Favorites</option>
+                        <option value="popular" ${profSort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                        <option value="views" ${profSort === 'views' ? 'selected' : ''}>Most Views</option>
+                        <option value="oldest" ${profSort === 'oldest' ? 'selected' : ''}>Oldest</option>
                       </select>
-                    ` : ''}
+                      ${this.r18Enabled ? `
+                        <select class="form-select custom-select" style="font-size:0.8rem; height:36px;" onchange="app.updateParam('rating', this.value)">
+                          <option value="all" ${profRating === 'all' ? 'selected' : ''}>All Ratings</option>
+                          <option value="safe" ${profRating === 'safe' ? 'selected' : ''}>All Ages Only</option>
+                          <option value="r18" ${profRating === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                        </select>
+                      ` : ''}
+                    </div>
+                    <div class="feed-header-layout-row">
+                      ${this.renderLayoutToolbarHtml()}
+                    </div>
                   </div>
                 </div>
 
@@ -29169,89 +30252,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!arts.artworks || !arts.artworks.length) {
                 html += `<div class="center-msg">No ${activeTab.replace('_', ' ')} available for this artist.</div>`;
               } else {
-                html += `<div class="art-grid">`;
                 const isMangaTab = (activeTab === 'manga' || activeTab === 'favorites_manga');
                 const isNovelTab = (activeTab === 'novel' || activeTab === 'favorites_novel');
 
-                arts.artworks.forEach(art => {
-                  const coverFileName = art.cover_file || '';
-                  const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
-                  const isVid = art.type === 'video' || (art.cover_mime && art.cover_mime.startsWith('video/'));
-                  const isManga = art.type === 'manga';
-                  const isNovel = art.type === 'novel';
-                  const pageCount = Number(art.page_count || 1);
-                  const viewCount = Number(art.view_count || 0);
-                  const likeCount = Number(art.like_count || 0);
-
-                  const seriesTitle = art.series_name || art.title;
-                  const authorUid = art.user_id || prof.id;
-                  let cardTarget = `#/artwork/${art.id}`;
-                  if (isMangaTab || (activeTab === 'all' && isManga)) {
-                    cardTarget = `#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`;
-                  } else if (isNovelTab || (activeTab === 'all' && isNovel)) {
-                    cardTarget = `#/novel/series/${encodeURIComponent(seriesTitle)}/userid/${authorUid}`;
-                  }
-
-                  const ratioClass = (isMangaTab || isNovelTab) ? 'manga-card ratio-9-16' : '';
-
-                  const isSafeBlurProf = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
-                  html += `
-                    <div class="art-card ${ratioClass}" onclick="app.nav('${cardTarget}')">
-                      <div class="art-thumb-wrap position-relative">
-                        ${isSafeBlurProf ? `
-                          <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="R-18 &bull; Click to reveal">
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                            <span style="font-size:0.68rem; font-weight:800;">R-18 CONTENT</span>
-                          </div>
-                        ` : ''}
-                        ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurProf ? 'safe-blur-target' : ''}" alt="" loading="lazy" onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}'">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
-                        
-                        <!-- Badges -->
-                        <div style="position:absolute; top:8px; right:8px; display:flex; flex-direction:column; gap:4px; align-items:flex-end; z-index:3;">
-                          ${pageCount > 1 ? `
-                            <div class="badge-page-count" style="position:static; background:rgba(0,0,0,0.72); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,0.15); border-radius:12px; padding:2px 7px; font-size:0.7rem; font-weight:700; gap:3px;">
-                              <svg viewBox="0 0 24 24" style="width:12px;height:12px;"><path d="M19 1L14 6V22L19 17V1M3 6V22L8 17H12V2H8L3 6z"/></svg>
-                              <span>${pageCount}P</span>
-                            </div>
-                          ` : ''}
-                        </div>
-
-                        <div style="position:absolute; top:8px; left:8px; display:flex; flex-direction:column; gap:4px; align-items:flex-start; z-index:3;">
-                          ${isManga ? `<div class="badge-flag manga" style="position:static;">MANGA</div>` : ''}
-                          ${isNovel ? `<div class="badge-flag novel" style="position:static;">NOVEL</div>` : ''}
-                          ${isVid ? `<div class="badge-flag video" style="position:static;">VIDEO</div>` : ''}
-                          ${art.rating === 'r18' ? `<div class="badge-flag" style="position:static;">R-18</div>` : ''}
-                          ${art.is_ai ? `<div class="badge-flag ai" style="position:static;">AI</div>` : ''}
-                        </div>
-
-                        ${isManga && art.chapter_number ? `
-                          <div style="position:absolute; bottom:6px; left:6px; background:rgba(0,0,0,0.78); backdrop-filter:blur(6px); color:#fff; font-size:0.68rem; font-weight:800; padding:2px 6px; border-radius:5px; border:1px solid rgba(255,255,255,0.12); z-index:2;">
-                            Ch. ${art.chapter_number}
-                          </div>
-                        ` : ''}
-                      </div>
-
-                      <div class="art-card-info" style="padding:0.75rem 0.85rem; display:flex; flex-direction:column; gap:0.4rem;">
-                        <div class="art-card-title" title="${this.escape(art.title)}" style="font-weight:700; font-size:0.9rem; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                          ${this.escape(art.title)}
-                        </div>
-                        <div class="art-card-stats" style="display:flex; justify-content:space-between; align-items:center; font-size:0.75rem; color:var(--text-muted); margin-top:0.1rem;">
-                          <span style="display:flex; align-items:center; gap:0.3rem;">
-                            <svg viewBox="0 0 24 24" style="width:13px;height:13px;opacity:0.7;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                            <span>${viewCount.toLocaleString()}</span>
-                          </span>
-                          <div class="art-card-actions">
-                            <span class="stat-btn ${art.user_liked ? 'active like' : ''}" style="display:flex; align-items:center; gap:0.25rem; font-weight:700;" onclick="event.stopPropagation(); app.toggleLike(${art.id}, this)">
-                              <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                              <span>${likeCount}</span>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  `;
+                html += this.renderArtGrid(arts.artworks, {
+                  isManga: isMangaTab,
+                  isNovel: isNovelTab,
+                  ratioClass: (isMangaTab || isNovelTab) ? 'manga-card ratio-9-16' : ''
                 });
-                html += `</div>`;
   
                 if (arts.pages > 1) {
                   html += `
@@ -29275,6 +30283,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               }
   
               container.innerHTML = html;
+              if (activeTab === 'all' && !profQ && !profTag && !profChar && !profParody && profPage === 1) {
+                setTimeout(() => this.loadPopularHero('user-popular-hero-mount', this.userPopularPeriod || 'day', prof.id, prof.artist_name), 10);
+              }
             } catch(err) {
               container.innerHTML = `<div class="center-msg">${err.message}</div>`;
             }
@@ -39419,7 +40430,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.6'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.7'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -48079,7 +49090,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.6';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.7';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
