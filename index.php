@@ -79,7 +79,7 @@ if (!preg_match('#^/users_drive/#i', $req_path_clean) && !preg_match('#^/uploads
 // Bypass Gzip compression for heavy files, streaming, and uploads to prevent memory exhaustion and play crashes
 $raw_uri_gzip = $_SERVER['REQUEST_URI'] ?? '';
 // FIXED: Added all scanning endpoints to bypass GZIP to prevent blank white screens from corrupted buffers
-$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts|rss)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
+$is_gzip_bypass = preg_match('/action=(stream|thumb|get_stream|download_song|upload|upload_chunk|batch|full_scan|force_rescan|rescan_covers|rescan_charts|vacuum_database|reset_rhythm_charts|rss)/i', $raw_uri_gzip) || isset($_GET['download']) || isset($_GET['batch']);
 
 if (!$is_gzip_bypass && !ini_get('zlib.output_compression') && isset($_SERVER['HTTP_ACCEPT_ENCODING']) && substr_count($_SERVER['HTTP_ACCEPT_ENCODING'], 'gzip')) {
   @ob_start('ob_gzhandler');
@@ -895,8 +895,14 @@ function get_ffmpeg_binary($auto_download = false) {
 }
 
 function is_storage_disk_locked($db = null) {
-  $total = @disk_total_space(__DIR__) ?: 1;
-  $free = @disk_free_space(__DIR__) ?: 0;
+  if (!function_exists('disk_total_space') || !function_exists('disk_free_space')) {
+    return false;
+  }
+  $total = @disk_total_space(__DIR__);
+  $free = @disk_free_space(__DIR__);
+  if ($total === false || $free === false || $total <= 0) {
+    return false;
+  }
   $used_pct = (($total - $free) / $total) * 100;
   try {
     $db = $db ?: get_db();
@@ -6268,7 +6274,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.9');
+define('APP_VERSION', '13.0');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -23252,6 +23258,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
   function jsonResponse($data, $status = 200) {
     while (ob_get_level() > 0) @ob_end_clean();
+    header_remove('Content-Encoding');
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -24346,137 +24353,163 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     }
   
     if ($action === 'upload_chunk') {
-      verifyCsrfToken();
-      $user = requireAuth($db);
+      try {
+        verifyCsrfToken();
+        $user = requireAuth($db);
 
-      // Setting #5: Reject upload if disk space is critical
-      if (is_storage_disk_locked($db)) {
-        jsonResponse(['error' => 'Server disk storage capacity is critical. New uploads are temporarily paused.'], 507);
-      }
-      if (!checkRateLimit($db, 'upload_chunk', 400, 60)) {
-        jsonResponse(['error' => 'Upload rate limit exceeded. Please wait.'], 429);
-      }
-  
-      // Opportunistically garbage collect abandoned chunks older than 2 hours
-      if (mt_rand(1, 15) === 1) {
-        cleanupStaleChunks($config['chunk_dir'], 7200);
-      }
-  
-      $uploadId = preg_replace('/[^\w\-]/', '', $_POST['upload_id'] ?? '');
-      $chunkIndex = intval($_POST['chunk_index'] ?? 0);
-      $totalChunks = intval($_POST['total_chunks'] ?? 1);
-      $fileName = trim($_POST['file_name'] ?? '');
-      $thumbData = $_POST['thumb_data'] ?? null;
-  
-      if ($totalChunks < 1 || $totalChunks > 500 || $chunkIndex < 0 || $chunkIndex >= $totalChunks) {
-        jsonResponse(['error' => 'Invalid chunk parameters.'], 400);
-      }
-  
-      if (!$uploadId || strlen($uploadId) > 64 || !$fileName || empty($_FILES['chunk']['tmp_name'])) {
-        jsonResponse(['error' => 'Missing chunk payload'], 400);
-      }
-  
-      // Cap pending staging directories to prevent storage exhaustion attacks
-      $tempDir = $config['chunk_dir'] . DIRECTORY_SEPARATOR . $uploadId;
-      if (!is_dir($tempDir)) {
-        $stagedUploads = glob($config['chunk_dir'] . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR) ?: [];
-        if (count($stagedUploads) >= 80) {
-          cleanupStaleChunks($config['chunk_dir'], 3600);
+        // Setting #5: Reject upload if disk space is critical
+        if (is_storage_disk_locked($db)) {
+          jsonResponse(['error' => 'Server disk storage capacity is critical. New uploads are temporarily paused.'], 507);
+        }
+        if (!$user['is_admin'] && !checkRateLimit($db, 'upload_chunk', 3000, 60)) {
+          jsonResponse(['error' => 'Upload rate limit exceeded. Please wait a moment.'], 429);
+        }
+
+        // Garbage collect abandoned chunks older than 2 hours
+        if (mt_rand(1, 15) === 1) {
+          cleanupStaleChunks($config['chunk_dir'], 7200);
+        }
+
+        $uploadId = preg_replace('/[^\w\-]/', '', $_POST['upload_id'] ?? '');
+        $chunkIndex = intval($_POST['chunk_index'] ?? 0);
+        $totalChunks = intval($_POST['total_chunks'] ?? 1);
+        $fileName = trim($_POST['file_name'] ?? '');
+        $thumbData = $_POST['thumb_data'] ?? null;
+
+        if ($totalChunks < 1 || $totalChunks > 5000 || $chunkIndex < 0 || $chunkIndex >= $totalChunks) {
+          jsonResponse(['error' => 'Invalid chunk parameters.'], 400);
+        }
+
+        if (!isset($_FILES['chunk']) || !is_array($_FILES['chunk'])) {
+          jsonResponse(['error' => 'Missing chunk payload in request.'], 400);
+        }
+
+        if ($_FILES['chunk']['error'] !== UPLOAD_ERR_OK) {
+          $errCode = $_FILES['chunk']['error'];
+          $errMsg = match($errCode) {
+            UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'Chunk exceeds server upload_max_filesize limit.',
+            UPLOAD_ERR_PARTIAL => 'Chunk was only partially uploaded.',
+            UPLOAD_ERR_NO_TMP_DIR => 'Missing temporary folder on server.',
+            UPLOAD_ERR_CANT_WRITE => 'Failed to write chunk to temporary disk.',
+            default => 'Chunk upload error code: ' . $errCode
+          };
+          jsonResponse(['error' => $errMsg], 400);
+        }
+
+        if (!$uploadId || strlen($uploadId) > 64 || !$fileName) {
+          jsonResponse(['error' => 'Invalid upload parameters provided.'], 400);
+        }
+
+        $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        if (!in_array($ext, $config['allowed_exts'], true)) {
+          jsonResponse(['error' => 'Invalid file format.'], 400);
+        }
+
+        if (!is_dir($config['chunk_dir'])) {
+          @mkdir($config['chunk_dir'], 0777, true);
+        }
+
+        $tempDir = $config['chunk_dir'] . DIRECTORY_SEPARATOR . $uploadId;
+        if (!is_dir($tempDir)) {
           $stagedUploads = glob($config['chunk_dir'] . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR) ?: [];
-          if (count($stagedUploads) >= 80) {
-            jsonResponse(['error' => 'Temporary upload capacity full. Please wait a moment.'], 503);
+          if (count($stagedUploads) >= 300) {
+            cleanupStaleChunks($config['chunk_dir'], 3600);
+          }
+          @mkdir($tempDir, 0777, true);
+        }
+
+        $chunkFile = $tempDir . DIRECTORY_SEPARATOR . "chunk_{$chunkIndex}";
+        if (!@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunkFile)) {
+          jsonResponse(['error' => 'Failed to save chunk to temporary storage.'], 500);
+        }
+        @touch($tempDir);
+
+        $allReady = true;
+        for ($i = 0; $i < $totalChunks; $i++) {
+          if (!file_exists($tempDir . DIRECTORY_SEPARATOR . "chunk_{$i}")) {
+            $allReady = false;
+            break;
           }
         }
-      }
-  
-      if ($_FILES['chunk']['size'] > ($config['max_chunk_size'] + 65536)) {
-        jsonResponse(['error' => 'Chunk exceeds maximum allowed chunk size.'], 400);
-      }
-  
-      $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
-      if (!in_array($ext, $config['allowed_exts'], true)) {
-        jsonResponse(['error' => 'Invalid file format.'], 400);
-      }
-  
-      $tempDir = $config['chunk_dir'] . DIRECTORY_SEPARATOR . $uploadId;
-      if (!is_dir($tempDir)) @mkdir($tempDir, 0755, true);
-  
-      $chunkFile = $tempDir . DIRECTORY_SEPARATOR . "chunk_{$chunkIndex}";
-      if (!@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunkFile)) {
-        jsonResponse(['error' => 'Failed to save chunk.'], 500);
-      }
-      @touch($tempDir);
-  
-      $allReady = true;
-      for ($i = 0; $i < $totalChunks; $i++) {
-        if (!file_exists($tempDir . DIRECTORY_SEPARATOR . "chunk_{$i}")) {
-          $allReady = false;
-          break;
-        }
-      }
-  
-      if ($allReady) {
-        $finalName = 'art_' . date('Ymd_His') . '_' . bin2hex(random_bytes(8)) . '.' . $ext;
-        $finalPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $finalName;
-        $out = fopen($finalPath, 'wb');
-  
-        for ($i = 0; $i < $totalChunks; $i++) {
-          $cPath = $tempDir . DIRECTORY_SEPARATOR . "chunk_{$i}";
-          $in = fopen($cPath, 'rb');
-          while ($buff = fread($in, 65536)) fwrite($out, $buff);
-          fclose($in);
-          @unlink($cPath);
-        }
-        fclose($out);
-        @rmdir($tempDir);
-  
-        $mimeType = mime_content_type($finalPath) ?: 'application/octet-stream';
-        $disallowedMimes = ['text/html', 'application/x-php', 'application/xhtml+xml', 'text/javascript', 'application/javascript', 'application/x-httpd-php'];
-        if (in_array($mimeType, $disallowedMimes, true) || preg_match('/\.(php|phtml|phar|cgi|pl|sh)$/i', $finalName)) {
-          @unlink($finalPath);
-          jsonResponse(['error' => 'Disallowed file payload detected.'], 400);
-        }
-        $isVideo = strpos($mimeType, 'video/') === 0;
 
-        // Setting #2: Enforce maximum video size ceiling
-        if ($isVideo && filesize($finalPath) > ($config['max_video_size_mb'] * 1048576)) {
-          @unlink($finalPath);
-          jsonResponse(['error' => "Video exceeds the maximum allowed size of {$config['max_video_size_mb']} MB."], 400);
+        if ($allReady) {
+          if (!is_dir($config['upload_dir'])) {
+            @mkdir($config['upload_dir'], 0777, true);
+          }
+          if (!is_dir($config['thumb_dir'])) {
+            @mkdir($config['thumb_dir'], 0777, true);
+          }
+
+          $finalName = 'art_' . date('Ymd_His') . '_' . bin2hex(random_bytes(8)) . '.' . $ext;
+          $finalPath = $config['upload_dir'] . DIRECTORY_SEPARATOR . $finalName;
+          $out = @fopen($finalPath, 'wb');
+          if (!$out) {
+            jsonResponse(['error' => 'Failed to initialize final file on server.'], 500);
+          }
+
+          for ($i = 0; $i < $totalChunks; $i++) {
+            $cPath = $tempDir . DIRECTORY_SEPARATOR . "chunk_{$i}";
+            $in = @fopen($cPath, 'rb');
+            if ($in) {
+              while ($buff = fread($in, 65536)) fwrite($out, $buff);
+              fclose($in);
+            }
+            @unlink($cPath);
+          }
+          fclose($out);
+          @rmdir($tempDir);
+
+          // Safe fallback for MIME detection even if php-fileinfo is missing
+          $mimeType = getFileMime($finalPath, 'application/octet-stream');
+          $disallowedMimes = ['text/html', 'application/x-php', 'application/xhtml+xml', 'text/javascript', 'application/javascript', 'application/x-httpd-php'];
+          if (in_array($mimeType, $disallowedMimes, true) || preg_match('/\.(php|phtml|phar|cgi|pl|sh)$/i', $finalName)) {
+            @unlink($finalPath);
+            jsonResponse(['error' => 'Disallowed file payload detected.'], 400);
+          }
+          $isVideo = strpos($mimeType, 'video/') === 0;
+
+          // Enforce maximum video size ceiling
+          if ($isVideo && filesize($finalPath) > ($config['max_video_size_mb'] * 1048576)) {
+            @unlink($finalPath);
+            jsonResponse(['error' => "Video exceeds the maximum allowed size of {$config['max_video_size_mb']} MB."], 400);
+          }
+
+          $imgInfo = @getimagesize($finalPath);
+          $w = $imgInfo ? $imgInfo[0] : 0;
+          $h = $imgInfo ? $imgInfo[1] : 0;
+          $sz = filesize($finalPath);
+
+          $thumbName = 'thumb_' . $finalName . '.jpg';
+          $thumbPath = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $thumbName;
+
+          if ($isVideo && $thumbData && strpos($thumbData, 'data:image') === 0) {
+            $base64 = preg_replace('#^data:image/\w+;base64,#i', '', $thumbData);
+            @file_put_contents($thumbPath, base64_decode($base64));
+          } else {
+            artworkCreateThumbnail($finalPath, $thumbPath, $config['thumb_width'], $config['thumb_quality']);
+          }
+
+          $phash = compute_phash($thumbPath);
+
+          jsonResponse([
+            'success'    => true,
+            'completed'  => true,
+            'file_name'  => $finalName,
+            'original'   => $fileName,
+            'file_size'  => $sz,
+            'mime_type'  => $mimeType,
+            'is_video'   => $isVideo,
+            'phash'      => $phash,
+            'width'      => $w,
+            'height'     => $h,
+            'thumb_name' => $thumbName
+          ]);
         }
-  
-        $imgInfo = @getimagesize($finalPath);
-        $w = $imgInfo ? $imgInfo[0] : 0;
-        $h = $imgInfo ? $imgInfo[1] : 0;
-        $sz = filesize($finalPath);
-  
-        $thumbName = 'thumb_' . $finalName . '.jpg';
-        $thumbPath = $config['thumb_dir'] . DIRECTORY_SEPARATOR . $thumbName;
-  
-        if ($isVideo && $thumbData && strpos($thumbData, 'data:image') === 0) {
-          $base64 = preg_replace('#^data:image/\w+;base64,#i', '', $thumbData);
-          file_put_contents($thumbPath, base64_decode($base64));
-        } else {
-          artworkCreateThumbnail($finalPath, $thumbPath, $config['thumb_width'], $config['thumb_quality']);
-        }
-  
-        $phash = compute_phash($thumbPath);
-  
-        jsonResponse([
-          'success'    => true,
-          'completed'  => true,
-          'file_name'  => $finalName,
-          'original'   => $fileName,
-          'file_size'  => $sz,
-          'mime_type'  => $mimeType,
-          'is_video'   => $isVideo,
-          'phash'      => $phash,
-          'width'      => $w,
-          'height'     => $h,
-          'thumb_name' => $thumbName
-        ]);
+
+        jsonResponse(['success' => true, 'completed' => false, 'chunk' => $chunkIndex]);
+      } catch (\Throwable $e) {
+        jsonResponse(['error' => 'Server upload error: ' . $e->getMessage()], 500);
       }
-  
-      jsonResponse(['success' => true, 'completed' => false, 'chunk' => $chunkIndex]);
     }
   
     if ($action === 'artwork_save') {
@@ -26834,15 +26867,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          background: rgba(8, 8, 12, 0.65);
-          backdrop-filter: blur(10px);
-          -webkit-backdrop-filter: blur(10px);
+          background: rgba(8, 8, 12, 0.75);
+          backdrop-filter: blur(14px);
+          -webkit-backdrop-filter: blur(14px);
           z-index: 6;
           cursor: pointer;
           padding: 0.75rem;
           text-align: center;
           color: #ffffff;
           gap: 6px;
+          border-radius: inherit !important;
+          overflow: hidden;
           transition: background 0.2s, opacity 0.25s ease;
         }
         .safe-blur-overlay:hover {
@@ -27093,74 +27128,96 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             gap: var(--hd-grid-gap, 10px) !important;
           }
         }
-        .art-grid.layout-grid .art-card:not(.ratio-9-16) {
-          aspect-ratio: 1 / 1;
+        .art-grid.layout-grid .art-card {
+          height: auto !important;
+          aspect-ratio: auto !important;
         }
-        .art-grid.layout-grid .art-card:not(.ratio-9-16) .art-thumb-wrap {
-          height: 100%;
+        .art-thumb-wrap {
+          width: 100%;
           aspect-ratio: 1 / 1 !important;
+          position: relative;
+          overflow: hidden;
+          background: #08080a;
+          border-radius: var(--hd-card-radius, 14px) var(--hd-card-radius, 14px) 0 0;
+        }
+        .art-card.ratio-9-16 .art-thumb-wrap,
+        .manga-card.ratio-9-16 .art-thumb-wrap {
+          aspect-ratio: 9 / 16 !important;
+        }
+        .safe-blur-overlay {
+          border-radius: inherit !important;
+          overflow: hidden !important;
+        }
+        .safe-blur-target {
+          border-radius: inherit !important;
+        }
+        .art-grid.layout-grid .art-card.ratio-9-16 {
+          aspect-ratio: 9 / 16;
         }
 
-        /* Columns (Masonry) Layout */
+        /* 1. Masonry Columns Layout (Height-Aware Distribution) */
         .art-grid.layout-columns {
           display: flex;
-          gap: 1.15rem;
+          gap: var(--hd-grid-gap, 14px) !important;
           align-items: flex-start;
           width: 100%;
-        }
-        @media (max-width: 768px) {
-          .art-grid.layout-columns {
-            gap: 0.75rem;
-          }
         }
         .art-grid.layout-columns .masonry-col {
           flex: 1;
           min-width: 0;
           display: flex;
           flex-direction: column;
-          gap: 1.15rem;
-        }
-        @media (max-width: 768px) {
-          .art-grid.layout-columns .masonry-col {
-            gap: 0.75rem;
-          }
+          gap: var(--hd-grid-gap, 14px) !important;
         }
         .art-grid.layout-columns .art-card {
           width: 100%;
-          height: auto;
+          height: auto !important;
           aspect-ratio: auto !important;
         }
         .art-grid.layout-columns .art-thumb-wrap {
-          aspect-ratio: auto !important;
+          width: 100%;
           height: auto !important;
+          aspect-ratio: var(--thumb-ratio, auto) !important;
         }
         .art-grid.layout-columns .art-thumb-wrap img {
-          height: auto !important;
-          object-fit: contain !important;
+          width: 100%;
+          height: 100% !important;
+          object-fit: cover !important;
         }
 
-        /* Justified Layout */
+        /* 2. Justified Row Layout (Width/Height Aspect Ratio Weighted) */
         .art-grid.layout-justified {
           display: flex;
           flex-wrap: wrap;
-          gap: 0.75rem;
+          gap: var(--hd-grid-gap, 14px) !important;
           align-content: flex-start;
           width: 100%;
         }
         .art-grid.layout-justified .art-card {
-          height: 220px !important;
+          height: 280px !important;
           flex-grow: var(--card-grow, 1);
-          flex-shrink: 0;
-          flex-basis: auto;
+          flex-shrink: 1;
+          flex-basis: calc(180px * var(--card-grow, 1));
           width: auto !important;
-          min-width: 130px;
+          min-width: 150px;
           max-width: 100%;
-          aspect-ratio: var(--card-ratio, auto);
+          display: flex;
+          flex-direction: column;
         }
         .art-grid.layout-justified .art-thumb-wrap {
-          height: 100% !important;
+          flex: 1 1 auto;
           width: 100% !important;
+          height: 100% !important;
           aspect-ratio: auto !important;
+          overflow: hidden;
+        }
+        .art-grid.layout-justified .art-thumb-wrap img {
+          width: 100%;
+          height: 100% !important;
+          object-fit: cover !important;
+        }
+        .art-grid.layout-justified .art-card-info {
+          flex: 0 0 auto;
         }
 
         /* List Layout */
@@ -27271,28 +27328,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         }
         .popular-hero-top-nav {
           display: flex;
-          justify-content: flex-end;
+          justify-content: space-between;
           align-items: center;
-          gap: 1.8rem;
+          gap: 1rem;
+          width: 100%;
           flex-wrap: wrap;
+          overflow: hidden;
         }
-        .popular-period-tabs {
+        .popular-nav-scroll-group {
           display: flex;
-          gap: 1.2rem;
           align-items: center;
-          border-bottom: 2px solid rgba(255, 255, 255, 0.18);
-          padding: 0 0 6px 0;
+          gap: 0.85rem;
           overflow-x: auto;
           overflow-y: hidden !important;
+          white-space: nowrap;
           scrollbar-width: none;
           -webkit-overflow-scrolling: touch;
-          white-space: nowrap;
+          max-width: 100%;
+          padding: 0;
+          margin: 0;
           box-sizing: border-box;
         }
-        .popular-period-tabs::-webkit-scrollbar {
+        .popular-nav-scroll-group::-webkit-scrollbar {
           display: none;
-          width: 0;
           height: 0;
+          width: 0;
+        }
+        .popular-period-tabs {
+          display: inline-flex;
+          gap: 1.1rem;
+          align-items: center;
+          border-bottom: 2px solid rgba(255, 255, 255, 0.18);
+          padding: 0;
+          margin: 0;
+          white-space: nowrap;
+          flex-shrink: 0;
+          box-sizing: border-box;
+          overflow-y: hidden !important;
         }
         .period-tab-btn {
           font-size: 0.92rem;
@@ -27303,7 +27375,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           border-bottom: 2px solid transparent;
           cursor: pointer;
           padding: 0 2px 6px 2px;
-          margin-bottom: -8px;
+          margin-bottom: -2px;
           transition: color 0.15s ease, border-color 0.15s ease;
           text-transform: lowercase;
           white-space: nowrap;
@@ -27327,6 +27399,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           text-decoration: none;
           opacity: 0.85;
           transition: opacity 0.15s ease, transform 0.15s ease;
+          flex-shrink: 0;
         }
         .popular-view-more:hover {
           opacity: 1;
@@ -27336,6 +27409,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: flex;
           flex-direction: column;
           gap: 0.25rem;
+          overflow: hidden;
         }
         .popular-hero-title {
           font-size: 1.55rem;
@@ -27357,15 +27431,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: flex;
           align-items: center;
           margin: 0.4rem 0;
+          overflow-y: hidden !important;
         }
         .popular-carousel-track {
           display: flex;
           gap: 1.15rem;
           overflow-x: auto;
+          overflow-y: hidden !important;
           scroll-behavior: smooth;
           scrollbar-width: none;
           width: 100%;
           padding: 6px 2px 10px 2px;
+          box-sizing: border-box;
         }
         .popular-carousel-track::-webkit-scrollbar {
           display: none;
@@ -28043,31 +28120,54 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           aspect-ratio: 1 / 1 !important;
         }
     
-        /* Seamless Overlay Look (No Container Box) */
-        .art-card:not(.list-mode) .art-card-info {
-          position: absolute;
-          inset: auto 0 0 0;
-          background: linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.48) 60%, transparent 100%);
-          padding: 2.2rem 0.75rem 0.65rem 0.75rem;
-          color: #ffffff;
+        /* HDPost Structured Card Layout */
+        .art-card {
+          background: #111116;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: var(--hd-card-radius, 14px);
+          overflow: hidden;
           display: flex;
           flex-direction: column;
-          gap: 0.25rem;
-          pointer-events: none;
-          z-index: 4;
-          transition: background 0.2s ease;
+          cursor: pointer;
+          position: relative;
+          transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
         }
-        .art-card:not(.list-mode):hover .art-card-info {
-          background: linear-gradient(to top, rgba(0, 0, 0, 0.96) 0%, rgba(0, 0, 0, 0.64) 65%, transparent 100%);
+        .art-card:hover {
+          transform: translateY(-4px);
+          box-shadow: 0 14px 34px rgba(0, 0, 0, 0.75);
+          border-color: rgba(255, 0, 68, 0.4);
         }
-        .art-card:not(.list-mode) .art-card-info * {
+        .art-thumb-wrap {
+          width: 100%;
+          position: relative;
+          overflow: hidden;
+          background: #08080a;
+          border-radius: var(--hd-card-radius, 14px) var(--hd-card-radius, 14px) 0 0;
+        }
+        .art-thumb-wrap img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+          transition: transform 0.3s ease;
+        }
+        .art-card:hover .art-thumb-wrap img {
+          transform: scale(1.04);
+        }
+        .art-card:not(.list-mode) .art-card-info {
+          padding: 0.75rem 0.85rem;
+          background: #111116;
+          display: flex;
+          flex-direction: column;
+          gap: 0.35rem;
+          flex: 1;
+          min-width: 0;
           pointer-events: auto;
         }
         .art-card-title {
-          font-size: 0.88rem;
+          font-size: 0.94rem;
           font-weight: 700;
           color: #ffffff;
-          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -28075,40 +28175,64 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         .art-card-author {
           display: flex;
           align-items: center;
-          gap: 0.4rem;
-          font-size: 0.76rem;
-          color: rgba(255, 255, 255, 0.85);
-          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+          gap: 0.45rem;
+          font-size: 0.8rem;
+          color: #9e9ea8;
         }
         .art-card-avatar {
-          width: 20px;
-          height: 20px;
+          width: 22px;
+          height: 22px;
           border-radius: 50%;
           object-fit: cover;
           background: var(--bg-surface-elevated);
+          flex-shrink: 0;
         }
-        .art-card-tags-preview {
-          display: none;
+        .art-card-tags-row {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          overflow: hidden;
+          flex-wrap: nowrap;
+          margin-top: 2px;
         }
-        .art-card-tag-badge {
-          font-size: 0.68rem;
-          color: var(--text-muted);
-          background: var(--bg-surface-elevated);
-          padding: 0.1rem 0.4rem;
-          border-radius: 4px;
+        .art-card-tag-pill {
+          font-size: 0.7rem;
+          color: #8c8c9e;
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid rgba(255, 255, 255, 0.07);
+          padding: 2px 7px;
+          border-radius: 6px;
           white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow: hidden;
+          max-width: 90px;
         }
-        .art-card-stats {
+        .art-card-bottom-stats {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          margin-top: 0.15rem;
-          font-size: 0.72rem;
-          color: rgba(255, 255, 255, 0.8);
-          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+          font-size: 0.75rem;
+          color: #6e6e80;
+          margin-top: 4px;
+          padding-top: 4px;
         }
-        .art-card:not(.list-mode) .stat-btn {
-          color: rgba(255, 255, 255, 0.85);
+        .art-card-bottom-stats .stat-btn {
+          color: #6e6e80;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          cursor: pointer;
+          transition: color 0.15s ease, transform 0.1s ease;
+        }
+        .art-card-bottom-stats .stat-btn:hover {
+          color: var(--like);
+          transform: scale(1.08);
+        }
+        .art-card-bottom-stats .stat-btn.active {
+          color: var(--like) !important;
+        }
+        .art-card-bottom-stats .stat-btn.active svg {
+          fill: var(--like);
         }
         .art-card:not(.list-mode) .stat-btn:hover {
           color: #ffffff;
@@ -29219,13 +29343,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         .manga-cover-card {
           width: 230px;
           aspect-ratio: 1 / 1.44;
-          border-radius: 12px;
+          border-radius: 16px;
           overflow: hidden;
           background: #000;
           border: 1px solid rgba(255, 255, 255, 0.12);
           box-shadow: 0 16px 40px rgba(0, 0, 0, 0.85);
           flex-shrink: 0;
           position: relative;
+        }
+        .manga-cover-card img,
+        .manga-cover-card .safe-blur-target {
+          border-radius: inherit;
         }
         .manga-cover-card img {
           width: 100%;
@@ -29568,7 +29696,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             return n.toLocaleString();
           }
 
-          async loadPopularHero(mountId = 'popular-hero-mount', period = null, userId = 0, artistName = '', targetDate = null) {
+          async loadPopularHero(mountId = 'popular-hero-mount', period = null, userId = 0, artistName = '') {
             const mount = document.getElementById(mountId);
             if (!mount) return;
             userId = parseInt(userId, 10) || 0;
@@ -29580,9 +29708,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             if (userId > 0) this.userPopularPeriod = period;
             else this.popularPeriod = period;
 
-            if (targetDate !== null) this.popularDate = targetDate;
-            const activeDate = this.popularDate || '';
-
             try {
               const reqPayload = {
                 feed: 'rankings',
@@ -29591,7 +29716,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 rating: this.r18Enabled ? 'all' : 'safe',
                 hide_ai: this.hideAI ? 1 : 0
               };
-              if (activeDate) reqPayload.date = activeDate;
               if (userId > 0) reqPayload.user_id = userId;
 
               const res = await this.api('artworks_list', reqPayload);
@@ -29619,13 +29743,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 ? (userId > 0 ? `These images are displayed based on total views of all time by this artist.` : 'These images are displayed based on their total view counts of all time. The more views an image has, the higher its ranking in this list.')
                 : (userId > 0 ? `These images are displayed based on view counts from ${periodLabels[period] || 'this day'} by this artist.` : `These images are displayed based on their view counts from ${periodLabels[period] || 'this day'}. The more views an image has, the higher its ranking in this list.`);
 
-              const dateQuery = activeDate ? `&date=${encodeURIComponent(activeDate)}` : '';
               const viewMoreUrl = userId > 0
-                ? `#/user/${userId}?tab=rankings&period=${period === 'all' ? 'all_time' : period}${dateQuery}`
-                : `#/rankings?period=${period === 'all' ? 'all_time' : period}${dateQuery}`;
+                ? `#/user/${userId}?tab=rankings&period=${period === 'all' ? 'all_time' : period}`
+                : `#/rankings?period=${period === 'all' ? 'all_time' : period}`;
 
               const trackId = `popular-track-${mountId}`;
-              const todayIso = new Date().toISOString().split('T')[0];
 
               const cardsHtml = artworks.map((art, idx) => {
                 const rankNum = idx + 1;
@@ -29663,7 +29785,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   
                   <div class="popular-hero-content">
                     <div class="popular-hero-top-nav">
-                      <div class="d-flex align-items-center gap-2 flex-wrap">
+                      <div class="popular-nav-scroll-group">
                         <div class="popular-period-tabs">
                           <button type="button" class="period-tab-btn ${period === 'day' ? 'active' : ''}" onclick="app.switchPopularPeriod('day', ${userId}, '${this.escape(artistName)}', '${mountId}')">this day</button>
                           <button type="button" class="period-tab-btn ${period === 'week' ? 'active' : ''}" onclick="app.switchPopularPeriod('week', ${userId}, '${this.escape(artistName)}', '${mountId}')">this week</button>
@@ -29671,16 +29793,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           <button type="button" class="period-tab-btn ${period === 'year' ? 'active' : ''}" onclick="app.switchPopularPeriod('year', ${userId}, '${this.escape(artistName)}', '${mountId}')">this year</button>
                           <button type="button" class="period-tab-btn ${period === 'all' ? 'active' : ''}" onclick="app.switchPopularPeriod('all', ${userId}, '${this.escape(artistName)}', '${mountId}')">all time</button>
                         </div>
-                        ${this.enableRankingsDate ? `
-                          <div class="d-flex align-items-center gap-1 ms-1">
-                            <input type="date" class="form-control form-control-sm bg-dark text-white border-secondary font-monospace" max="${todayIso}" value="${activeDate || todayIso}" style="height:28px; font-size:0.75rem; border-radius:6px; padding:0 6px;" onchange="app.switchPopularDate(this.value, ${userId}, '${this.escape(artistName)}', '${mountId}')" title="Filter rankings for a specific date">
-                            ${activeDate ? `<button type="button" class="btn btn-sm btn-link text-white-50 p-0 text-decoration-none" onclick="app.switchPopularDate('', ${userId}, '${this.escape(artistName)}', '${mountId}')" title="Reset date to today">&times;</button>` : ''}
-                          </div>
-                        ` : ''}
                       </div>
-                      <a href="${viewMoreUrl}" class="popular-view-more">
+                      <a href="${viewMoreUrl}" class="popular-view-more flex-shrink-0 ms-auto">
                         <span>view more</span>
-                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M8.59 16.59L13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
                       </a>
                     </div>
 
@@ -29885,24 +30001,46 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
           renderArtGrid(artworks, options = {}) {
             if (!artworks || !artworks.length) return '';
-            const cardsHtml = artworks.map(art => this.renderArtworkCardHtml(art, options));
+
             if (this.layout === 'columns') {
               const numCols = this.getColumnsCount();
               const cols = Array.from({ length: numCols }, () => []);
-              cardsHtml.forEach((html, idx) => {
-                cols[idx % numCols].push(html);
+              const colHeights = Array(numCols).fill(0);
+
+              artworks.forEach(art => {
+                let minCol = 0;
+                for (let i = 1; i < numCols; i++) {
+                  if (colHeights[i] < colHeights[minCol]) {
+                    minCol = i;
+                  }
+                }
+
+                // Compute exact aspect ratio: height vs width
+                const w = parseFloat(art.cover_width || art.width) || 1;
+                const h = parseFloat(art.cover_height || art.height) || (options.ratioClass && options.ratioClass.includes('9-16') ? 1.777 : 1);
+                const estImageHeight = 260 * (h / w);
+                const estTotalHeight = estImageHeight + 95; // 95px for bottom info section
+
+                cols[minCol].push(this.renderArtworkCardHtml(art, options));
+                colHeights[minCol] += estTotalHeight;
               });
+
               return `<div class="art-grid layout-columns">${cols.map(c => `<div class="masonry-col">${c.join('')}</div>`).join('')}</div>`;
             } else if (this.layout === 'justified') {
+              const cardsHtml = artworks.map(art => this.renderArtworkCardHtml(art, options));
               return `<div class="art-grid layout-justified">${cardsHtml.join('')}</div>`;
             } else if (this.layout === 'list') {
+              const cardsHtml = artworks.map(art => this.renderArtworkCardHtml(art, options));
               return `<div class="art-grid layout-list">${cardsHtml.join('')}</div>`;
             } else {
+              const cardsHtml = artworks.map(art => this.renderArtworkCardHtml(art, options));
               return `<div class="art-grid layout-grid">${cardsHtml.join('')}</div>`;
             }
           }
 
           renderArtworkCardHtml(art, options = {}) {
+            if (!art) return '';
+            const songId = art.id || art.first_chapter_id || 0;
             const coverFileName = art.cover_file || '';
             const coverUrl = coverFileName ? `?access=artwork&action=thumb&f=${encodeURIComponent(coverFileName)}` : '';
             const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
@@ -29916,45 +30054,77 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const isSafeBlurCard = (art.rating === 'r18' && this.safeBlurEnabled && !(this.r18Policy === 'login_only' && this.user));
             const isList = (this.layout === 'list');
 
-            let cardTarget = `#/artwork/${art.id}`;
-            let ratioClass = '';
+            let cardTarget = `#/artwork/${songId}`;
             if (options.cardTarget) {
               cardTarget = options.cardTarget;
             } else if (isManga && (art.series_title || art.series_name)) {
               const sTitle = art.series_title || art.series_name;
               cardTarget = `#/manga/series/${encodeURIComponent(sTitle)}/userid/${art.user_id}`;
-              ratioClass = 'manga-card ratio-9-16';
             } else if (isNovel && (art.series_title || art.series_name)) {
               const sTitle = art.series_title || art.series_name;
               cardTarget = `#/novel/series/${encodeURIComponent(sTitle)}/userid/${art.user_id}`;
-              ratioClass = 'manga-card ratio-9-16';
             }
 
-            if (options.ratioClass) ratioClass = options.ratioClass;
+            let ratioClass = options.ratioClass || '';
+
+            // Calculate width/height ratio for exact masonry scaling
+            const imgW = parseFloat(art.cover_width || art.width) || 1;
+            const imgH = parseFloat(art.cover_height || art.height) || (ratioClass.includes('9-16') ? 1.777 : 1);
+            const rawAspect = imgW / imgH;
+
+            const cardInlineStyle = (this.layout === 'justified') 
+              ? `style="--card-grow: ${rawAspect.toFixed(3)}; --card-ratio: ${rawAspect.toFixed(3)};"` 
+              : '';
+
+            const thumbInlineStyle = (this.layout === 'columns') 
+              ? `style="--thumb-ratio: ${imgW} / ${imgH}; aspect-ratio: ${imgW} / ${imgH} !important;"` 
+              : '';
+
+            // Extract tags for HDPost preview pills
+            const rawTags = art.tag_list || (art.tags ? art.tags.split(/[,，、\s]+/).filter(Boolean) : []);
+            const tagsHtml = rawTags.slice(0, 3).map(t => `<span class="art-card-tag-pill">#${this.escape(t.replace(/^#/, ''))}</span>`).join('');
+
+            if (isList) {
+              return `
+                <div class="art-card list-mode" onclick="app.nav('${cardTarget}')">
+                  <div class="art-thumb-wrap">
+                    ${coverUrl ? `<img src="${coverUrl}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null; this.src='?action=get_app_icon';">` : ''}
+                  </div>
+                  <div class="art-card-info">
+                    <div style="display:flex; flex-direction:column; min-width:0; gap:2px;">
+                      <div class="art-card-title">${this.escape(art.title || art.series_title || '')}</div>
+                      <div class="art-card-author">
+                        ${avatarUrl && !options.noAvatar ? `<img src="${avatarUrl}" class="art-card-avatar" alt="" onerror="app.handleAvatarError(this)">` : ''}
+                        <span>${this.escape(art.artist_name || '')}</span>
+                      </div>
+                    </div>
+                    <div class="art-card-stats">
+                      <span>${viewCount.toLocaleString()} views</span>
+                      <span class="stat-btn ${art.user_liked ? 'active' : ''}" onclick="event.stopPropagation(); app.toggleLike(${songId}, this)">
+                        <svg viewBox="0 0 24 24" style="width:14px;height:14px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                        <span>${likeCount}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }
 
             return `
-              <div class="art-card ${ratioClass} ${isList ? 'list-mode' : ''}" onclick="app.nav('${cardTarget}')">
-                <div class="art-thumb-wrap position-relative">
+              <div class="art-card ${ratioClass}" ${cardInlineStyle} onclick="app.nav('${cardTarget}')">
+                <div class="art-thumb-wrap position-relative" ${thumbInlineStyle}>
                   ${isSafeBlurCard ? `
                     <div class="safe-blur-overlay" onclick="event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');" title="Sensitive content &bull; Click to reveal">
-                      <svg viewBox="0 0 24 24" style="width:20px;height:20px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                      <svg viewBox="0 0 24 24" style="width:22px;height:22px;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                       <span style="font-size:0.68rem; font-weight:800; letter-spacing:0.5px;">R-18 CONTENT</span>
                     </div>
                   ` : ''}
                   ${coverUrl ? `<img src="${coverUrl}" class="${isSafeBlurCard ? 'safe-blur-target' : ''}" alt="" loading="lazy" decoding="async" onload="${this.layout === 'justified' ? 'if(this.naturalWidth&&this.naturalHeight){const c=this.closest(\'.art-card\');if(c){const r=this.naturalWidth/this.naturalHeight;c.style.setProperty(\'--card-grow\',r);c.style.setProperty(\'--card-ratio\',r);}}' : ''}" onerror="if(!this.dataset.tried){this.dataset.tried=1;this.src='?access=artwork&action=raw&f=${encodeURIComponent(coverFileName)}';}else{this.onerror=null;this.src='?action=get_app_icon&size=128';}">` : '<div style="display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">No Media</div>'}
 
-                  <!-- Top-Right Floating Badges: Page Count, Views, Favorites -->
+                  <!-- Top-Right Floating Badges: Page Count / Chapter Count -->
                   <div class="card-top-right-bar">
                     ${pageCount > 1 ? `<span class="badge-pill page-pill"><svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg> ${pageCount}P</span>` : ''}
                     ${options.totalChapters ? `<span class="badge-pill page-pill"><svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg> ${options.totalChapters} Ch.</span>` : ''}
-                    <span class="badge-pill stat-pill" title="${viewCount.toLocaleString()} views">
-                      <svg viewBox="0 0 24 24" style="width:11px;height:11px;opacity:0.75;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                      <span>${this.formatCompactNumber(viewCount)}</span>
-                    </span>
-                    <span class="badge-pill stat-pill like-pill ${art.user_liked ? 'active' : ''}" onclick="event.stopPropagation(); app.toggleLike(${art.id || 0}, this)" title="Favorite">
-                      <svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                      <span class="like-count">${this.formatCompactNumber(likeCount)}</span>
-                    </span>
                   </div>
 
                   <!-- Top-Left Flags -->
@@ -29967,28 +30137,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
                 </div>
 
-                <!-- Clean Bottom Info Overlay (Title & Author) -->
+                <!-- HDPost Structured Bottom Info Section -->
                 <div class="art-card-info">
-                  <div style="display:flex; flex-direction:column; min-width:0; gap:0.15rem;">
-                    <div class="art-card-title" title="${this.escape(art.title || art.series_title || '')}">
-                      <span>${this.escape(art.title || art.series_title || '')}</span>
-                      ${(isList && art.rating === 'r18') ? `<span style="color:var(--r18); font-size:0.7rem; font-weight:800; margin-left:6px;">R-18</span>` : ''}
-                    </div>
-                    <div class="art-card-author">
-                      ${avatarUrl && !options.noAvatar ? `<img src="${avatarUrl}" class="art-card-avatar" alt="" onerror="app.handleAvatarError(this)">` : ''}
-                      <span>${this.escape(art.artist_name || '')}</span>
-                    </div>
+                  <div class="art-card-title" title="${this.escape(art.title || art.series_title || '')}">
+                    ${this.escape(art.title || art.series_title || '')}
                   </div>
-
-                  <!-- Kept for List View alignment -->
-                  <div class="art-card-stats">
+                  <div class="art-card-author">
+                    ${avatarUrl && !options.noAvatar ? `<img src="${avatarUrl}" class="art-card-avatar" alt="" onerror="app.handleAvatarError(this)">` : ''}
+                    <span class="text-truncate">${this.escape(art.artist_name || '')}</span>
+                  </div>
+                  ${tagsHtml ? `<div class="art-card-tags-row">${tagsHtml}</div>` : ''}
+                  <div class="art-card-bottom-stats">
                     <span>${viewCount.toLocaleString()} views</span>
-                    <div class="art-card-actions">
-                      <span class="stat-btn ${art.user_liked ? 'active like' : ''}" onclick="event.stopPropagation(); app.toggleLike(${art.id || 0}, this)">
-                        <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                        <span>${likeCount}</span>
-                      </span>
-                    </div>
+                    <span class="stat-btn ${art.user_liked ? 'active' : ''}" onclick="event.stopPropagation(); app.toggleLike(${songId}, this)" title="Favorite">
+                      <svg viewBox="0 0 24 24" style="width:13px;height:13px;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                      <span class="like-count">${likeCount}</span>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -30735,7 +30899,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               json = JSON.parse(rawText);
             } catch (e) {
               console.error(`API response from action "${action}" was not valid JSON:`, rawText);
-              throw new Error(`Server returned an invalid response for "${action}".`);
+              const cleanSnippet = rawText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+              throw new Error(cleanSnippet ? `Server error: ${cleanSnippet.substring(0, 120)}` : `Server returned an empty response for "${action}".`);
             }
             if (!res.ok || json.error) throw new Error(json.error || 'Request failed');
             return json;
@@ -31222,6 +31387,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               } else {
                 html += this.renderArtGrid(res.series.map(item => ({
                   ...item,
+                  id: item.first_chapter_id || item.id || 0,
                   title: item.series_title,
                   cover_file: item.cover_file,
                   total_chapters: item.total_chapters
@@ -31461,11 +31627,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (sourceUrl) reqPayload.source_url = sourceUrl;
 
               const res = await this.api('manga_series_list', reqPayload);
+              const seriesList = res.series || [];
+              const totalSeries = res.total || 0;
+              const totalPages = res.pages || 1;
+
               let html = `
                 <div class="feed-header-wrap">
                   <div class="feed-header-title-block">
                     <h1 style="font-size:1.4rem; font-weight:800; letter-spacing:-0.5px; margin:0;"><i class="bi bi-book-half text-warning me-2"></i>Manga &amp; Comic Series</h1>
-                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem; margin-bottom:0;">${res.total} series available</p>
+                    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.2rem; margin-bottom:0;">${totalSeries} series available</p>
                   </div>
                   <div class="feed-header-actions-col">
                     <div class="feed-header-controls">
@@ -31510,15 +31680,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 </div>
               `;
 
-              if (!res.series || !res.series.length) {
+              if (!seriesList.length) {
                 html += '<div class="center-msg">No manga series published yet.</div>';
               } else {
-                html += this.renderArtGrid(res.series.map(item => ({
+                html += this.renderArtGrid(seriesList.map(item => ({
                   ...item,
+                  id: item.first_chapter_id || item.id || 0,
                   title: item.series_title,
                   cover_file: item.cover_file,
                   total_chapters: item.total_chapters
                 })), { isManga: true, noAvatar: true, ratioClass: 'manga-card ratio-9-16' });
+
+                if (totalPages > 1) {
+                  html += `
+                    <div class="pagination-bar" style="display:flex; justify-content:center; align-items:center; gap:0.5rem; margin-top:2.5rem; margin-bottom:1.5rem; flex-wrap:wrap;">
+                      <button class="btn-subtle" style="width:36px; height:36px; padding:0;" title="Previous Page" ${page <= 1 ? 'disabled style="opacity:0.4; cursor:not-allowed;"' : ''} onclick="app.updateParam('page', ${page - 1})">
+                        <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                      </button>
+                      <button class="btn-subtle" style="font-weight:700; color:var(--accent); border-color:var(--accent-alpha); background:var(--accent-alpha);" title="Click to jump to page" onclick="app.showJumpPageModal(${page}, ${totalPages})">Page ${page} of ${totalPages}</button>
+                      <button class="btn-subtle" style="width:36px; height:36px; padding:0;" title="Next Page" ${page >= totalPages ? 'disabled style="opacity:0.4; cursor:not-allowed;"' : ''} onclick="app.updateParam('page', ${page + 1})">
+                        <svg viewBox="0 0 24 24" style="width:16px; height:16px;"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                      </button>
+                    </div>
+                  `;
+                }
               }
               container.innerHTML = html;
             } catch (err) {
@@ -39206,6 +39391,116 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // SAVE ADMIN PROFILETREE PROFILE
+    if (isset($_POST['save_admin_pt_profile']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $target_uid = (int)$_POST['user_id'];
+      $display_name = trim(htmlspecialchars($_POST['display_name'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $bio = trim(htmlspecialchars($_POST['bio'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $accent_color = preg_match('/^#[a-fA-F0-9]{6}$/', $_POST['accent_color'] ?? '') ? $_POST['accent_color'] : '#ff0044';
+      $quote = trim(htmlspecialchars($_POST['highlight_quote'] ?? '', ENT_QUOTES, 'UTF-8'));
+      
+      $ig = trim($_POST['social_instagram'] ?? '');
+      $tw = trim($_POST['social_twitter'] ?? '');
+      $yt = trim($_POST['social_youtube'] ?? '');
+      $gh = trim($_POST['social_github'] ?? '');
+      $sp = trim($_POST['social_spotify'] ?? '');
+      $dc = trim($_POST['social_discord'] ?? '');
+      $sc = trim($_POST['social_soundcloud'] ?? '');
+      $tg = trim($_POST['social_telegram'] ?? '');
+
+      $stmt = $db->prepare("
+        INSERT INTO pt_profiles (user_id, display_name, bio, accent_color, highlight_quote, social_instagram, social_twitter, social_youtube, social_github, social_spotify, social_discord, social_soundcloud, social_telegram, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+          display_name = excluded.display_name,
+          bio = excluded.bio,
+          accent_color = excluded.accent_color,
+          highlight_quote = excluded.highlight_quote,
+          social_instagram = excluded.social_instagram,
+          social_twitter = excluded.social_twitter,
+          social_youtube = excluded.social_youtube,
+          social_github = excluded.social_github,
+          social_spotify = excluded.social_spotify,
+          social_discord = excluded.social_discord,
+          social_soundcloud = excluded.social_soundcloud,
+          social_telegram = excluded.social_telegram,
+          updated_at = CURRENT_TIMESTAMP
+      ");
+      $stmt->execute([$target_uid, $display_name, $bio, $accent_color, $quote, $ig, $tw, $yt, $gh, $sp, $dc, $sc, $tg]);
+      
+      log_admin_activity($db, $_SESSION['admin_email'], "Updated ProfileTree for User #{$target_uid}", $target_uid);
+      $_SESSION['admin_flash_msg'] = "ProfileTree for User #{$target_uid} updated successfully.";
+      header('Location: ?access=admin&page=profiletree&tab=profiles');
+      exit;
+    }
+
+    // RESET/WIPE USER PROFILETREE DATA
+    if (isset($_POST['reset_admin_pt_profile']) && isset($_POST['user_id'])) {
+      $db = get_db();
+      $target_uid = (int)$_POST['user_id'];
+      $db->prepare("DELETE FROM pt_profiles WHERE user_id = ?")->execute([$target_uid]);
+      $db->prepare("DELETE FROM pt_links WHERE user_id = ?")->execute([$target_uid]);
+      $db->prepare("DELETE FROM pt_highlights WHERE user_id = ?")->execute([$target_uid]);
+      $db->prepare("DELETE FROM pt_statuses WHERE user_id = ?")->execute([$target_uid]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Reset/Wiped ProfileTree data for User #{$target_uid}", $target_uid);
+      $_SESSION['admin_flash_msg'] = "ProfileTree reset for User #{$target_uid}.";
+      header('Location: ?access=admin&page=profiletree&tab=profiles');
+      exit;
+    }
+
+    // DELETE PROFILETREE LINK
+    if (isset($_POST['delete_admin_pt_link']) && isset($_POST['link_id'])) {
+      $db = get_db();
+      $lid = (int)$_POST['link_id'];
+      $db->prepare("DELETE FROM pt_links WHERE id = ?")->execute([$lid]);
+      log_admin_activity($db, $_SESSION['admin_email'], "Deleted ProfileTree Link #{$lid}", 0);
+      $_SESSION['admin_flash_msg'] = "Link removed.";
+      header('Location: ?access=admin&page=profiletree&tab=links');
+      exit;
+    }
+
+    // DELETE PROFILETREE HIGHLIGHT
+    if (isset($_POST['delete_admin_pt_highlight']) && isset($_POST['highlight_id'])) {
+      $db = get_db();
+      $hid = (int)$_POST['highlight_id'];
+      $db->prepare("DELETE FROM pt_highlights WHERE id = ?")->execute([$hid]);
+      log_admin_activity($db, $_SESSION['admin_email'], "Deleted ProfileTree Song Highlight #{$hid}", 0);
+      $_SESSION['admin_flash_msg'] = "Song highlight removed.";
+      header('Location: ?access=admin&page=profiletree&tab=highlights');
+      exit;
+    }
+
+    // DELETE PROFILETREE STATUS
+    if (isset($_POST['delete_admin_pt_status']) && isset($_POST['status_id'])) {
+      $db = get_db();
+      $sid = (int)$_POST['status_id'];
+      $db->prepare("DELETE FROM pt_statuses WHERE id = ?")->execute([$sid]);
+      log_admin_activity($db, $_SESSION['admin_email'], "Deleted ProfileTree Status #{$sid}", 0);
+      $_SESSION['admin_flash_msg'] = "Status update removed.";
+      header('Location: ?access=admin&page=profiletree&tab=statuses');
+      exit;
+    }
+
+    // SAVE PROFILETREE GLOBAL MODULE SETTINGS
+    if (isset($_POST['save_pt_settings'])) {
+      $db = get_db();
+      $max_links = max(5, min(100, (int)($_POST['pt_max_links'] ?? 25)));
+      $max_highlights = max(1, min(20, (int)($_POST['pt_max_highlights'] ?? 10)));
+      $default_accent = preg_match('/^#[a-fA-F0-9]{6}$/', $_POST['pt_default_accent'] ?? '') ? $_POST['pt_default_accent'] : '#ff0044';
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute(['pt_max_links', (string)$max_links]);
+      $stmt->execute(['pt_max_highlights', (string)$max_highlights]);
+      $stmt->execute(['pt_default_accent', $default_accent]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], 'Saved Global ProfileTree Policies & Settings', 0);
+      $_SESSION['admin_flash_msg'] = "ProfileTree settings updated successfully.";
+      header('Location: ?access=admin&page=profiletree&tab=settings');
+      exit;
+    }
+
     // SAVE GENERAL SYSTEM SETTINGS & BRANDING
     if (isset($_POST['save_general_settings'])) {
       $db = get_db();
@@ -41954,7 +42249,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'news_management', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
+  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'news_management', 'profiletree', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -42016,6 +42311,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'playground' => 'Interactive API Playground',
     'update' => 'System & Codebase Update',
     'news_management' => 'News & Announcements Studio',
+    'profiletree' => 'ProfileTree Hub Management',
     'settings' => 'General System Settings & Branding',
     'security' => 'Security, IP Firewall & Threat Defense',
     'pwa' => 'PWA Management',
@@ -43354,6 +43650,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php if ($is_super_admin_check || in_array('news_management', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=news_management" title="News Management" class="nav-link <?php echo ($active_p === 'news_management') ? 'active' : ''; ?>"><i class="bi bi-newspaper"></i><span>News Studio</span></a>
               <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('profiletree', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=profiletree" title="ProfileTree Management" class="nav-link <?php echo ($active_p === 'profiletree') ? 'active' : ''; ?>"><i class="bi bi-person-lines-fill"></i><span>ProfileTree Studio</span></a>
+              <?php endif; ?>
               <?php if ($is_super_admin_check || in_array('phpboard', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=phpboard" title="PHPBoard Imageboard" class="nav-link <?php echo ($active_p === 'phpboard') ? 'active' : ''; ?>"><i class="bi bi-chat-square-quote-fill"></i><span>PHPBoard Studio</span></a>
               <?php endif; ?>
@@ -44687,7 +44986,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.9'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.0'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -50995,6 +51294,703 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             });
           </script>
 
+        <?php elseif (($_GET['page'] ?? '') === 'profiletree'): ?>
+          <?php
+            $db = get_db();
+            
+            // Self-healing table creation
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS pt_profiles (
+                  user_id INTEGER PRIMARY KEY,
+                  display_name TEXT,
+                  bio TEXT,
+                  theme_style TEXT DEFAULT 'crimson_dark',
+                  accent_color TEXT DEFAULT '#ff0044',
+                  featured_track_id INTEGER DEFAULT 0,
+                  highlight_quote TEXT,
+                  social_instagram TEXT,
+                  social_twitter TEXT,
+                  social_youtube TEXT,
+                  social_github TEXT,
+                  social_spotify TEXT,
+                  social_discord TEXT,
+                  social_soundcloud TEXT,
+                  social_telegram TEXT,
+                  views_count INTEGER DEFAULT 0,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pt_links (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  title TEXT NOT NULL,
+                  subtitle TEXT,
+                  url TEXT NOT NULL,
+                  icon TEXT DEFAULT 'bi-link-45deg',
+                  badge_text TEXT,
+                  animation TEXT DEFAULT 'none',
+                  click_count INTEGER DEFAULT 0,
+                  sort_order INTEGER DEFAULT 0,
+                  is_active INTEGER DEFAULT 1,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pt_highlights (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  song_id INTEGER NOT NULL,
+                  custom_title TEXT,
+                  snippet_quote TEXT,
+                  sort_order INTEGER DEFAULT 0,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                  FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pt_statuses (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  content TEXT NOT NULL,
+                  media_url TEXT,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+              ");
+            } catch (\Throwable $e) {}
+
+            $pt_tab = $_GET['tab'] ?? 'profiles';
+            $pt_search = trim($_GET['search'] ?? '');
+            $pt_sort = $_GET['sort'] ?? 'views_desc';
+            $pt_page = max(1, (int)($_GET['p'] ?? 1));
+            $pt_limit = defined('ADMIN_PAGE_SIZE') ? ADMIN_PAGE_SIZE : 20;
+            $pt_offset = ($pt_page - 1) * $pt_limit;
+
+            // Global Metrics
+            $total_profiles = (int)($db->query("SELECT COUNT(*) FROM pt_profiles")->fetchColumn() ?: 0);
+            $total_links = (int)($db->query("SELECT COUNT(*) FROM pt_links")->fetchColumn() ?: 0);
+            $total_clicks = (int)($db->query("SELECT SUM(click_count) FROM pt_links")->fetchColumn() ?: 0);
+            $total_highlights = (int)($db->query("SELECT COUNT(*) FROM pt_highlights")->fetchColumn() ?: 0);
+            $total_statuses = (int)($db->query("SELECT COUNT(*) FROM pt_statuses")->fetchColumn() ?: 0);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">ProfileTree Management Studio</h1>
+              <div class="small text-secondary mt-1">Manage creator profile hubs, custom links, audio highlights, social connections, and status updates.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto flex-wrap justify-content-end w-100">
+              <form method="GET" action="" class="d-flex align-items-center gap-2 m-0 flex-wrap justify-content-end w-100" style="max-width: 580px;">
+                <input type="hidden" name="access" value="admin">
+                <input type="hidden" name="page" value="profiletree">
+                <input type="hidden" name="tab" value="<?php echo htmlspecialchars($pt_tab); ?>">
+                <select name="sort" class="admin-pill-select" onchange="this.form.submit()">
+                  <option value="views_desc" <?php echo $pt_sort === 'views_desc' ? 'selected' : ''; ?>>Most Views</option>
+                  <option value="views_asc" <?php echo $pt_sort === 'views_asc' ? 'selected' : ''; ?>>Least Views</option>
+                  <option value="newest" <?php echo $pt_sort === 'newest' ? 'selected' : ''; ?>>Recently Updated</option>
+                  <option value="oldest" <?php echo $pt_sort === 'oldest' ? 'selected' : ''; ?>>Oldest Accounts</option>
+                  <option value="name_asc" <?php echo $pt_sort === 'name_asc' ? 'selected' : ''; ?>>Name (A-Z)</option>
+                  <option value="name_desc" <?php echo $pt_sort === 'name_desc' ? 'selected' : ''; ?>>Name (Z-A)</option>
+                  <option value="links_desc" <?php echo $pt_sort === 'links_desc' ? 'selected' : ''; ?>>Most Links</option>
+                  <option value="hl_desc" <?php echo $pt_sort === 'hl_desc' ? 'selected' : ''; ?>>Most Highlights</option>
+                </select>
+                <div class="position-relative flex-grow-1" style="min-width: 180px;">
+                  <input type="text" name="search" class="admin-pill-input w-100 ps-4 pe-5" placeholder="Search profiles, users..." value="<?php echo htmlspecialchars($pt_search); ?>">
+                  <button type="submit" class="btn btn-sm border-0 position-absolute end-0 top-50 translate-middle-y me-3 text-danger p-0" style="width: 28px; height: 28px;"><i class="bi bi-search"></i></button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metrics KPI Row -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Custom Profiles</span>
+                    <span class="text-danger"><i class="bi bi-person-lines-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_profiles); ?></div>
+                  <small class="text-secondary">Configured ProfileTree accounts</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Total Links &amp; Clicks</span>
+                    <span class="text-info"><i class="bi bi-link-45deg fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_links); ?> <span class="fs-6 text-secondary fw-normal">links</span></div>
+                  <small class="text-secondary"><?php echo number_format($total_clicks); ?> total outgoing clicks</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Song Highlights</span>
+                    <span class="text-warning"><i class="bi bi-soundwave fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_highlights); ?></div>
+                  <small class="text-secondary">Pinned showcase audio tracks</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Status Updates</span>
+                    <span class="text-success"><i class="bi bi-chat-square-dots-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-3 fw-bold text-white"><?php echo number_format($total_statuses); ?></div>
+                  <small class="text-secondary">Broadcast posts published</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tabs Navigation -->
+            <div class="update-tabs-container">
+              <a href="?access=admin&page=profiletree&tab=profiles" class="update-tab-btn <?php echo $pt_tab === 'profiles' ? 'active' : ''; ?>">
+                <i class="bi bi-person-lines-fill"></i> Profiles (<?php echo $total_profiles; ?>)
+              </a>
+              <a href="?access=admin&page=profiletree&tab=links" class="update-tab-btn <?php echo $pt_tab === 'links' ? 'active' : ''; ?>">
+                <i class="bi bi-link-45deg"></i> Custom Links (<?php echo $total_links; ?>)
+              </a>
+              <a href="?access=admin&page=profiletree&tab=highlights" class="update-tab-btn <?php echo $pt_tab === 'highlights' ? 'active' : ''; ?>">
+                <i class="bi bi-soundwave"></i> Highlights (<?php echo $total_highlights; ?>)
+              </a>
+              <a href="?access=admin&page=profiletree&tab=statuses" class="update-tab-btn <?php echo $pt_tab === 'statuses' ? 'active' : ''; ?>">
+                <i class="bi bi-chat-square-dots"></i> Statuses (<?php echo $total_statuses; ?>)
+              </a>
+              <a href="?access=admin&page=profiletree&tab=settings" class="update-tab-btn <?php echo $pt_tab === 'settings' ? 'active' : ''; ?>">
+                <i class="bi bi-sliders"></i> Global Settings
+              </a>
+            </div>
+
+            <!-- TAB 1: PROFILES DIRECTORY -->
+            <?php if ($pt_tab === 'profiles'): ?>
+              <?php
+                $where_p = ["1=1"];
+                $params_p = [];
+                if ($pt_search !== '') {
+                  $where_p[] = "(p.display_name LIKE ? OR p.bio LIKE ? OR u.artist LIKE ? OR u.email LIKE ? OR u.id = ?)";
+                  $term_p = "%{$pt_search}%";
+                  array_push($params_p, $term_p, $term_p, $term_p, $term_p, (int)$pt_search);
+                }
+                $where_p_sql = "WHERE " . implode(' AND ', $where_p);
+
+                $sort_map_p = [
+                  'views_desc' => 'ORDER BY p.views_count DESC, p.updated_at DESC',
+                  'views_asc'  => 'ORDER BY p.views_count ASC, p.updated_at DESC',
+                  'newest'     => 'ORDER BY p.updated_at DESC',
+                  'oldest'     => 'ORDER BY p.created_at ASC',
+                  'name_asc'   => 'ORDER BY COALESCE(NULLIF(p.display_name, \'\'), u.artist) COLLATE NOCASE ASC',
+                  'name_desc'  => 'ORDER BY COALESCE(NULLIF(p.display_name, \'\'), u.artist) COLLATE NOCASE DESC',
+                  'links_desc' => 'ORDER BY link_count DESC, p.views_count DESC',
+                  'hl_desc'    => 'ORDER BY hl_count DESC, p.views_count DESC'
+                ];
+                $order_p_sql = $sort_map_p[$pt_sort] ?? 'ORDER BY p.views_count DESC, p.updated_at DESC';
+
+                $stmt_cnt_p = $db->prepare("SELECT COUNT(*) FROM pt_profiles p JOIN users u ON p.user_id = u.id {$where_p_sql}");
+                $stmt_cnt_p->execute($params_p);
+                $total_filtered_p = (int)$stmt_cnt_p->fetchColumn();
+                $total_pages_p = max(1, ceil($total_filtered_p / $pt_limit));
+
+                $stmt_list_p = $db->prepare("
+                  SELECT p.*, u.artist as user_artist, u.email as user_email, u.banned as is_banned,
+                    (SELECT COUNT(*) FROM pt_links WHERE user_id = p.user_id) as link_count,
+                    (SELECT COUNT(*) FROM pt_highlights WHERE user_id = p.user_id) as hl_count,
+                    (SELECT COUNT(*) FROM pt_statuses WHERE user_id = p.user_id) as stat_count
+                  FROM pt_profiles p
+                  JOIN users u ON p.user_id = u.id
+                  {$where_p_sql}
+                  {$order_p_sql}
+                  LIMIT {$pt_limit} OFFSET {$pt_offset}
+                ");
+                $stmt_list_p->execute($params_p);
+                $profile_rows = $stmt_list_p->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                  <h5 class="m-0 text-white fw-bold fs-6">Configured ProfileTree Creator Hubs (<?php echo number_format($total_filtered_p); ?>)</h5>
+                  <span class="admin-badge admin-badge-primary font-monospace"><?php echo $pt_sort; ?></span>
+                </div>
+
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th style="width: 50px;">Avatar</th>
+                        <th>Display Name &amp; User</th>
+                        <th>Accent</th>
+                        <th>Views</th>
+                        <th>Links</th>
+                        <th>Highlights</th>
+                        <th>Statuses</th>
+                        <th>Last Updated</th>
+                        <th class="text-end" style="width: 170px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($profile_rows)): ?>
+                        <tr><td colspan="9" class="text-center py-5 text-secondary">No ProfileTree profiles found.</td></tr>
+                      <?php else: foreach ($profile_rows as $prof): 
+                        $prof_json = htmlspecialchars(json_encode($prof), ENT_QUOTES, 'UTF-8');
+                      ?>
+                        <tr>
+                          <td>
+                            <img src="?action=get_profile_picture&id=<?php echo $prof['user_id']; ?>" class="rounded-circle" style="width: 36px; height: 36px; object-fit: cover; background: #000; border: 1.5px solid <?php echo htmlspecialchars($prof['accent_color'] ?: '#ff0044'); ?>;" onerror="this.src='?action=get_app_icon'">
+                          </td>
+                          <td>
+                            <div class="fw-bold text-white"><?php echo htmlspecialchars($prof['display_name'] ?: $prof['user_artist']); ?></div>
+                            <small class="text-secondary font-monospace" style="font-size: 0.72rem;">User #<?php echo $prof['user_id']; ?> &bull; <?php echo htmlspecialchars($prof['user_email']); ?></small>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-1 font-monospace small">
+                              <span style="display:inline-block; width:14px; height:14px; border-radius:50%; background:<?php echo htmlspecialchars($prof['accent_color'] ?: '#ff0044'); ?>;"></span>
+                              <code><?php echo htmlspecialchars($prof['accent_color'] ?: '#ff0044'); ?></code>
+                            </div>
+                          </td>
+                          <td class="font-monospace text-secondary small">
+                            <i class="bi bi-eye text-info me-1"></i><?php echo number_format($prof['views_count']); ?>
+                          </td>
+                          <td class="font-monospace text-secondary small">
+                            <?php echo (int)$prof['link_count']; ?>
+                          </td>
+                          <td class="font-monospace text-secondary small">
+                            <?php echo (int)$prof['hl_count']; ?>
+                          </td>
+                          <td class="font-monospace text-secondary small">
+                            <?php echo (int)$prof['stat_count']; ?>
+                          </td>
+                          <td class="text-secondary small font-monospace">
+                            <?php echo date('M j, Y', strtotime($prof['updated_at'])); ?>
+                          </td>
+                          <td class="text-end">
+                            <div class="d-flex align-items-center justify-content-end gap-1">
+                              <a href="?access=profiletree&id=<?php echo $prof['user_id']; ?>" target="_blank" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem;" title="View Public Profile">
+                                <i class="bi bi-box-arrow-up-right"></i>
+                              </a>
+                              <button type="button" class="admin-btn-pill" style="height: 28px; padding: 0 0.65rem; font-size: 0.75rem; color: #38bdf8;" onclick='openEditPtProfileModal(<?php echo $prof_json; ?>)' title="Edit Profile Details">
+                                <i class="bi bi-pencil-fill"></i>
+                              </button>
+                              <form method="POST" action="?access=admin&page=profiletree" class="m-0 d-inline" onsubmit="return confirm('Wipe/reset all ProfileTree data (links, highlights, statuses) for this user?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                                <input type="hidden" name="reset_admin_pt_profile" value="1">
+                                <input type="hidden" name="user_id" value="<?php echo $prof['user_id']; ?>">
+                                <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Reset Profile">
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <?php if ($total_pages_p > 1): ?>
+                <div class="admin-pagination mb-4">
+                  <a class="admin-page-btn <?php echo ($pt_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=profiletree&tab=profiles&search=<?php echo urlencode($pt_search); ?>&sort=<?php echo urlencode($pt_sort); ?>&p=1">«</a>
+                  <a class="admin-page-btn <?php echo ($pt_page <= 1) ? 'disabled' : ''; ?>" href="?access=admin&page=profiletree&tab=profiles&search=<?php echo urlencode($pt_search); ?>&sort=<?php echo urlencode($pt_sort); ?>&p=<?php echo $pt_page - 1; ?>">‹</a>
+                  <?php for ($i = max(1, $pt_page - 2); $i <= min($total_pages_p, $pt_page + 2); $i++): ?>
+                    <a class="admin-page-btn <?php echo ($pt_page == $i) ? 'active' : ''; ?>" href="?access=admin&page=profiletree&tab=profiles&search=<?php echo urlencode($pt_search); ?>&sort=<?php echo urlencode($pt_sort); ?>&p=<?php echo $i; ?>"><?php echo $i; ?></a>
+                  <?php endfor; ?>
+                  <a class="admin-page-btn <?php echo ($pt_page >= $total_pages_p) ? 'disabled' : ''; ?>" href="?access=admin&page=profiletree&tab=profiles&search=<?php echo urlencode($pt_search); ?>&sort=<?php echo urlencode($pt_sort); ?>&p=<?php echo $pt_page + 1; ?>">›</a>
+                  <a class="admin-page-btn <?php echo ($pt_page >= $total_pages_p) ? 'disabled' : ''; ?>" href="?access=admin&page=profiletree&tab=profiles&search=<?php echo urlencode($pt_search); ?>&sort=<?php echo urlencode($pt_sort); ?>&p=<?php echo $total_pages_p; ?>">»</a>
+                </div>
+              <?php endif; ?>
+
+            <!-- TAB 2: CUSTOM LINKS -->
+            <?php elseif ($pt_tab === 'links'): ?>
+              <?php
+                $stmt_cnt_l = $db->query("SELECT COUNT(*) FROM pt_links");
+                $total_filtered_l = (int)$stmt_cnt_l->fetchColumn();
+                $total_pages_l = max(1, ceil($total_filtered_l / $pt_limit));
+
+                $stmt_list_l = $db->prepare("
+                  SELECT l.*, u.artist as user_artist, u.email as user_email
+                  FROM pt_links l
+                  JOIN users u ON l.user_id = u.id
+                  ORDER BY l.click_count DESC, l.id DESC
+                  LIMIT {$pt_limit} OFFSET {$pt_offset}
+                ");
+                $stmt_list_l->execute();
+                $link_rows = $stmt_list_l->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                  <h5 class="m-0 text-white fw-bold fs-6">Custom Outgoing Link Fields</h5>
+                  <span class="admin-badge admin-badge-info"><?php echo number_format($total_links); ?> Total Links</span>
+                </div>
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th>Creator</th>
+                        <th>Link Title &amp; Subtitle</th>
+                        <th>Destination URL</th>
+                        <th>Badge / Animation</th>
+                        <th>Clicks</th>
+                        <th>Created</th>
+                        <th class="text-end" style="width: 100px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($link_rows)): ?>
+                        <tr><td colspan="7" class="text-center py-5 text-secondary">No custom links created yet.</td></tr>
+                      <?php else: foreach ($link_rows as $l): ?>
+                        <tr>
+                          <td>
+                            <strong class="text-white"><?php echo htmlspecialchars($l['user_artist']); ?></strong>
+                            <small class="text-secondary d-block font-monospace" style="font-size: 0.72rem;">#<?php echo $l['user_id']; ?></small>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <i class="bi <?php echo htmlspecialchars($l['icon'] ?: 'bi-link-45deg'); ?> text-danger"></i>
+                              <div>
+                                <span class="fw-bold text-white"><?php echo htmlspecialchars($l['title']); ?></span>
+                                <?php if ($l['subtitle']): ?>
+                                  <small class="text-secondary d-block"><?php echo htmlspecialchars($l['subtitle']); ?></small>
+                                <?php endif; ?>
+                              </div>
+                            </div>
+                          </td>
+                          <td class="font-monospace small text-truncate" style="max-width: 220px;">
+                            <a href="<?php echo htmlspecialchars($l['url']); ?>" target="_blank" class="text-info text-decoration-none">
+                              <?php echo htmlspecialchars($l['url']); ?>
+                            </a>
+                          </td>
+                          <td>
+                            <?php if ($l['badge_text']): ?>
+                              <span class="admin-badge admin-badge-warning"><?php echo htmlspecialchars($l['badge_text']); ?></span>
+                            <?php endif; ?>
+                            <?php if ($l['animation'] && $l['animation'] !== 'none'): ?>
+                              <span class="admin-badge admin-badge-primary"><?php echo htmlspecialchars($l['animation']); ?></span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="font-monospace text-success fw-bold small">
+                            <i class="bi bi-cursor-fill me-1"></i><?php echo number_format($l['click_count']); ?>
+                          </td>
+                          <td class="text-secondary small font-monospace">
+                            <?php echo date('M j, Y', strtotime($l['created_at'])); ?>
+                          </td>
+                          <td class="text-end">
+                            <form method="POST" action="?access=admin&page=profiletree" class="m-0 d-inline" onsubmit="return confirm('Delete this custom link?');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="delete_admin_pt_link" value="1">
+                              <input type="hidden" name="link_id" value="<?php echo $l['id']; ?>">
+                              <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Delete Link">
+                                <i class="bi bi-trash"></i>
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <!-- TAB 3: SONG HIGHLIGHTS -->
+            <?php elseif ($pt_tab === 'highlights'): ?>
+              <?php
+                $stmt_cnt_h = $db->query("SELECT COUNT(*) FROM pt_highlights");
+                $total_filtered_h = (int)$stmt_cnt_h->fetchColumn();
+                $total_pages_h = max(1, ceil($total_filtered_h / $pt_limit));
+
+                $stmt_list_h = $db->prepare("
+                  SELECT h.*, u.artist as user_artist, m.title as song_title, m.artist as song_artist, m.album as song_album
+                  FROM pt_highlights h
+                  JOIN users u ON h.user_id = u.id
+                  JOIN music m ON h.song_id = m.id
+                  ORDER BY h.id DESC
+                  LIMIT {$pt_limit} OFFSET {$pt_offset}
+                ");
+                $stmt_list_h->execute();
+                $hl_rows = $stmt_list_h->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                  <h5 class="m-0 text-white fw-bold fs-6">Pinned Audio Track Highlights</h5>
+                  <span class="admin-badge admin-badge-warning"><?php echo number_format($total_highlights); ?> Featured Tracks</span>
+                </div>
+                <div class="table-responsive">
+                  <table class="admin-table align-middle text-nowrap">
+                    <thead>
+                      <tr>
+                        <th>Creator</th>
+                        <th>Featured Song</th>
+                        <th>Custom Title / Quote Snippet</th>
+                        <th>Added Date</th>
+                        <th class="text-end" style="width: 100px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($hl_rows)): ?>
+                        <tr><td colspan="5" class="text-center py-5 text-secondary">No song highlights pinned yet.</td></tr>
+                      <?php else: foreach ($hl_rows as $hl): ?>
+                        <tr>
+                          <td>
+                            <strong class="text-white"><?php echo htmlspecialchars($hl['user_artist']); ?></strong>
+                            <small class="text-secondary d-block font-monospace" style="font-size: 0.72rem;">#<?php echo $hl['user_id']; ?></small>
+                          </td>
+                          <td>
+                            <div class="d-flex align-items-center gap-2">
+                              <img src="?action=get_image&id=<?php echo $hl['song_id']; ?>&size=small" class="rounded" style="width: 32px; height: 32px; object-fit: cover; background: #000;" onerror="this.src='?action=get_app_icon'">
+                              <div>
+                                <strong class="text-white"><?php echo htmlspecialchars($hl['song_title']); ?></strong>
+                                <small class="text-secondary d-block" style="font-size: 0.72rem;"><?php echo htmlspecialchars($hl['song_artist']); ?></small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <?php if ($hl['snippet_quote']): ?>
+                              <span class="text-warning fst-italic small">&ldquo;<?php echo htmlspecialchars($hl['snippet_quote']); ?>&rdquo;</span>
+                            <?php else: ?>
+                              <span class="text-secondary small">Standard Highlight</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="text-secondary small font-monospace">
+                            <?php echo date('M j, Y', strtotime($hl['created_at'])); ?>
+                          </td>
+                          <td class="text-end">
+                            <form method="POST" action="?access=admin&page=profiletree" class="m-0 d-inline" onsubmit="return confirm('Delete this highlight?');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="delete_admin_pt_highlight" value="1">
+                              <input type="hidden" name="highlight_id" value="<?php echo $hl['id']; ?>">
+                              <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Remove Highlight">
+                                <i class="bi bi-trash"></i>
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <!-- TAB 4: STATUSES -->
+            <?php elseif ($pt_tab === 'statuses'): ?>
+              <?php
+                $stmt_cnt_s = $db->query("SELECT COUNT(*) FROM pt_statuses");
+                $total_filtered_s = (int)$stmt_cnt_s->fetchColumn();
+                $total_pages_s = max(1, ceil($total_filtered_s / $pt_limit));
+
+                $stmt_list_s = $db->prepare("
+                  SELECT s.*, u.artist as user_artist
+                  FROM pt_statuses s
+                  JOIN users u ON s.user_id = u.id
+                  ORDER BY s.id DESC
+                  LIMIT {$pt_limit} OFFSET {$pt_offset}
+                ");
+                $stmt_list_s->execute();
+                $stat_rows = $stmt_list_s->fetchAll(PDO::FETCH_ASSOC);
+              ?>
+              <div class="admin-card mb-4">
+                <div class="p-3 border-bottom border-secondary border-opacity-25 d-flex justify-content-between align-items-center">
+                  <h5 class="m-0 text-white fw-bold fs-6">ProfileTree Status Updates &amp; Feeds</h5>
+                  <span class="admin-badge admin-badge-success"><?php echo number_format($total_statuses); ?> Broadcasts</span>
+                </div>
+                <div class="table-responsive">
+                  <table class="admin-table align-middle">
+                    <thead>
+                      <tr>
+                        <th>Creator</th>
+                        <th>Status Content</th>
+                        <th>Media Attachment</th>
+                        <th>Published Date</th>
+                        <th class="text-end" style="width: 100px;">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (empty($stat_rows)): ?>
+                        <tr><td colspan="5" class="text-center py-5 text-secondary">No status updates published yet.</td></tr>
+                      <?php else: foreach ($stat_rows as $st): ?>
+                        <tr>
+                          <td style="white-space: nowrap;">
+                            <strong class="text-white"><?php echo htmlspecialchars($st['user_artist']); ?></strong>
+                            <small class="text-secondary d-block font-monospace" style="font-size: 0.72rem;">#<?php echo $st['user_id']; ?></small>
+                          </td>
+                          <td>
+                            <div class="text-white small" style="max-width: 440px; white-space: pre-wrap; word-break: break-word;">
+                              <?php echo htmlspecialchars($st['content']); ?>
+                            </div>
+                          </td>
+                          <td style="white-space: nowrap;">
+                            <?php if ($st['media_url']): ?>
+                              <a href="<?php echo htmlspecialchars($st['media_url']); ?>" target="_blank" class="text-info font-monospace small">
+                                <i class="bi bi-image me-1"></i> View Media
+                              </a>
+                            <?php else: ?>
+                              <span class="text-secondary small">Text Only</span>
+                            <?php endif; ?>
+                          </td>
+                          <td class="text-secondary small font-monospace" style="white-space: nowrap;">
+                            <?php echo date('M j, Y H:i', strtotime($st['created_at'])); ?>
+                          </td>
+                          <td class="text-end" style="white-space: nowrap;">
+                            <form method="POST" action="?access=admin&page=profiletree" class="m-0 d-inline" onsubmit="return confirm('Delete this status update?');">
+                              <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                              <input type="hidden" name="delete_admin_pt_status" value="1">
+                              <input type="hidden" name="status_id" value="<?php echo $st['id']; ?>">
+                              <button type="submit" class="btn btn-sm btn-outline-danger border-0 p-1" style="height: 28px; width: 28px;" title="Delete Status">
+                                <i class="bi bi-trash"></i>
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      <?php endforeach; endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            <!-- TAB 5: GLOBAL SETTINGS -->
+            <?php elseif ($pt_tab === 'settings'): ?>
+              <?php
+                $pt_max_l = (int)($db->query("SELECT value FROM site_settings WHERE key = 'pt_max_links'")->fetchColumn() ?: 25);
+                $pt_max_h = (int)($db->query("SELECT value FROM site_settings WHERE key = 'pt_max_highlights'")->fetchColumn() ?: 10);
+                $pt_def_acc = $db->query("SELECT value FROM site_settings WHERE key = 'pt_default_accent'")->fetchColumn() ?: '#ff0044';
+              ?>
+              <div class="admin-card p-4 mb-4 w-100">
+                <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+                  <div>
+                    <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                      <i class="bi bi-sliders text-danger"></i> ProfileTree Global Policies &amp; Thresholds
+                    </h5>
+                    <div class="small text-secondary mt-1">Configure limits on links, song showcase slots, and default accent theme styling.</div>
+                  </div>
+                  <span class="admin-badge admin-badge-primary">Global Policy</span>
+                </div>
+
+                <form method="POST" action="?access=admin&page=profiletree" class="d-flex flex-column gap-3 w-100">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_pt_settings" value="1">
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX LINKS PER PROFILE</label>
+                      <input type="number" name="pt_max_links" class="admin-pill-input w-100 font-monospace" min="5" max="100" value="<?php echo $pt_max_l; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">MAX SONG HIGHLIGHTS</label>
+                      <input type="number" name="pt_max_highlights" class="admin-pill-input w-100 font-monospace" min="1" max="20" value="<?php echo $pt_max_h; ?>" required>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1">DEFAULT ACCENT COLOR</label>
+                      <div class="d-flex align-items-center gap-2">
+                        <input type="color" name="pt_default_accent" class="form-control form-control-color bg-dark border-secondary" style="width: 44px; height: 38px; border-radius: 10px; cursor: pointer;" value="<?php echo htmlspecialchars($pt_def_acc); ?>">
+                        <input type="text" class="admin-pill-input flex-grow-1 font-monospace" value="<?php echo htmlspecialchars($pt_def_acc); ?>" readonly>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center mt-2" style="height: 42px;">
+                    <i class="bi bi-save me-1"></i> Save ProfileTree Settings
+                  </button>
+                </form>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Edit ProfileTree Modal -->
+          <div class="modal fade" id="adminEditPtProfileModal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
+              <div class="modal-content" style="background-color: #0d0d12; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;">
+                <div class="modal-header border-0 pb-1 border-bottom border-secondary border-opacity-25">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2">
+                    <i class="bi bi-person-lines-fill text-danger"></i> Edit Creator ProfileTree
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=profiletree">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="save_admin_pt_profile" value="1">
+                  <input type="hidden" name="user_id" id="edit-pt-uid" value="">
+
+                  <div class="modal-body p-4 text-start">
+                    <div class="row g-3 mb-3">
+                      <div class="col-12 col-md-8">
+                        <label class="form-label text-secondary small fw-bold mb-1">DISPLAY NAME</label>
+                        <input type="text" name="display_name" id="edit-pt-name" class="admin-pill-input w-100 font-monospace" required>
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <label class="form-label text-secondary small fw-bold mb-1">ACCENT COLOR</label>
+                        <input type="text" name="accent_color" id="edit-pt-accent" class="admin-pill-input w-100 font-monospace" placeholder="#ff0044" required>
+                      </div>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">BIO DESCRIPTION</label>
+                      <textarea name="bio" id="edit-pt-bio" class="form-control bg-dark text-white border-secondary" rows="3" style="border-radius:12px; font-size:0.85rem;"></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">BEHIND-THE-MUSIC QUOTE</label>
+                      <input type="text" name="highlight_quote" id="edit-pt-quote" class="admin-pill-input w-100" placeholder="e.g. Listen to my latest album release...">
+                    </div>
+
+                    <span class="text-secondary small fw-bold text-uppercase d-block mb-2">Social Handles</span>
+                    <div class="row g-2 mb-3">
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_spotify" id="edit-pt-sp" class="admin-pill-input w-100 small font-monospace" placeholder="Spotify URL">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_instagram" id="edit-pt-ig" class="admin-pill-input w-100 small font-monospace" placeholder="Instagram User">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_twitter" id="edit-pt-tw" class="admin-pill-input w-100 small font-monospace" placeholder="Twitter / X">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_youtube" id="edit-pt-yt" class="admin-pill-input w-100 small font-monospace" placeholder="YouTube URL">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_soundcloud" id="edit-pt-sc" class="admin-pill-input w-100 small font-monospace" placeholder="SoundCloud URL">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_github" id="edit-pt-gh" class="admin-pill-input w-100 small font-monospace" placeholder="GitHub User">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_discord" id="edit-pt-dc" class="admin-pill-input w-100 small font-monospace" placeholder="Discord URL">
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <input type="text" name="social_telegram" id="edit-pt-tg" class="admin-pill-input w-100 small font-monospace" placeholder="Telegram User">
+                      </div>
+                    </div>
+
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2" style="height: 42px;">
+                      <i class="bi bi-save me-1"></i> Save ProfileTree
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function openEditPtProfileModal(prof) {
+              document.getElementById('edit-pt-uid').value = prof.user_id;
+              document.getElementById('edit-pt-name').value = prof.display_name || prof.user_artist || '';
+              document.getElementById('edit-pt-accent').value = prof.accent_color || '#ff0044';
+              document.getElementById('edit-pt-bio').value = prof.bio || '';
+              document.getElementById('edit-pt-quote').value = prof.highlight_quote || '';
+              document.getElementById('edit-pt-sp').value = prof.social_spotify || '';
+              document.getElementById('edit-pt-ig').value = prof.social_instagram || '';
+              document.getElementById('edit-pt-tw').value = prof.social_twitter || '';
+              document.getElementById('edit-pt-yt').value = prof.social_youtube || '';
+              document.getElementById('edit-pt-sc').value = prof.social_soundcloud || '';
+              document.getElementById('edit-pt-gh').value = prof.social_github || '';
+              document.getElementById('edit-pt-dc').value = prof.social_discord || '';
+              document.getElementById('edit-pt-tg').value = prof.social_telegram || '';
+              new bootstrap.Modal(document.getElementById('adminEditPtProfileModal')).show();
+            }
+          </script>
+
         <?php elseif (($_GET['page'] ?? '') === 'phpboard'): ?>
           <?php
             $db = get_db();
@@ -52044,8 +53040,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             }
 
             // 1. Host Partition Metrics
-            $disk_total = @disk_total_space(__DIR__) ?: 1;
-            $disk_free = @disk_free_space(__DIR__) ?: 0;
+            $disk_total = function_exists('disk_total_space') ? (@disk_total_space(__DIR__) ?: 1) : 1;
+            $disk_free = function_exists('disk_free_space') ? (@disk_free_space(__DIR__) ?: 0) : 0;
             $disk_used = max(0, $disk_total - $disk_free);
             $disk_pct = min(100, ($disk_used / $disk_total) * 100);
             $disk_pct_css = number_format($disk_pct, 2, '.', '');
@@ -53566,7 +54562,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.9';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.0';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -77194,6 +78190,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   </div>
                   <div class="col-12 col-md-6">
                     <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                      <label class="form-check-label text-white small fw-medium m-0" for="perm-profiletree">ProfileTree Studio</label>
+                      <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="profiletree" id="perm-profiletree" style="cursor: pointer;">
+                    </div>
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <div class="p-2 rounded bg-black bg-opacity-40 border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
                       <label class="form-check-label text-white small fw-medium m-0" for="perm-phpboard">PHPBoard Imageboard</label>
                       <input class="form-check-input bg-dark border-secondary m-0" type="checkbox" name="permissions[]" value="phpboard" id="perm-phpboard" style="cursor: pointer;">
                     </div>
@@ -80600,24 +81602,24 @@ if (isset($_GET['action'])) {
 
       $max_size_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
       $max_allowed_bytes = $max_size_mb * 1048576;
-      // Pre-flight check: If total expected payload exceeds maximum size limit by more than 2MB
-      if (($total_chunks * 2 * 1024 * 1024) > ($max_allowed_bytes + 2097152)) {
+
+      if ($_FILES['chunk']['error'] !== UPLOAD_ERR_OK) {
         http_response_code(400);
-        send_json(['status' => 'error', 'message' => "Estimated file size exceeds the maximum limit of {$max_size_mb} MB."]);
+        send_json(['status' => 'error', 'message' => 'Chunk upload error: ' . $_FILES['chunk']['error']]);
       }
 
       $tmp_base = MUSIC_DIR . '/.tmp_uploads';
       if (!is_dir($tmp_base)) {
-        @mkdir($tmp_base, 0755, true);
+        @mkdir($tmp_base, 0777, true);
       }
 
       $chunk_dir = $tmp_base . '/' . $upload_id;
       if (!is_dir($chunk_dir)) {
-        @mkdir($chunk_dir, 0755, true);
+        @mkdir($chunk_dir, 0777, true);
       }
 
       $chunk_file = $chunk_dir . '/chunk_' . $chunk_index;
-      if (!move_uploaded_file($_FILES['chunk']['tmp_name'], $chunk_file)) {
+      if (!@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunk_file)) {
         http_response_code(500);
         send_json(['status' => 'error', 'message' => 'Failed to save chunk ' . $chunk_index]);
       }
@@ -86864,7 +87866,7 @@ if (isset($_GET['action'])) {
         }
         
         // 1. Check if the server actually has enough physical disk space (needs ~1.5x the DB size)
-        $free_space = @disk_free_space(__DIR__);
+        $free_space = function_exists('disk_free_space') ? @disk_free_space(__DIR__) : false;
         if ($free_space !== false && $free_space < ($before_size * 1.5)) {
           throw new Exception("Insufficient Disk Space: You have " . number_format($free_space / 1048576, 2) . " MB free, but need at least " . number_format(($before_size * 1.5) / 1048576, 2) . " MB to safely vacuum.");
         }
