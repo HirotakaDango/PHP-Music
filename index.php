@@ -1480,6 +1480,1875 @@ if (isset($_GET['access']) && $_GET['access'] === 'news') {
   exit;
 }
 
+// PROFILETREE: INDEPENDENT CREATOR BIO & AUDIO SHOWCASE HUB (?access=profiletree)
+if (isset($_GET['access']) && $_GET['access'] === 'profiletree') {
+  while (ob_get_level() > 0) {
+    @ob_end_clean();
+  }
+
+  $db = get_db();
+
+  // 1. Self-Healing SQLite Database Engine (WAL-Mode, Foreign Keys Enforced)
+  try {
+    $db->exec("
+      CREATE TABLE IF NOT EXISTS pt_profiles (
+        user_id INTEGER PRIMARY KEY,
+        display_name TEXT,
+        bio TEXT,
+        theme_style TEXT DEFAULT 'crimson_dark',
+        accent_color TEXT DEFAULT '#ff0044',
+        featured_track_id INTEGER DEFAULT 0,
+        highlight_quote TEXT,
+        social_instagram TEXT,
+        social_twitter TEXT,
+        social_youtube TEXT,
+        social_github TEXT,
+        social_spotify TEXT,
+        social_discord TEXT,
+        social_soundcloud TEXT,
+        social_telegram TEXT,
+        views_count INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS pt_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        subtitle TEXT,
+        url TEXT NOT NULL,
+        icon TEXT DEFAULT 'bi-link-45deg',
+        badge_text TEXT,
+        animation TEXT DEFAULT 'none',
+        click_count INTEGER DEFAULT 0,
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS pt_highlights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        song_id INTEGER NOT NULL,
+        custom_title TEXT,
+        snippet_quote TEXT,
+        sort_order INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS pt_statuses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        media_url TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pt_links_user ON pt_links(user_id, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_pt_highlights_user ON pt_highlights(user_id, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_pt_statuses_user ON pt_statuses(user_id, created_at DESC);
+    ");
+  } catch (\Throwable $e) {}
+
+  // 2. Click Redirect Analytics Endpoint
+  if (isset($_GET['action']) && $_GET['action'] === 'click') {
+    $link_id = (int)($_GET['id'] ?? 0);
+    if ($link_id > 0) {
+      $stmt = $db->prepare("SELECT url FROM pt_links WHERE id = ?");
+      $stmt->execute([$link_id]);
+      $target_url = $stmt->fetchColumn();
+      if ($target_url) {
+        $db->prepare("UPDATE pt_links SET click_count = click_count + 1 WHERE id = ?")->execute([$link_id]);
+        header("Location: " . $target_url, true, 302);
+        exit;
+      }
+    }
+    header("Location: ?access=profiletree");
+    exit;
+  }
+
+  // 3. User Resolution
+  $session_uid = (int)($_SESSION['user_id'] ?? 0);
+  $is_admin = !empty($_SESSION['admin_logged_in']) || (!empty($_SESSION['user_id']) && (int)($db->query("SELECT is_admin FROM users WHERE id = {$_SESSION['user_id']}")->fetchColumn() ?: 0) === 1);
+
+  $target_user = null;
+  if (!empty($_GET['u'])) {
+    $stmt = $db->prepare("SELECT id, artist, email, bio, verified FROM users WHERE artist = ? COLLATE NOCASE OR email = ? LIMIT 1");
+    $stmt->execute([trim($_GET['u']), trim($_GET['u'])]);
+    $target_user = $stmt->fetch(PDO::FETCH_ASSOC);
+  } elseif (!empty($_GET['id'])) {
+    $stmt = $db->prepare("SELECT id, artist, email, bio, verified FROM users WHERE id = ? LIMIT 1");
+    $stmt->execute([(int)$_GET['id']]);
+    $target_user = $stmt->fetch(PDO::FETCH_ASSOC);
+  } elseif ($session_uid > 0) {
+    $stmt = $db->prepare("SELECT id, artist, email, bio, verified FROM users WHERE id = ? LIMIT 1");
+    $stmt->execute([$session_uid]);
+    $target_user = $stmt->fetch(PDO::FETCH_ASSOC);
+  } else {
+    $target_user = $db->query("SELECT id, artist, email, bio, verified FROM users ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+  }
+
+  if (!$target_user) {
+    die("Profile not found. Please log in or specify an active account.");
+  }
+
+  $target_uid = (int)$target_user['id'];
+  $is_owner = ($session_uid > 0 && $session_uid === $target_uid) || $is_admin;
+
+  // 4. API & Mutation Actions (PHP 8 Match Routing)
+  if ($_SERVER['REQUEST_METHOD'] === 'POST' && $is_owner) {
+    header('Content-Type: application/json; charset=utf-8');
+    $action = $_POST['tree_action'] ?? '';
+
+    $response = match ($action) {
+      'save_profile' => (function() use ($db, $target_uid, $target_user) {
+        $display_name = trim($_POST['display_name'] ?? $target_user['artist']);
+        $bio = trim($_POST['bio'] ?? '');
+        $accent_color = preg_match('/^#[a-fA-F0-9]{6}$/', $_POST['accent_color'] ?? '') ? $_POST['accent_color'] : '#ff0044';
+        $featured_track = (int)($_POST['featured_track_id'] ?? 0);
+        $highlight_quote = trim($_POST['highlight_quote'] ?? '');
+        $ig = trim($_POST['social_instagram'] ?? '');
+        $tw = trim($_POST['social_twitter'] ?? '');
+        $yt = trim($_POST['social_youtube'] ?? '');
+        $gh = trim($_POST['social_github'] ?? '');
+        $sp = trim($_POST['social_spotify'] ?? '');
+        $dc = trim($_POST['social_discord'] ?? '');
+        $sc = trim($_POST['social_soundcloud'] ?? '');
+        $tg = trim($_POST['social_telegram'] ?? '');
+
+        $stmt = $db->prepare("
+          INSERT INTO pt_profiles (user_id, display_name, bio, accent_color, featured_track_id, highlight_quote, social_instagram, social_twitter, social_youtube, social_github, social_spotify, social_discord, social_soundcloud, social_telegram, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            bio = excluded.bio,
+            accent_color = excluded.accent_color,
+            featured_track_id = excluded.featured_track_id,
+            highlight_quote = excluded.highlight_quote,
+            social_instagram = excluded.social_instagram,
+            social_twitter = excluded.social_twitter,
+            social_youtube = excluded.social_youtube,
+            social_github = excluded.social_github,
+            social_spotify = excluded.social_spotify,
+            social_discord = excluded.social_discord,
+            social_soundcloud = excluded.social_soundcloud,
+            social_telegram = excluded.social_telegram,
+            updated_at = CURRENT_TIMESTAMP
+        ");
+        $stmt->execute([$target_uid, $display_name, $bio, $accent_color, $featured_track, $highlight_quote, $ig, $tw, $yt, $gh, $sp, $dc, $sc, $tg]);
+        return ['status' => 'success', 'message' => 'Settings saved successfully!'];
+      })(),
+
+      'add_link' => (function() use ($db, $target_uid) {
+        $title = trim($_POST['title'] ?? 'Custom Link');
+        $subtitle = trim($_POST['subtitle'] ?? '');
+        $url = trim($_POST['url'] ?? '');
+        $icon = preg_replace('/[^a-zA-Z0-9_-]/', '', $_POST['icon'] ?? 'bi-link-45deg');
+        $badge = trim($_POST['badge_text'] ?? '');
+        $animation = in_array($_POST['animation'] ?? '', ['pulse', 'glow', 'shake', 'none'], true) ? $_POST['animation'] : 'none';
+
+        if (!str_starts_with($url, 'http://') && !str_starts_with($url, 'https://')) {
+          $url = 'https://' . $url;
+        }
+
+        $order = (int)$db->query("SELECT COALESCE(MAX(sort_order), 0) FROM pt_links WHERE user_id = {$target_uid}")->fetchColumn() + 1;
+        $stmt = $db->prepare("INSERT INTO pt_links (user_id, title, subtitle, url, icon, badge_text, animation, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$target_uid, $title, $subtitle, $url, $icon, $badge, $animation, $order]);
+        return ['status' => 'success', 'message' => 'New link field created!'];
+      })(),
+
+      'delete_link' => (function() use ($db, $target_uid) {
+        $id = (int)($_POST['link_id'] ?? 0);
+        $db->prepare("DELETE FROM pt_links WHERE id = ? AND user_id = ?")->execute([$id, $target_uid]);
+        return ['status' => 'success', 'message' => 'Link removed.'];
+      })(),
+
+      'reorder_links' => (function() use ($db, $target_uid) {
+        $order = json_decode($_POST['order'] ?? '[]', true);
+        if (is_array($order)) {
+          $stmt = $db->prepare("UPDATE pt_links SET sort_order = ? WHERE id = ? AND user_id = ?");
+          foreach ($order as $pos => $lid) {
+            $stmt->execute([(int)$pos, (int)$lid, $target_uid]);
+          }
+        }
+        return ['status' => 'success'];
+      })(),
+
+      'add_highlight' => (function() use ($db, $target_uid) {
+        $song_ids = $_POST['song_ids'] ?? [];
+        if (!is_array($song_ids)) {
+          $single = (int)($_POST['song_id'] ?? 0);
+          $song_ids = $single > 0 ? [$single] : [];
+        }
+        $song_ids = array_values(array_unique(array_filter(array_map('intval', $song_ids))));
+
+        if (empty($song_ids)) {
+          return ['status' => 'error', 'message' => 'Please select at least one song.'];
+        }
+
+        if (count($song_ids) > 10) {
+          return ['status' => 'error', 'message' => 'You can select a maximum of 10 songs at once.'];
+        }
+
+        // Enforce hard cap of 10 total highlights per profile
+        $stmt_exist = $db->prepare("SELECT song_id FROM pt_highlights WHERE user_id = ?");
+        $stmt_exist->execute([$target_uid]);
+        $existing_ids = array_map('intval', $stmt_exist->fetchAll(PDO::FETCH_COLUMN));
+        $current_count = count($existing_ids);
+
+        $new_ids = array_values(array_diff($song_ids, $existing_ids));
+
+        if (empty($new_ids)) {
+          return ['status' => 'error', 'message' => 'The selected song(s) are already in your highlights.'];
+        }
+
+        if (($current_count + count($new_ids)) > 10) {
+          $available_slots = max(0, 10 - $current_count);
+          return [
+            'status' => 'error', 
+            'message' => "Highlight limit reached! You have {$current_count}/10 active slots and can only add {$available_slots} more."
+          ];
+        }
+
+        $quote = trim($_POST['snippet_quote'] ?? '');
+        $order = (int)$db->query("SELECT COALESCE(MAX(sort_order), 0) FROM pt_highlights WHERE user_id = {$target_uid}")->fetchColumn();
+
+        $stmt = $db->prepare("INSERT INTO pt_highlights (user_id, song_id, custom_title, snippet_quote, sort_order) VALUES (?, ?, '', ?, ?)");
+        foreach ($new_ids as $sid) {
+          $order++;
+          $stmt->execute([$target_uid, $sid, $quote, $order]);
+        }
+
+        $added_count = count($new_ids);
+        return ['status' => 'success', 'message' => "Added {$added_count} song highlight(s) successfully!"];
+      })(),
+
+      'reorder_highlights' => (function() use ($db, $target_uid) {
+        $order = json_decode($_POST['order'] ?? '[]', true);
+        if (is_array($order)) {
+          $stmt = $db->prepare("UPDATE pt_highlights SET sort_order = ? WHERE id = ? AND user_id = ?");
+          foreach ($order as $pos => $hid) {
+            $stmt->execute([(int)$pos, (int)$hid, $target_uid]);
+          }
+        }
+        return ['status' => 'success'];
+      })(),
+
+      'delete_highlight' => (function() use ($db, $target_uid) {
+        $id = (int)($_POST['highlight_id'] ?? 0);
+        $db->prepare("DELETE FROM pt_highlights WHERE id = ? AND user_id = ?")->execute([$id, $target_uid]);
+        return ['status' => 'success', 'message' => 'Song highlight removed.'];
+      })(),
+
+      'post_status' => (function() use ($db, $target_uid) {
+        $content = trim($_POST['content'] ?? '');
+        $media_url = trim($_POST['media_url'] ?? '');
+        if (empty($content)) return ['status' => 'error', 'message' => 'Status content is required.'];
+
+        $stmt = $db->prepare("INSERT INTO pt_statuses (user_id, content, media_url) VALUES (?, ?, ?)");
+        $stmt->execute([$target_uid, $content, $media_url]);
+        return ['status' => 'success', 'message' => 'Status posted!'];
+      })(),
+
+      'delete_status' => (function() use ($db, $target_uid) {
+        $id = (int)($_POST['status_id'] ?? 0);
+        $db->prepare("DELETE FROM pt_statuses WHERE id = ? AND user_id = ?")->execute([$id, $target_uid]);
+        return ['status' => 'success', 'message' => 'Status deleted.'];
+      })(),
+
+      default => ['status' => 'error', 'message' => 'Unknown action request.']
+    };
+
+    echo json_encode($response);
+    exit;
+  }
+
+  // 5. Query Profile, Links, Highlights, & Statuses
+  $db->prepare("UPDATE pt_profiles SET views_count = views_count + 1 WHERE user_id = ?")->execute([$target_uid]);
+
+  $stmt_profile = $db->prepare("SELECT * FROM pt_profiles WHERE user_id = ?");
+  $stmt_profile->execute([$target_uid]);
+  $profile = $stmt_profile->fetch(PDO::FETCH_ASSOC) ?: [
+    'display_name' => $target_user['artist'],
+    'bio' => $target_user['bio'] ?: 'Welcome to my official bio page.',
+    'accent_color' => '#ff0044',
+    'featured_track_id' => 0,
+    'highlight_quote' => '',
+    'views_count' => 1
+  ];
+
+  $stmt_links = $db->prepare("SELECT * FROM pt_links WHERE user_id = ? AND is_active = 1 ORDER BY sort_order ASC, id DESC");
+  $stmt_links->execute([$target_uid]);
+  $links = $stmt_links->fetchAll(PDO::FETCH_ASSOC);
+
+  $stmt_hl = $db->prepare("
+    SELECT h.*, m.title, m.artist, m.album, m.duration, m.last_modified 
+    FROM pt_highlights h 
+    JOIN music m ON h.song_id = m.id 
+    WHERE h.user_id = ? 
+    ORDER BY h.sort_order ASC, h.id DESC
+  ");
+  $stmt_hl->execute([$target_uid]);
+  $highlights = $stmt_hl->fetchAll(PDO::FETCH_ASSOC);
+
+  $stmt_stat = $db->prepare("SELECT * FROM pt_statuses WHERE user_id = ? ORDER BY created_at DESC LIMIT 30");
+  $stmt_stat->execute([$target_uid]);
+  $statuses = $stmt_stat->fetchAll(PDO::FETCH_ASSOC);
+
+  // Pre-fetch owner's songs for the dropdown pickers
+  $owner_songs = [];
+  if ($is_owner) {
+    $stmt_os = $db->prepare("SELECT id, title, artist, album FROM music WHERE user_id = ? OR match_artist(artist, ?) = 1 ORDER BY id DESC LIMIT 150");
+    $stmt_os->execute([$target_uid, $target_user['artist']]);
+    $owner_songs = $stmt_os->fetchAll(PDO::FETCH_ASSOC);
+  }
+
+  $accent = $profile['accent_color'] ?: '#ff0044';
+  $avatar_url = "?action=get_profile_picture&id={$target_uid}&v=" . time();
+  $page_url = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+  ?>
+  <!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+      <title><?= htmlspecialchars($profile['display_name']) ?> &bull; Profile Hub</title>
+      <meta name="description" content="<?= htmlspecialchars($profile['bio']) ?>">
+      <meta property="og:title" content="<?= htmlspecialchars($profile['display_name']) ?> &bull; Profile Hub">
+      <meta property="og:description" content="<?= htmlspecialchars($profile['bio']) ?>">
+      <meta property="og:image" content="<?= htmlspecialchars($avatar_url) ?>">
+      <link rel="icon" type="image/svg+xml" href="?action=get_app_icon">
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+      <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+
+      <style>
+        *, *::before, *::after {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+
+        :root {
+          --pt-bg: #050507;
+          --pt-surface: #0d0d12;
+          --pt-surface-2: #16161f;
+          --pt-surface-card: rgba(18, 18, 25, 0.72);
+          --pt-border: rgba(255, 0, 68, 0.24);
+          --pt-border-subtle: rgba(255, 255, 255, 0.08);
+          --pt-red: <?= $accent ?>;
+          --pt-red-glow: <?= $accent ?>55;
+          --pt-text: #ffffff;
+          --pt-text-muted: #8c8c9e;
+        }
+
+        body {
+          background-color: var(--pt-bg);
+          color: var(--pt-text);
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          min-height: 100dvh;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          position: relative;
+          overflow-x: hidden;
+          padding: 3rem 1.25rem 5rem 1.25rem;
+          -webkit-font-smoothing: antialiased;
+        }
+
+        /* Ambient Glow Backdrop */
+        .pt-ambient {
+          position: fixed;
+          top: -100px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 100vw;
+          max-width: 800px;
+          height: 600px;
+          background: radial-gradient(circle at 50% 15%, var(--pt-red-glow), transparent 70%);
+          opacity: 0.28;
+          pointer-events: none;
+          z-index: 0;
+        }
+
+        /* Top Right Translucent Actions (Compact & Sleek) */
+        .pt-top-actions {
+          position: fixed;
+          top: 18px;
+          right: 18px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          z-index: 100;
+        }
+
+        .pt-top-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          background: rgba(255, 255, 255, 0.06);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          backdrop-filter: blur(14px);
+          -webkit-backdrop-filter: blur(14px);
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 0.88rem;
+          cursor: pointer;
+          text-decoration: none !important;
+          transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        .pt-top-btn:hover {
+          background: var(--pt-red);
+          border-color: var(--pt-red);
+          color: #ffffff;
+          transform: scale(1.1);
+          box-shadow: 0 0 16px var(--pt-red-glow);
+        }
+
+        .pt-container {
+          width: 100%;
+          max-width: 620px;
+          position: relative;
+          z-index: 2;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        }
+
+        /* Avatar & Identity */
+        .pt-avatar-wrap {
+          position: relative;
+          width: 108px;
+          height: 108px;
+          border-radius: 50%;
+          padding: 3px;
+          background: linear-gradient(135deg, var(--pt-red), rgba(255, 255, 255, 0.15));
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8), 0 0 24px var(--pt-red-glow);
+          margin-bottom: 1.15rem;
+        }
+
+        .pt-avatar {
+          width: 100%;
+          height: 100%;
+          border-radius: 50%;
+          object-fit: cover;
+          display: block;
+          background: #0d0d12;
+        }
+
+        .pt-name-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 0.35rem;
+        }
+
+        .pt-name {
+          font-size: clamp(1.4rem, 3.5vw, 1.85rem);
+          font-weight: 800;
+          letter-spacing: -0.5px;
+          color: #ffffff;
+        }
+
+        .pt-badge-verified {
+          color: var(--pt-red);
+          font-size: 1.15rem;
+          filter: drop-shadow(0 0 8px var(--pt-red-glow));
+        }
+
+        .pt-bio {
+          font-size: 0.92rem;
+          color: var(--pt-text-muted);
+          text-align: center;
+          line-height: 1.55;
+          max-width: 480px;
+          margin-bottom: 1.25rem;
+        }
+
+        /* Social Icons Row */
+        .pt-socials {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 1.75rem;
+        }
+
+        .pt-social-btn {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid var(--pt-border-subtle);
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1.15rem;
+          text-decoration: none;
+          transition: all 0.2s ease;
+        }
+
+        .pt-social-btn:hover {
+          background: var(--pt-red);
+          border-color: var(--pt-red);
+          color: #ffffff;
+          transform: translateY(-2px);
+          box-shadow: 0 6px 16px var(--pt-red-glow);
+        }
+
+        /* Hub Navigation Tabs */
+        .pt-tabs-nav {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: var(--pt-surface-2);
+          border: 1px solid var(--pt-border-subtle);
+          border-radius: 9999px;
+          padding: 4px;
+          margin-bottom: 1.85rem;
+          width: 100%;
+          max-width: 420px;
+        }
+
+        .pt-tab-btn {
+          flex: 1;
+          background: transparent;
+          border: none;
+          outline: none;
+          padding: 8px 14px;
+          border-radius: 9999px;
+          color: var(--pt-text-muted);
+          font-size: 0.85rem;
+          font-weight: 700;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          transition: all 0.2s ease;
+        }
+
+        .pt-tab-btn:hover {
+          color: #ffffff;
+        }
+
+        .pt-tab-btn.active {
+          background: var(--pt-red);
+          color: #ffffff;
+          box-shadow: 0 4px 14px var(--pt-red-glow);
+        }
+
+        .pt-tab-pane {
+          display: none;
+          width: 100%;
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .pt-tab-pane.active {
+          display: flex;
+          animation: ptFadeIn 0.25s ease forwards;
+        }
+
+        @keyframes ptFadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Link Cards */
+        .pt-link-card {
+          width: 100%;
+          background: var(--pt-surface-card);
+          border: 1px solid var(--pt-border);
+          border-radius: 18px;
+          padding: 1rem 1.25rem;
+          margin-bottom: 0.85rem;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          text-decoration: none !important;
+          color: #ffffff;
+          backdrop-filter: blur(18px);
+          -webkit-backdrop-filter: blur(18px);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+          transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .pt-link-card:hover {
+          transform: translateY(-3px) scale(1.01);
+          border-color: var(--pt-red);
+          box-shadow: 0 14px 34px rgba(0, 0, 0, 0.6), 0 0 16px var(--pt-red-glow);
+        }
+
+        .pt-link-icon {
+          width: 42px;
+          height: 42px;
+          border-radius: 12px;
+          background: rgba(255, 0, 68, 0.12);
+          border: 1px solid rgba(255, 0, 68, 0.25);
+          color: var(--pt-red);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1.3rem;
+          flex-shrink: 0;
+        }
+
+        .pt-link-content {
+          flex: 1;
+          min-width: 0;
+          padding: 0 1rem;
+          text-align: center;
+        }
+
+        .pt-link-title {
+          font-size: 1.05rem;
+          font-weight: 700;
+          color: #ffffff;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .pt-link-sub {
+          font-size: 0.78rem;
+          color: var(--pt-text-muted);
+          margin-top: 2px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .pt-badge {
+          display: inline-block;
+          font-size: 0.68rem;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 3px 8px;
+          border-radius: 9999px;
+          background: var(--pt-red);
+          color: #ffffff;
+        }
+
+        /* Animations */
+        .anim-pulse { animation: ptPulse 2s infinite; }
+        .anim-glow { box-shadow: 0 0 20px var(--pt-red-glow); }
+        .anim-shake:hover { animation: ptShake 0.4s ease; }
+
+        @keyframes ptPulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.025); }
+        }
+
+        @keyframes ptShake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-4px); }
+          75% { transform: translateX(4px); }
+        }
+
+        /* Song Highlights Showcase - Modern Audio Card */
+        .pt-song-card {
+          width: 100%;
+          background: var(--pt-surface-card);
+          border: 1px solid var(--pt-border);
+          border-radius: 20px;
+          padding: 1.25rem 1.35rem;
+          margin-bottom: 1.15rem;
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+          transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+          position: relative;
+        }
+
+        .pt-song-card:hover {
+          border-color: rgba(255, 0, 68, 0.5);
+          transform: translateY(-2px);
+        }
+
+        .pt-song-card.is-playing {
+          border-color: var(--pt-red);
+          box-shadow: 0 12px 35px rgba(0, 0, 0, 0.6), 0 0 24px var(--pt-red-glow);
+        }
+
+        .pt-song-top {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+        }
+
+        .pt-song-art {
+          width: 64px;
+          height: 64px;
+          border-radius: 14px;
+          object-fit: cover;
+          flex-shrink: 0;
+          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+          background: #111;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .pt-song-meta {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .pt-song-title {
+          font-size: 1.1rem;
+          font-weight: 800;
+          color: #ffffff;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .pt-song-artist {
+          font-size: 0.82rem;
+          color: var(--pt-text-muted);
+          margin-top: 2px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .pt-play-btn {
+          width: 46px;
+          height: 46px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, var(--pt-red), #cc0033);
+          border: none;
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1.35rem;
+          cursor: pointer;
+          flex-shrink: 0;
+          box-shadow: 0 4px 14px var(--pt-red-glow);
+          transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .pt-play-btn:hover {
+          transform: scale(1.1);
+        }
+
+        /* Interactive Timeline Scrubber */
+        .pt-song-timeline {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          width: 100%;
+        }
+
+        .pt-song-time {
+          font-size: 0.72rem;
+          font-family: monospace;
+          color: var(--pt-text-muted);
+          min-width: 32px;
+        }
+
+        .pt-song-scrub {
+          flex: 1;
+          height: 6px;
+          background: rgba(255, 255, 255, 0.12);
+          border-radius: 3px;
+          position: relative;
+          cursor: pointer;
+          overflow: hidden;
+        }
+
+        .pt-song-progress {
+          position: absolute;
+          top: 0;
+          left: 0;
+          height: 100%;
+          width: 0%;
+          background: linear-gradient(90deg, #ff0044, #ff3366);
+          border-radius: 3px;
+          pointer-events: none;
+          transition: width 0.08s linear;
+        }
+
+        /* Equalizer Animation Bars */
+        .pt-eq-wave {
+          display: inline-flex;
+          align-items: flex-end;
+          gap: 2px;
+          height: 11px;
+          margin-left: 6px;
+        }
+
+        .pt-eq-bar {
+          width: 2px;
+          height: 3px;
+          background: var(--pt-red);
+          border-radius: 1px;
+        }
+
+        .pt-song-card.is-playing .pt-eq-bar:nth-child(1) { animation: ptEq 0.5s infinite alternate ease-in-out; }
+        .pt-song-card.is-playing .pt-eq-bar:nth-child(2) { animation: ptEq 0.7s infinite alternate 0.15s ease-in-out; }
+        .pt-song-card.is-playing .pt-eq-bar:nth-child(3) { animation: ptEq 0.4s infinite alternate 0.3s ease-in-out; }
+
+        @keyframes ptEq {
+          0% { height: 3px; }
+          100% { height: 11px; }
+        }
+
+        .pt-song-quote {
+          background: rgba(255, 0, 68, 0.07);
+          border-left: 3px solid var(--pt-red);
+          padding: 8px 12px;
+          border-radius: 0 10px 10px 0;
+          font-size: 0.82rem;
+          color: #f1f1f5;
+          font-style: italic;
+          line-height: 1.45;
+        }
+
+        /* Modern Custom Multi-Select Track Picker */
+        .pt-track-picker-box {
+          border: 1px solid var(--pt-border);
+          background: #150d12;
+          border-radius: 14px;
+          overflow: hidden;
+          margin-bottom: 8px;
+        }
+
+        .pt-track-picker-list {
+          max-height: 220px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          padding: 4px;
+        }
+
+        .pt-track-picker-item {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          cursor: pointer;
+          transition: background 0.15s ease;
+          user-select: none;
+          border: 1px solid transparent;
+        }
+
+        .pt-track-picker-item:hover {
+          background: rgba(255, 255, 255, 0.05);
+        }
+
+        .pt-track-picker-item.selected {
+          background: rgba(255, 0, 68, 0.16);
+          border-color: rgba(255, 0, 68, 0.35);
+        }
+
+        .pt-checkbox-custom {
+          width: 18px;
+          height: 18px;
+          border-radius: 5px;
+          border: 1.5px solid var(--pt-text-muted);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          font-size: 0.75rem;
+          color: transparent;
+          transition: all 0.15s ease;
+        }
+
+        .pt-track-picker-item.selected .pt-checkbox-custom {
+          background: var(--pt-red);
+          border-color: var(--pt-red);
+          color: #ffffff;
+        }
+
+        /* Status & Stories Feed */
+        .pt-status-card {
+          width: 100%;
+          background: var(--pt-surface-card);
+          border: 1px solid var(--pt-border-subtle);
+          border-radius: 18px;
+          padding: 1.25rem;
+          margin-bottom: 1rem;
+          backdrop-filter: blur(16px);
+        }
+
+        .pt-status-time {
+          font-size: 0.75rem;
+          color: var(--pt-text-muted);
+          font-family: monospace;
+          margin-bottom: 6px;
+        }
+
+        .pt-status-body {
+          font-size: 0.95rem;
+          line-height: 1.6;
+          color: #ececee;
+          word-break: break-word;
+        }
+
+        .pt-status-img {
+          width: 100%;
+          max-height: 320px;
+          object-fit: cover;
+          border-radius: 12px;
+          margin-top: 10px;
+          border: 1px solid var(--pt-border-subtle);
+        }
+
+        /* Settings Drawer - Obsidian & Neon Red Custom Design System */
+        .pt-drawer {
+          position: fixed;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          max-width: 520px;
+          background: #0b0709;
+          border-left: 1px solid var(--pt-border);
+          box-shadow: -15px 0 45px rgba(0, 0, 0, 0.9);
+          z-index: 1000;
+          display: flex;
+          flex-direction: column;
+          transform: translateX(100%);
+          transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .pt-drawer.open {
+          transform: translateX(0);
+        }
+
+        .pt-drawer-header {
+          padding: 1.25rem 1.5rem;
+          background: #11090d;
+          border-bottom: 1px solid var(--pt-border);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .pt-drawer-title {
+          font-size: 1.15rem;
+          font-weight: 800;
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .pt-drawer-body {
+          flex: 1;
+          overflow-y: auto;
+          padding: 1.5rem;
+        }
+
+        .pt-field-group {
+          margin-bottom: 1.35rem;
+        }
+
+        .pt-label {
+          display: block;
+          font-size: 0.74rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.8px;
+          color: #ff537b;
+          margin-bottom: 6px;
+        }
+
+        .pt-input, .pt-select, .pt-textarea {
+          width: 100%;
+          background: #150d12;
+          border: 1px solid var(--pt-border);
+          border-radius: 12px;
+          padding: 10px 14px;
+          color: #ffffff;
+          font-size: 0.9rem;
+          outline: none;
+          transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .pt-input:focus, .pt-select:focus, .pt-textarea:focus {
+          border-color: var(--pt-red);
+          box-shadow: 0 0 0 3px var(--pt-red-glow);
+        }
+
+        .pt-select option:checked {
+          background: var(--pt-red) linear-gradient(0deg, var(--pt-red) 0%, var(--pt-red) 100%) !important;
+          color: #ffffff !important;
+          font-weight: 700;
+        }
+
+        .pt-btn-red {
+          width: 100%;
+          background: var(--pt-red);
+          border: none;
+          color: #ffffff;
+          font-size: 0.92rem;
+          font-weight: 700;
+          padding: 12px 20px;
+          border-radius: 12px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          box-shadow: 0 6px 18px var(--pt-red-glow);
+        }
+
+        .pt-btn-red:hover {
+          background: #ff1a57;
+          transform: translateY(-2px);
+          box-shadow: 0 8px 24px var(--pt-red-glow);
+        }
+
+        .pt-btn-outline {
+          background: transparent;
+          border: 1px solid var(--pt-border);
+          color: #ffffff;
+          font-size: 0.85rem;
+          font-weight: 600;
+          padding: 8px 14px;
+          border-radius: 10px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+
+        .pt-btn-outline:hover {
+          background: rgba(255, 0, 68, 0.15);
+          border-color: var(--pt-red);
+        }
+
+        /* Modal Overlay for QR & Popups */
+        .pt-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.8);
+          backdrop-filter: blur(8px);
+          z-index: 2000;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          padding: 1rem;
+        }
+
+        .pt-modal-backdrop.active {
+          display: flex;
+        }
+
+        .pt-modal-box {
+          background: #11090d;
+          border: 1px solid var(--pt-border);
+          border-radius: 20px;
+          width: 100%;
+          max-width: 440px;
+          padding: 1.75rem;
+          box-shadow: 0 20px 60px rgba(0, 0, 0, 0.9);
+          text-align: center;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="pt-ambient"></div>
+
+      <!-- Compact Translucent Top Right Controls -->
+      <div class="pt-top-actions">
+        <a href="./" class="pt-top-btn" title="Open Main Player"><i class="bi bi-music-note-beamed"></i></a>
+        <button type="button" class="pt-top-btn" id="ptShareTrigger" title="Share Page"><i class="bi bi-share"></i></button>
+        <?php if ($is_owner): ?>
+          <button type="button" class="pt-top-btn" id="ptDrawerTrigger" title="Customize ProfileTree"><i class="bi bi-sliders"></i></button>
+        <?php endif; ?>
+      </div>
+
+      <!-- Main Profile Column -->
+      <main class="pt-container">
+        
+        <!-- Avatar Header -->
+        <div class="pt-avatar-wrap">
+          <img src="<?= htmlspecialchars($avatar_url) ?>" class="pt-avatar" alt="Avatar" onerror="this.src='?action=get_app_icon'">
+        </div>
+
+        <div class="pt-name-row">
+          <h1 class="pt-name"><?= htmlspecialchars($profile['display_name']) ?></h1>
+          <?php if (!empty($target_user['verified']) && $target_user['verified'] === 'yes'): ?>
+            <i class="bi bi-patch-check-fill pt-badge-verified" title="Verified Artist"></i>
+          <?php endif; ?>
+        </div>
+
+        <p class="pt-bio"><?= htmlspecialchars($profile['bio']) ?></p>
+
+        <!-- Social Icons Row -->
+        <div class="pt-socials">
+          <?php if (!empty($profile['social_spotify'])): ?>
+            <a href="<?= htmlspecialchars($profile['social_spotify']) ?>" target="_blank" class="pt-social-btn" title="Spotify"><i class="bi bi-spotify"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_instagram'])): ?>
+            <a href="https://instagram.com/<?= htmlspecialchars($profile['social_instagram']) ?>" target="_blank" class="pt-social-btn" title="Instagram"><i class="bi bi-instagram"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_twitter'])): ?>
+            <a href="https://x.com/<?= htmlspecialchars($profile['social_twitter']) ?>" target="_blank" class="pt-social-btn" title="X (Twitter)"><i class="bi bi-twitter-x"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_youtube'])): ?>
+            <a href="<?= htmlspecialchars($profile['social_youtube']) ?>" target="_blank" class="pt-social-btn" title="YouTube"><i class="bi bi-youtube"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_soundcloud'])): ?>
+            <a href="<?= htmlspecialchars($profile['social_soundcloud']) ?>" target="_blank" class="pt-social-btn" title="SoundCloud"><i class="bi bi-soundwave"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_github'])): ?>
+            <a href="https://github.com/<?= htmlspecialchars($profile['social_github']) ?>" target="_blank" class="pt-social-btn" title="GitHub"><i class="bi bi-github"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_discord'])): ?>
+            <a href="<?= htmlspecialchars($profile['social_discord']) ?>" target="_blank" class="pt-social-btn" title="Discord"><i class="bi bi-discord"></i></a>
+          <?php endif; ?>
+          <?php if (!empty($profile['social_telegram'])): ?>
+            <a href="https://t.me/<?= htmlspecialchars($profile['social_telegram']) ?>" target="_blank" class="pt-social-btn" title="Telegram"><i class="bi bi-telegram"></i></a>
+          <?php endif; ?>
+        </div>
+
+        <!-- 3 Modern Navigation Tabs -->
+        <nav class="pt-tabs-nav">
+          <button type="button" class="pt-tab-btn active" data-tab="links"><i class="bi bi-link-45deg"></i> Links</button>
+          <button type="button" class="pt-tab-btn" data-tab="highlights"><i class="bi bi-soundwave"></i> Highlights</button>
+          <button type="button" class="pt-tab-btn" data-tab="status"><i class="bi bi-clock-history"></i> Status</button>
+        </nav>
+
+        <!-- TAB 1: LINKS -->
+        <section class="pt-tab-pane active" id="pane-links">
+          <?php if (empty($links)): ?>
+            <div style="text-align: center; padding: 3rem 1rem; color: var(--pt-text-muted);">
+              <i class="bi bi-link-45deg" style="font-size: 2.5rem; opacity: 0.4; display: block; margin-bottom: 0.5rem;"></i>
+              No links available yet.
+            </div>
+          <?php else: ?>
+            <?php foreach ($links as $l): 
+              $anim_class = match($l['animation']) {
+                'pulse' => 'anim-pulse',
+                'glow' => 'anim-glow',
+                'shake' => 'anim-shake',
+                default => ''
+              };
+            ?>
+              <a href="?access=profiletree&action=click&id=<?= $l['id'] ?>" target="_blank" class="pt-link-card <?= $anim_class ?>">
+                <div class="pt-link-icon">
+                  <i class="bi <?= htmlspecialchars($l['icon'] ?: 'bi-link-45deg') ?>"></i>
+                </div>
+                <div class="pt-link-content">
+                  <div class="pt-link-title"><?= htmlspecialchars($l['title']) ?></div>
+                  <?php if (!empty($l['subtitle'])): ?>
+                    <div class="pt-link-sub"><?= htmlspecialchars($l['subtitle']) ?></div>
+                  <?php endif; ?>
+                </div>
+                <div>
+                  <?php if (!empty($l['badge_text'])): ?>
+                    <span class="pt-badge"><?= htmlspecialchars($l['badge_text']) ?></span>
+                  <?php else: ?>
+                    <i class="bi bi-chevron-right" style="color: var(--pt-text-muted); font-size: 1rem;"></i>
+                  <?php endif; ?>
+                </div>
+              </a>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </section>
+
+        <!-- TAB 2: SONG HIGHLIGHTS (INTERACTIVE AUDIO ENGINE) -->
+        <section class="pt-tab-pane" id="pane-highlights">
+          <?php if (empty($highlights)): ?>
+            <div style="text-align: center; padding: 3rem 1rem; color: var(--pt-text-muted);">
+              <i class="bi bi-music-note-beamed" style="font-size: 2.5rem; opacity: 0.4; display: block; margin-bottom: 0.5rem;"></i>
+              No song highlights featured yet.
+            </div>
+          <?php else: ?>
+            <?php foreach ($highlights as $hl): 
+              $stream_url = "?action=get_stream&id={$hl['song_id']}";
+              $cover_url = "?action=get_image&id={$hl['song_id']}&size=small";
+              $mins = floor(($hl['duration'] ?: 0) / 60);
+              $secs = str_pad(($hl['duration'] ?: 0) % 60, 2, '0', STR_PAD_LEFT);
+            ?>
+              <div class="pt-song-card" id="ptSongCard_<?= $hl['song_id'] ?>" data-song-id="<?= $hl['song_id'] ?>">
+                <div class="pt-song-top">
+                  <img src="<?= $cover_url ?>" class="pt-song-art" alt="Cover" onerror="this.src='?action=get_app_icon'">
+                  <div class="pt-song-meta">
+                    <div style="display: flex; align-items: center;">
+                      <span class="pt-badge">Highlight</span>
+                      <span class="pt-eq-wave">
+                        <span class="pt-eq-bar"></span>
+                        <span class="pt-eq-bar"></span>
+                        <span class="pt-eq-bar"></span>
+                      </span>
+                    </div>
+                    <div class="pt-song-title" style="margin-top: 4px;"><?= htmlspecialchars($hl['custom_title'] ?: $hl['title']) ?></div>
+                    <div class="pt-song-artist"><?= htmlspecialchars($hl['artist']) ?> &bull; <?= htmlspecialchars($hl['album'] ?: 'Single') ?></div>
+                  </div>
+                  <button type="button" class="pt-play-btn pt-audio-toggle" data-song-id="<?= $hl['song_id'] ?>" data-stream="<?= $stream_url ?>" aria-label="Play Track">
+                    <i class="bi bi-play-fill" style="margin-left: 2px;"></i>
+                  </button>
+                </div>
+
+                <!-- Interactive Timeline Scrubber -->
+                <div class="pt-song-timeline">
+                  <span class="pt-song-time pt-time-cur">0:00</span>
+                  <div class="pt-song-scrub">
+                    <div class="pt-song-progress"></div>
+                  </div>
+                  <span class="pt-song-time pt-time-dur" style="text-align: right;"><?= "{$mins}:{$secs}" ?></span>
+                </div>
+
+                <?php if (!empty($hl['snippet_quote'])): ?>
+                  <div class="pt-song-quote">
+                    &ldquo;<?= htmlspecialchars($hl['snippet_quote']) ?>&rdquo;
+                  </div>
+                <?php endif; ?>
+
+                <div style="display: flex; align-items: center; justify-content: flex-end; font-size: 0.74rem; font-family: monospace;">
+                  <a href="./?share_type=song&id=<?= $hl['song_id'] ?>" target="_blank" style="color: #ff537b; text-decoration: none; font-weight: 700;">
+                    Listen in Player <i class="bi bi-box-arrow-up-right" style="margin-left: 4px;"></i>
+                  </a>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </section>
+
+        <!-- TAB 3: STATUS UPDATES -->
+        <section class="pt-tab-pane" id="pane-status">
+          <?php if (empty($statuses)): ?>
+            <div style="text-align: center; padding: 3rem 1rem; color: var(--pt-text-muted);">
+              <i class="bi bi-chat-square-dots" style="font-size: 2.5rem; opacity: 0.4; display: block; margin-bottom: 0.5rem;"></i>
+              No recent status updates posted.
+            </div>
+          <?php else: ?>
+            <?php foreach ($statuses as $st): ?>
+              <div class="pt-status-card">
+                <div class="pt-status-time"><i class="bi bi-clock" style="margin-right: 4px;"></i><?= date('M j, Y &bull; H:i', strtotime($st['created_at'])) ?></div>
+                <div class="pt-status-body"><?= nl2br(htmlspecialchars($st['content'])) ?></div>
+                <?php if (!empty($st['media_url'])): ?>
+                  <img src="<?= htmlspecialchars($st['media_url']) ?>" class="pt-status-img" alt="Media Attachment">
+                <?php endif; ?>
+              </div>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </section>
+
+        <footer style="margin-top: 3.5rem; text-align: center; font-size: 0.78rem; color: var(--pt-text-muted);">
+          Powered by <a href="./" style="color: #ffffff; text-decoration: none; font-weight: 700;">PHP Music</a> &bull; Profile Hub
+        </footer>
+      </main>
+
+      <!-- Global Audio Player Instance for Highlights -->
+      <audio id="ptGlobalAudio" preload="none"></audio>
+
+      <!-- QR Code & Share Modal -->
+      <div class="pt-modal-backdrop" id="ptShareModal">
+        <div class="pt-modal-box">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+            <h5 style="font-size: 1.15rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 8px;">
+              <i class="bi bi-qr-code" style="color: var(--pt-red);"></i> Share Profile
+            </h5>
+            <button type="button" class="pt-btn-outline" style="padding: 4px 8px;" id="ptCloseShareModal">&times;</button>
+          </div>
+
+          <div style="background: #ffffff; padding: 16px; border-radius: 16px; display: inline-block; margin-bottom: 1.25rem; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=<?= urlencode($page_url) ?>" alt="QR Code" style="display: block; width: 180px; height: 180px;">
+          </div>
+
+          <div style="display: flex; gap: 8px;">
+            <input type="text" class="pt-input" style="font-family: monospace; font-size: 0.82rem;" value="<?= htmlspecialchars($page_url) ?>" readonly id="ptShareUrlInput">
+            <button type="button" class="pt-btn-red" style="width: auto; padding: 0 16px;" id="ptCopyUrlBtn">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modern Red & Dark Owner Settings Drawer -->
+      <?php if ($is_owner): ?>
+        <aside class="pt-drawer" id="ptSettingsDrawer">
+          <div class="pt-drawer-header">
+            <h2 class="pt-drawer-title"><i class="bi bi-sliders" style="color: var(--pt-red);"></i> Profile Hub Studio</h2>
+            <button type="button" class="pt-btn-outline" id="ptCloseDrawer" style="padding: 4px 10px;">&times;</button>
+          </div>
+
+          <div class="pt-drawer-body">
+            
+            <!-- Quick Sub-Navigation inside Drawer -->
+            <div style="display: flex; gap: 6px; margin-bottom: 1.5rem; background: #180f14; padding: 4px; border-radius: 12px; border: 1px solid var(--pt-border);">
+              <button type="button" class="pt-tab-btn active" data-dtab="links" style="font-size: 0.78rem;">Links</button>
+              <button type="button" class="pt-tab-btn" data-dtab="highlights" style="font-size: 0.78rem;">Highlights</button>
+              <button type="button" class="pt-tab-btn" data-dtab="status" style="font-size: 0.78rem;">Status</button>
+              <button type="button" class="pt-tab-btn" data-dtab="branding" style="font-size: 0.78rem;">Branding</button>
+            </div>
+
+            <!-- Drawer Section: Add Link Field & Management -->
+            <div class="pt-dtab-pane" id="dpane-links">
+              
+              <!-- "Add Link Field" Builder Box -->
+              <form id="ptAddLinkForm" style="background: #150d12; border: 1px solid var(--pt-border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem;">
+                <span class="pt-label" style="font-size: 0.8rem; margin-bottom: 8px;"><i class="bi bi-plus-circle" style="margin-right: 4px;"></i> Add Link Field</span>
+
+                <div class="pt-field-group">
+                  <input type="text" name="title" class="pt-input" placeholder="Link Title (e.g. My Latest Album)" required>
+                </div>
+
+                <div class="pt-field-group">
+                  <input type="text" name="url" class="pt-input" placeholder="Destination URL (https://...)" required>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;" class="pt-field-group">
+                  <div>
+                    <input type="text" name="subtitle" class="pt-input" placeholder="Subtitle (Optional)">
+                  </div>
+                  <div>
+                    <input type="text" name="badge_text" class="pt-input" placeholder="Badge (e.g. NEW)">
+                  </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;" class="pt-field-group">
+                  <div>
+                    <label class="pt-label">Icon</label>
+                    <select name="icon" class="pt-select">
+                      <option value="bi-link-45deg">Link (Standard)</option>
+                      <option value="bi-music-note">Music Note</option>
+                      <option value="bi-play-circle">Play Video</option>
+                      <option value="bi-cart">Store / Merch</option>
+                      <option value="bi-heart">Support / Donate</option>
+                      <option value="bi-calendar-event">Tickets / Tour</option>
+                      <option value="bi-newspaper">Article / Press</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="pt-label">Animation</label>
+                    <select name="animation" class="pt-select">
+                      <option value="none">None</option>
+                      <option value="pulse">Gentle Pulse</option>
+                      <option value="glow">Neon Glow</option>
+                      <option value="shake">Hover Shake</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button type="submit" class="pt-btn-red">Create Link Field</button>
+              </form>
+
+              <span class="pt-label">Reorder / Remove Links</span>
+              <div id="ptSortableLinks" style="display: flex; flex-direction: column; gap: 8px;">
+                <?php foreach ($links as $l): ?>
+                  <div class="pt-sortable-row" data-id="<?= $l['id'] ?>" style="display: flex; align-items: center; justify-content: space-between; background: #150d12; border: 1px solid var(--pt-border-subtle); padding: 10px 14px; border-radius: 12px;">
+                    <i class="bi bi-grip-vertical" style="color: var(--pt-text-muted); cursor: grab; font-size: 1.2rem;"></i>
+                    <div style="flex: 1; padding: 0 10px; overflow: hidden;">
+                      <div style="font-size: 0.9rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><?= htmlspecialchars($l['title']) ?></div>
+                      <small style="color: var(--pt-text-muted); font-size: 0.72rem;"><?= $l['click_count'] ?> clicks</small>
+                    </div>
+                    <button type="button" class="pt-btn-outline" style="padding: 4px 8px; color: #ff0044; border-color: rgba(255,0,68,0.3);" onclick="ptDeleteLink(<?= $l['id'] ?>)"><i class="bi bi-trash"></i></button>
+                  </div>
+                <?php endforeach; ?>
+              </div>
+            </div>
+
+            <!-- Drawer Section: Song Highlights -->
+            <div class="pt-dtab-pane" id="dpane-highlights" style="display: none;">
+              <form id="ptAddHighlightForm" style="background: #150d12; border: 1px solid var(--pt-border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                  <span class="pt-label" style="margin: 0;"><i class="bi bi-soundwave" style="margin-right: 4px;"></i> Add Highlights (Max 10)</span>
+                  <span id="ptHighlightSelectCounter" style="font-size: 0.75rem; font-weight: 800; color: #ff537b; font-family: monospace;">0 / 10 Selected</span>
+                </div>
+
+                <div class="pt-field-group">
+                  <input type="text" id="ptSongFilterInput" class="pt-input" placeholder="Search your songs to highlight..." style="margin-bottom: 8px; padding: 7px 12px; font-size: 0.82rem;">
+
+                  <!-- Touch-Friendly Custom Track Picker -->
+                  <div class="pt-track-picker-box">
+                    <div class="pt-track-picker-list" id="ptTrackPickerList">
+                      <?php if (empty($owner_songs)): ?>
+                        <div style="padding: 1rem; text-align: center; color: var(--pt-text-muted); font-size: 0.8rem;">No uploaded tracks found in your account</div>
+                      <?php else: ?>
+                        <?php foreach ($owner_songs as $os): ?>
+                          <div class="pt-track-picker-item" data-id="<?= $os['id'] ?>">
+                            <div class="pt-checkbox-custom"><i class="bi bi-check-lg"></i></div>
+                            <img src="?action=get_image&id=<?= $os['id'] ?>&size=small" style="width: 34px; height: 34px; border-radius: 8px; object-fit: cover; background: #000;" onerror="this.src='?action=get_app_icon'">
+                            <div style="flex: 1; min-width: 0; overflow: hidden;">
+                              <div style="font-size: 0.85rem; font-weight: 700; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><?= htmlspecialchars($os['title']) ?></div>
+                              <div style="font-size: 0.72rem; color: var(--pt-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><?= htmlspecialchars($os['artist']) ?></div>
+                            </div>
+                          </div>
+                        <?php endforeach; ?>
+                      <?php endif; ?>
+                    </div>
+                  </div>
+
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+                    <small style="color: var(--pt-text-muted); font-size: 0.7rem;">Tap to toggle tracks</small>
+                    <button type="button" class="pt-btn-outline" id="ptClearHighlightSelect" style="padding: 2px 8px; font-size: 0.7rem;">Clear</button>
+                  </div>
+                </div>
+
+                <div class="pt-field-group">
+                  <textarea name="snippet_quote" class="pt-textarea" rows="2" placeholder="Lyrics snippet or behind-the-song note (Optional)..."></textarea>
+                </div>
+
+                <button type="submit" class="pt-btn-red" id="ptAddHighlightSubmitBtn">
+                  <i class="bi bi-pin-angle-fill" style="margin-right: 4px;"></i> Pin Selected Tracks
+                </button>
+              </form>
+
+              <!-- Currently Active Highlights List with Reordering -->
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span class="pt-label" style="margin: 0;">Active Highlights (<?= count($highlights) ?>/10)</span>
+                <small style="color: var(--pt-text-muted); font-size: 0.72rem;"><?= max(0, 10 - count($highlights)) ?> slots remaining</small>
+              </div>
+
+              <div id="ptSortableHighlights" style="display: flex; flex-direction: column; gap: 8px;">
+                <?php if (empty($highlights)): ?>
+                  <div style="text-align: center; padding: 1.5rem; color: var(--pt-text-muted); font-size: 0.8rem; background: #150d12; border-radius: 12px; border: 1px solid var(--pt-border-subtle);">No active highlights. Pin some above!</div>
+                <?php else: ?>
+                  <?php foreach ($highlights as $hl): ?>
+                    <div class="pt-sortable-hl-row" data-id="<?= $hl['id'] ?>" style="display: flex; align-items: center; justify-content: space-between; background: #150d12; border: 1px solid var(--pt-border-subtle); padding: 8px 12px; border-radius: 12px; gap: 10px;">
+                      <i class="bi bi-grip-vertical" style="color: var(--pt-text-muted); cursor: grab; font-size: 1.2rem;"></i>
+                      <img src="?action=get_image&id=<?= $hl['song_id'] ?>&size=small" style="width: 36px; height: 36px; border-radius: 8px; object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                      <div style="flex: 1; overflow: hidden;">
+                        <div style="font-weight: 700; font-size: 0.88rem; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><?= htmlspecialchars($hl['custom_title'] ?: $hl['title']) ?></div>
+                        <small style="color: var(--pt-text-muted); font-size: 0.72rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><?= htmlspecialchars($hl['artist']) ?></small>
+                      </div>
+                      <button type="button" class="pt-btn-outline" style="padding: 4px 8px; color: #ff0044;" onclick="ptDeleteHighlight(<?= $hl['id'] ?>)"><i class="bi bi-trash"></i></button>
+                    </div>
+                  <?php endforeach; ?>
+                <?php endif; ?>
+              </div>
+            </div>
+
+            <!-- Drawer Section: Status Updates -->
+            <div class="pt-dtab-pane" id="dpane-status" style="display: none;">
+              <form id="ptAddStatusForm" style="background: #150d12; border: 1px solid var(--pt-border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem;">
+                <span class="pt-label"><i class="bi bi-megaphone" style="margin-right: 4px;"></i> Post Status Update</span>
+
+                <div class="pt-field-group">
+                  <textarea name="content" class="pt-textarea" rows="3" placeholder="What's happening? Share tour dates, updates, or thoughts..." required></textarea>
+                </div>
+
+                <div class="pt-field-group">
+                  <input type="text" name="media_url" class="pt-input" placeholder="Media Image URL (Optional)">
+                </div>
+
+                <button type="submit" class="pt-btn-red">Post Status</button>
+              </form>
+
+              <span class="pt-label">Manage Status Updates</span>
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <?php foreach ($statuses as $st): ?>
+                  <div style="display: flex; align-items: center; justify-content: space-between; background: #150d12; border: 1px solid var(--pt-border-subtle); padding: 10px 14px; border-radius: 12px;">
+                    <div style="flex: 1; overflow: hidden; padding-right: 10px;">
+                      <div style="font-size: 0.85rem; line-height: 1.4;"><?= htmlspecialchars(mb_strimwidth($st['content'], 0, 80, '...')) ?></div>
+                      <small style="color: var(--pt-text-muted); font-size: 0.7rem; font-family: monospace;"><?= $st['created_at'] ?></small>
+                    </div>
+                    <button type="button" class="pt-btn-outline" style="padding: 4px 8px; color: #ff0044;" onclick="ptDeleteStatus(<?= $st['id'] ?>)"><i class="bi bi-trash"></i></button>
+                  </div>
+                <?php endforeach; ?>
+              </div>
+            </div>
+
+            <!-- Drawer Section: Profile Branding & Theme -->
+            <div class="pt-dtab-pane" id="dpane-branding" style="display: none;">
+              <form id="ptSaveProfileForm">
+                <div class="pt-field-group">
+                  <label class="pt-label">Display Name</label>
+                  <input type="text" name="display_name" class="pt-input" value="<?= htmlspecialchars($profile['display_name']) ?>" required>
+                </div>
+
+                <div class="pt-field-group">
+                  <label class="pt-label">Bio Description</label>
+                  <textarea name="bio" class="pt-textarea" rows="3"><?= htmlspecialchars($profile['bio']) ?></textarea>
+                </div>
+
+                <div class="pt-field-group">
+                  <label class="pt-label">Accent Color (Hex)</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="color" name="accent_color" class="pt-input" style="width: 50px; padding: 2px; height: 42px; cursor: pointer;" value="<?= $accent ?>">
+                    <span style="font-family: monospace; font-size: 0.85rem; color: var(--pt-text-muted);"><?= $accent ?></span>
+                  </div>
+                </div>
+
+                <span class="pt-label" style="margin-top: 1.5rem;">Social Handles</span>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;" class="pt-field-group">
+                  <input type="text" name="social_spotify" class="pt-input" placeholder="Spotify URL" value="<?= htmlspecialchars($profile['social_spotify'] ?? '') ?>">
+                  <input type="text" name="social_instagram" class="pt-input" placeholder="Instagram Username" value="<?= htmlspecialchars($profile['social_instagram'] ?? '') ?>">
+                  <input type="text" name="social_twitter" class="pt-input" placeholder="X / Twitter Handle" value="<?= htmlspecialchars($profile['social_twitter'] ?? '') ?>">
+                  <input type="text" name="social_youtube" class="pt-input" placeholder="YouTube URL" value="<?= htmlspecialchars($profile['social_youtube'] ?? '') ?>">
+                  <input type="text" name="social_soundcloud" class="pt-input" placeholder="SoundCloud URL" value="<?= htmlspecialchars($profile['social_soundcloud'] ?? '') ?>">
+                  <input type="text" name="social_github" class="pt-input" placeholder="GitHub Handle" value="<?= htmlspecialchars($profile['social_github'] ?? '') ?>">
+                  <input type="text" name="social_discord" class="pt-input" placeholder="Discord Server URL" value="<?= htmlspecialchars($profile['social_discord'] ?? '') ?>">
+                  <input type="text" name="social_telegram" class="pt-input" placeholder="Telegram Username" value="<?= htmlspecialchars($profile['social_telegram'] ?? '') ?>">
+                </div>
+
+                <button type="submit" class="pt-btn-red" style="margin-top: 1rem;">Save Profile Settings</button>
+              </form>
+            </div>
+
+          </div>
+        </aside>
+      <?php endif; ?>
+
+      <!-- Pure Vanilla Client Interaction Scripts -->
+      <script>
+        // 1. Tab Switcher
+        document.querySelectorAll('.pt-tab-btn[data-tab]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const target = btn.dataset.tab;
+            if (!target) return;
+
+            document.querySelectorAll('.pt-tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.pt-tab-pane').forEach(p => p.classList.remove('active'));
+
+            btn.classList.add('active');
+            const pane = document.getElementById(`pane-${target}`);
+            if (pane) pane.classList.add('active');
+          });
+        });
+
+        // 2. Interactive Audio Engine for Song Highlights
+        const globalAudio = document.getElementById('ptGlobalAudio');
+        let currentPlayingCard = null;
+
+        const formatAudioTime = (seconds) => {
+          if (isNaN(seconds) || seconds < 0) return '0:00';
+          const mins = Math.floor(seconds / 60);
+          const secs = Math.floor(seconds % 60).toString().padStart(2, '0');
+          return `${mins}:${secs}`;
+        };
+
+        const stopActiveAudioCard = () => {
+          if (!currentPlayingCard) return;
+          currentPlayingCard.classList.remove('is-playing');
+          const btnIcon = currentPlayingCard.querySelector('.pt-play-btn i');
+          if (btnIcon) btnIcon.className = 'bi bi-play-fill';
+          currentPlayingCard = null;
+        };
+
+        document.querySelectorAll('.pt-song-card').forEach(card => {
+          const btn = card.querySelector('.pt-audio-toggle');
+          const scrubBar = card.querySelector('.pt-song-scrub');
+
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const streamUrl = btn.dataset.stream;
+            const btnIcon = btn.querySelector('i');
+
+            if (currentPlayingCard === card) {
+              if (!globalAudio.paused) {
+                globalAudio.pause();
+                card.classList.remove('is-playing');
+                btnIcon.className = 'bi bi-play-fill';
+              } else {
+                globalAudio.play().then(() => {
+                  card.classList.add('is-playing');
+                  btnIcon.className = 'bi bi-pause-fill';
+                }).catch(() => alert('Audio resume failed.'));
+              }
+            } else {
+              stopActiveAudioCard();
+              globalAudio.src = streamUrl;
+              globalAudio.play().then(() => {
+                card.classList.add('is-playing');
+                btnIcon.className = 'bi bi-pause-fill';
+                currentPlayingCard = card;
+              }).catch(() => {
+                alert('Audio playback failed or unsupported.');
+              });
+            }
+          });
+
+          // Click on timeline scrubber to seek
+          if (scrubBar) {
+            scrubBar.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (currentPlayingCard !== card || !globalAudio.duration) return;
+              const rect = scrubBar.getBoundingClientRect();
+              const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+              globalAudio.currentTime = percent * globalAudio.duration;
+            });
+          }
+        });
+
+        globalAudio.addEventListener('timeupdate', () => {
+          if (!currentPlayingCard) return;
+          const cur = globalAudio.currentTime;
+          const dur = globalAudio.duration;
+          if (isFinite(dur) && dur > 0) {
+            const pct = (cur / dur) * 100;
+            const prog = currentPlayingCard.querySelector('.pt-song-progress');
+            const timeCur = currentPlayingCard.querySelector('.pt-time-cur');
+            const timeDur = currentPlayingCard.querySelector('.pt-time-dur');
+
+            if (prog) prog.style.width = `${pct}%`;
+            if (timeCur) timeCur.textContent = formatAudioTime(cur);
+            if (timeDur) timeDur.textContent = formatAudioTime(dur);
+          }
+        });
+
+        globalAudio.addEventListener('ended', () => {
+          if (currentPlayingCard) {
+            const prog = currentPlayingCard.querySelector('.pt-song-progress');
+            const timeCur = currentPlayingCard.querySelector('.pt-time-cur');
+            if (prog) prog.style.width = '0%';
+            if (timeCur) timeCur.textContent = '0:00';
+            stopActiveAudioCard();
+          }
+        });
+
+        // 3. QR Code & Share Modal
+        const shareModal = document.getElementById('ptShareModal');
+        const shareTrigger = document.getElementById('ptShareTrigger');
+        const closeShare = document.getElementById('ptCloseShareModal');
+        const copyBtn = document.getElementById('ptCopyUrlBtn');
+        const urlInput = document.getElementById('ptShareUrlInput');
+
+        if (shareTrigger) {
+          shareTrigger.addEventListener('click', () => {
+            shareModal.classList.add('active');
+          });
+        }
+        if (closeShare) {
+          closeShare.addEventListener('click', () => {
+            shareModal.classList.remove('active');
+          });
+        }
+        if (copyBtn && urlInput) {
+          copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(urlInput.value).then(() => {
+              copyBtn.textContent = 'Copied!';
+              setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+            });
+          });
+        }
+
+        // 4. Settings Drawer Interactions (Owner Only)
+        <?php if ($is_owner): ?>
+          const drawer = document.getElementById('ptSettingsDrawer');
+          const drawerTrigger = document.getElementById('ptDrawerTrigger');
+          const closeDrawer = document.getElementById('ptCloseDrawer');
+
+          if (drawerTrigger && drawer) {
+            drawerTrigger.addEventListener('click', () => drawer.classList.add('open'));
+          }
+          if (closeDrawer && drawer) {
+            closeDrawer.addEventListener('click', () => drawer.classList.remove('open'));
+          }
+
+          // Drawer Tab Navigation
+          document.querySelectorAll('.pt-tab-btn[data-dtab]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const target = btn.dataset.dtab;
+              document.querySelectorAll('.pt-tab-btn[data-dtab]').forEach(b => b.classList.remove('active'));
+              document.querySelectorAll('.pt-dtab-pane').forEach(p => p.style.display = 'none');
+
+              btn.classList.add('active');
+              const pane = document.getElementById(`dpane-${target}`);
+              if (pane) pane.style.display = 'block';
+            });
+          });
+
+          // Sortable Link Drag-and-Drop
+          const sortableList = document.getElementById('ptSortableLinks');
+          if (sortableList && typeof Sortable !== 'undefined') {
+            Sortable.create(sortableList, {
+              animation: 150,
+              handle: '.bi-grip-vertical',
+              onEnd: () => {
+                const order = Array.from(sortableList.children).map(row => row.dataset.id);
+                const fd = new FormData();
+                fd.append('tree_action', 'reorder_links');
+                fd.append('order', JSON.stringify(order));
+                fetch(window.location.href, { method: 'POST', body: fd });
+              }
+            });
+          }
+
+          // Delete Link Action
+          window.ptDeleteLink = async (id) => {
+            if (!confirm('Delete this link?')) return;
+            const fd = new FormData();
+            fd.append('tree_action', 'delete_link');
+            fd.append('link_id', id);
+            const res = await fetch(window.location.href, { method: 'POST', body: fd }).then(r => r.json());
+            if (res.status === 'success') window.location.reload();
+          };
+
+          // Delete Highlight Action
+          window.ptDeleteHighlight = async (id) => {
+            if (!confirm('Remove this song highlight?')) return;
+            const fd = new FormData();
+            fd.append('tree_action', 'delete_highlight');
+            fd.append('highlight_id', id);
+            const res = await fetch(window.location.href, { method: 'POST', body: fd }).then(r => r.json());
+            if (res.status === 'success') window.location.reload();
+          };
+
+          // Delete Status Action
+          window.ptDeleteStatus = async (id) => {
+            if (!confirm('Delete this status post?')) return;
+            const fd = new FormData();
+            fd.append('tree_action', 'delete_status');
+            fd.append('status_id', id);
+            const res = await fetch(window.location.href, { method: 'POST', body: fd }).then(r => r.json());
+            if (res.status === 'success') window.location.reload();
+          };
+
+          // Form Handlers
+          const bindForm = (formId, actionName) => {
+            const form = document.getElementById(formId);
+            if (!form) return;
+            form.addEventListener('submit', async (e) => {
+              e.preventDefault();
+              const fd = new FormData(form);
+              fd.append('tree_action', actionName);
+              const btn = form.querySelector('button[type="submit"]');
+              const orig = btn.textContent;
+              btn.disabled = true;
+              btn.textContent = 'Saving...';
+              try {
+                const res = await fetch(window.location.href, { method: 'POST', body: fd }).then(r => r.json());
+                if (res.status === 'success') {
+                  window.location.reload();
+                } else {
+                  alert(res.message || 'Error occurred');
+                  btn.disabled = false;
+                  btn.textContent = orig;
+                }
+              } catch(err) {
+                alert('Connection error');
+                btn.disabled = false;
+                btn.textContent = orig;
+              }
+            });
+          };
+
+          // Note: ptAddHighlightForm has its own custom multi-song handler below, so it is NOT bound via bindForm
+          bindForm('ptAddLinkForm', 'add_link');
+          bindForm('ptAddStatusForm', 'post_status');
+          bindForm('ptSaveProfileForm', 'save_profile');
+
+          // Custom Track Picker for Highlights with 10-Song Limit
+          const pickerList = document.getElementById('ptTrackPickerList');
+          const hlCounter = document.getElementById('ptHighlightSelectCounter');
+          const songFilter = document.getElementById('ptSongFilterInput');
+          const clearHlBtn = document.getElementById('ptClearHighlightSelect');
+          const addHighlightForm = document.getElementById('ptAddHighlightForm');
+          let selectedSongIds = new Set();
+
+          if (pickerList && hlCounter) {
+            const updateCounter = () => {
+              hlCounter.textContent = `${selectedSongIds.size} / 10 Selected`;
+              hlCounter.style.color = selectedSongIds.size >= 10 ? '#ff0044' : '#ff537b';
+            };
+
+            pickerList.querySelectorAll('.pt-track-picker-item').forEach(item => {
+              item.addEventListener('click', () => {
+                const songId = item.dataset.id;
+                if (selectedSongIds.has(songId)) {
+                  selectedSongIds.delete(songId);
+                  item.classList.remove('selected');
+                } else {
+                  if (selectedSongIds.size >= 10) {
+                    alert('You can select a maximum of 10 songs at a time.');
+                    return;
+                  }
+                  selectedSongIds.add(songId);
+                  item.classList.add('selected');
+                }
+                updateCounter();
+              });
+            });
+
+            if (clearHlBtn) {
+              clearHlBtn.addEventListener('click', () => {
+                selectedSongIds.clear();
+                pickerList.querySelectorAll('.pt-track-picker-item').forEach(i => i.classList.remove('selected'));
+                updateCounter();
+              });
+            }
+
+            if (songFilter) {
+              songFilter.addEventListener('input', (e) => {
+                const q = e.target.value.toLowerCase().trim();
+                pickerList.querySelectorAll('.pt-track-picker-item').forEach(item => {
+                  const text = item.textContent.toLowerCase();
+                  item.style.display = (!q || text.includes(q)) ? 'flex' : 'none';
+                });
+              });
+            }
+
+            // Bind Highlight Form Submission with Selected Songs Array
+            if (addHighlightForm) {
+              addHighlightForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                if (selectedSongIds.size === 0) {
+                  alert('Please select at least one song from the list.');
+                  return;
+                }
+
+                const fd = new FormData(addHighlightForm);
+                fd.append('tree_action', 'add_highlight');
+                selectedSongIds.forEach(id => fd.append('song_ids[]', id));
+
+                const submitBtn = addHighlightForm.querySelector('button[type="submit"]');
+                const orig = submitBtn.textContent;
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Pinning Tracks...';
+
+                try {
+                  const res = await fetch(window.location.href, { method: 'POST', body: fd }).then(r => r.json());
+                  if (res.status === 'success') {
+                    window.location.reload();
+                  } else {
+                    alert(res.message || 'Error occurred');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = orig;
+                  }
+                } catch(err) {
+                  alert('Connection error');
+                  submitBtn.disabled = false;
+                  submitBtn.textContent = orig;
+                }
+              });
+            }
+          }
+
+          // Sortable Drag-and-Drop for Active Highlights in Drawer
+          const sortableHighlights = document.getElementById('ptSortableHighlights');
+          if (sortableHighlights && typeof Sortable !== 'undefined') {
+            Sortable.create(sortableHighlights, {
+              animation: 150,
+              handle: '.bi-grip-vertical',
+              onEnd: () => {
+                const order = Array.from(sortableHighlights.children).map(row => row.dataset.id);
+                const fd = new FormData();
+                fd.append('tree_action', 'reorder_highlights');
+                fd.append('order', JSON.stringify(order));
+                fetch(window.location.href, { method: 'POST', body: fd });
+              }
+            });
+          }
+        <?php endif; ?>
+      </script>
+    </body>
+  </html>
+  <?php
+  exit;
+}
+
 // SERVER REQUIREMENTS & SYSTEM DIAGNOSTICS PAGE (?access=requirements)
 if (isset($_GET['access']) && $_GET['access'] === 'requirements') {
   $checks = [];
@@ -4399,7 +6268,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '12.8');
+define('APP_VERSION', '12.9');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -42818,7 +44687,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.8'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '12.9'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -51697,7 +53566,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.8';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '12.9';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -93779,27 +95648,23 @@ function perform_cover_scan($db) {
         transform: rotate(90deg) scale(1.1);
       }
 
-      /* Top 25 Popular Tracks Carousel & Card Styling */
+      /* Top 25 Popular Tracks Carousel - Center-Border Navigation & Mobile Optimized */
       .top-tracks-shelf {
         position: relative;
         overflow: hidden;
-        margin-bottom: 2.5rem;
-        padding: 1.75rem 1.5rem 2.5rem 1.5rem;
-        background: radial-gradient(ellipse 100% 90% at 50% 40%, rgba(20, 20, 28, 0.35) 0%, rgba(3, 3, 3, 0) 100%);
-        border: none;
+        margin-bottom: 2.25rem;
+        padding: 1.75rem 1.75rem 1.5rem 1.75rem;
+        background: radial-gradient(ellipse 100% 90% at 50% 40%, rgba(25, 25, 35, 0.45) 0%, rgba(3, 3, 3, 0) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 24px;
-        box-shadow: none;
       }
 
       .top-shelf-bg {
         position: absolute;
-        top: -60px;
-        left: -60px;
-        right: -60px;
-        bottom: -60px;
+        inset: -60px;
         background-size: cover;
         background-position: center;
-        filter: blur(45px) brightness(0.55) saturate(1.25);
+        filter: blur(55px) brightness(0.35) saturate(1.3);
         transform: scale(1.18);
         z-index: 0;
         pointer-events: none;
@@ -93814,32 +95679,31 @@ function perform_cover_scan($db) {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
-        gap: 1.5rem;
+        gap: 1rem;
         flex-wrap: wrap;
         margin-bottom: 1.25rem;
       }
 
       .top-tracks-header-left {
         flex: 1 1 auto;
-        min-width: 280px;
+        min-width: 240px;
       }
 
       .top-tracks-title {
-        font-size: 1.7rem;
+        font-size: 1.6rem;
         font-weight: 800;
         color: #ffffff;
         letter-spacing: -0.5px;
-        margin: 0 0 6px 0;
+        margin: 0 0 4px 0;
         text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
       }
 
       .top-tracks-subtext {
         color: rgba(255, 255, 255, 0.7);
-        font-size: 0.88rem;
+        font-size: 0.85rem;
         margin: 0;
         max-width: 600px;
-        line-height: 1.45;
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+        line-height: 1.4;
       }
 
       .top-tracks-header-right {
@@ -93847,27 +95711,35 @@ function perform_cover_scan($db) {
         display: flex;
         flex-direction: column;
         align-items: flex-end;
-        gap: 0.6rem;
+        gap: 0.5rem;
         margin-left: auto;
       }
 
       .top-filter-tabs {
         display: flex;
         align-items: center;
-        gap: 1.25rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.25);
-        padding-bottom: 6px;
+        gap: 1rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        padding-bottom: 4px;
+        overflow-x: auto;
+        scrollbar-width: none;
+        max-width: 100%;
+      }
+
+      .top-filter-tabs::-webkit-scrollbar {
+        display: none;
       }
 
       .top-filter-tab {
         background: none;
         border: none;
-        padding: 4px 2px;
-        color: rgba(255, 255, 255, 0.7);
-        font-size: 0.9rem;
+        padding: 3px 2px;
+        color: rgba(255, 255, 255, 0.65);
+        font-size: 0.85rem;
         font-weight: 500;
         cursor: pointer;
         position: relative;
+        white-space: nowrap;
         transition: color 0.2s ease;
       }
 
@@ -93883,123 +95755,146 @@ function perform_cover_scan($db) {
       .top-filter-tab.active::after {
         content: '';
         position: absolute;
-        bottom: -7px;
+        bottom: -5px;
         left: 0;
         right: 0;
         height: 2px;
-        background-color: #ffffff;
+        background-color: #ff0044;
         border-radius: 2px;
       }
 
       .top-view-more-link {
         color: rgba(255, 255, 255, 0.8);
-        font-size: 0.85rem;
+        font-size: 0.8rem;
         font-weight: 600;
         text-decoration: none;
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        transition: color 0.2s ease;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
       }
 
       .top-view-more-link:hover {
-        color: #ffffff;
+        color: #ff0044;
       }
 
-      .top-shelf-credit {
-        position: absolute;
-        bottom: 8px;
-        right: 20px;
-        font-size: 0.75rem;
-        color: rgba(255, 255, 255, 0.55);
-        z-index: 2;
-        pointer-events: none;
-        font-weight: 500;
-      }
-
+      /* Carousel Viewport Container */
       .top-carousel-container {
         position: relative;
         width: 100%;
+        padding: 0 24px; /* Room for 50% button protrusion */
+        z-index: 2;
+        box-sizing: border-box;
       }
 
       .top-carousel-track {
         display: flex !important;
         flex-direction: row !important;
         flex-wrap: nowrap !important;
-        gap: 14px;
         overflow-x: auto;
+        scroll-snap-type: x mandatory;
         scroll-behavior: smooth;
         scrollbar-width: none;
-        padding: 4px 2px 10px 2px;
+        padding: 4px 0;
+        gap: 0;
+        border-radius: 20px;
       }
 
       .top-carousel-track::-webkit-scrollbar {
         display: none;
       }
 
+      /* Outer Border Straddling Arrow Buttons (50% Inside / 50% Outside) */
       .top-carousel-arrow {
         position: absolute;
         top: 50%;
-        transform: translateY(-50%);
-        width: 40px;
-        height: 40px;
+        width: 46px;
+        height: 46px;
         border-radius: 50%;
-        background-color: rgba(18, 18, 24, 0.88);
-        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(14, 14, 18, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.22);
         color: #ffffff;
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
-        z-index: 10;
-        backdrop-filter: blur(8px);
-        transition: all 0.2s ease;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+        z-index: 15;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+        transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      /* Straddle Left Border */
+      .top-carousel-arrow.arrow-prev {
+        left: 24px;
+        transform: translate(-50%, -50%);
+      }
+
+      /* Straddle Right Border */
+      .top-carousel-arrow.arrow-next {
+        right: 24px;
+        transform: translate(50%, -50%);
       }
 
       .top-carousel-arrow:hover {
-        background-color: rgba(255, 255, 255, 0.2);
+        background-color: #ff0044;
+        border-color: #ff0044;
         color: #ffffff;
-        transform: translateY(-50%) scale(1.1);
+        box-shadow: 0 0 20px rgba(255, 0, 68, 0.65);
       }
 
-      .top-carousel-arrow.arrow-prev {
-        left: -16px;
+      .top-carousel-arrow.arrow-prev:hover {
+        transform: translate(-50%, -50%) scale(1.1);
       }
 
-      .top-carousel-arrow.arrow-next {
-        right: -16px;
+      .top-carousel-arrow.arrow-next:hover {
+        transform: translate(50%, -50%) scale(1.1);
       }
 
+      .top-carousel-arrow:active {
+        transform: translate(var(--tw-translate-x, 0), -50%) scale(0.92);
+      }
+
+      /* Spotlight Card */
       .top-card {
-        width: 210px !important;
-        min-width: 210px !important;
-        max-width: 210px !important;
-        flex: 0 0 210px !important;
-        background: #111116;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        flex: 0 0 100% !important;
+        scroll-snap-align: center;
+        background: rgba(18, 18, 24, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 20px;
+        padding: 1.75rem 2.25rem;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 2rem;
+        min-height: 220px;
+        position: relative;
         overflow: hidden;
         cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-        user-select: none;
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        box-sizing: border-box;
       }
 
       .top-card:hover {
-        transform: translateY(-5px);
-        border-color: rgba(255, 255, 255, 0.25);
-        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.6);
+        border-color: rgba(255, 0, 68, 0.5);
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.65);
       }
 
       .top-card-thumb-wrap {
         position: relative;
-        width: 100%;
-        aspect-ratio: 1 / 1;
-        background-color: #1a1a20;
+        width: 170px;
+        height: 170px;
+        min-width: 170px;
+        border-radius: 16px;
         overflow: hidden;
+        background: #15151c;
+        flex-shrink: 0;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
       }
 
       .top-card-thumb {
@@ -94007,11 +95902,11 @@ function perform_cover_scan($db) {
         height: 100%;
         object-fit: cover;
         display: block;
-        transition: transform 0.3s ease;
+        transition: transform 0.4s ease;
       }
 
       .top-card:hover .top-card-thumb {
-        transform: scale(1.05);
+        transform: scale(1.06);
       }
 
       .top-rank-badge {
@@ -94027,85 +95922,253 @@ function perform_cover_scan($db) {
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
       }
 
-      .top-rank-badge.rank-1 {
-        background: #eab308;
-        color: #000000;
-      }
-
-      .top-rank-badge.rank-2 {
-        background: #94a3b8;
-        color: #000000;
-      }
-
-      .top-rank-badge.rank-3 {
-        background: #b45309;
-        color: #ffffff;
-      }
-
+      .top-rank-badge.rank-1 { background: #eab308; color: #000000; }
+      .top-rank-badge.rank-2 { background: #94a3b8; color: #000000; }
+      .top-rank-badge.rank-3 { background: #b45309; color: #ffffff; }
       .top-rank-badge.rank-other {
-        background: rgba(10, 10, 15, 0.7);
+        background: rgba(10, 10, 15, 0.75);
         color: #e2e8f0;
         border: 1px solid rgba(255, 255, 255, 0.2);
         backdrop-filter: blur(4px);
       }
 
-      .top-views-tag {
-        position: absolute;
-        bottom: 8px;
-        right: 8px;
+      .top-card-info-pane {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        text-align: left;
+      }
+
+      .top-card-meta-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         font-size: 0.72rem;
         font-weight: 700;
-        color: #ffffff;
-        background: rgba(0, 0, 0, 0.65);
-        padding: 2px 6px;
-        border-radius: 4px;
-        backdrop-filter: blur(4px);
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
-      }
-
-      .top-card-footer {
-        padding: 10px 12px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        background: #111116;
-      }
-
-      .top-card-avatar {
-        width: 34px !important;
-        height: 34px !important;
-        min-width: 34px !important;
-        max-width: 34px !important;
-        border-radius: 50% !important;
-        object-fit: cover !important;
-        flex-shrink: 0 !important;
-        border: 1px solid rgba(255, 255, 255, 0.15) !important;
-        display: block !important;
-      }
-
-      .top-card-details {
-        min-width: 0;
-        flex-grow: 1;
-        overflow: hidden;
+        color: #ff0044;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin-bottom: 4px;
       }
 
       .top-card-title {
-        font-size: 0.9rem;
-        font-weight: 700;
+        font-size: clamp(1.25rem, 3vw, 1.85rem);
+        font-weight: 800;
         color: #ffffff;
-        margin: 0;
+        margin: 0 0 6px 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.25;
+      }
+
+      .top-card-artist {
+        font-size: 0.95rem;
+        color: var(--ytm-secondary-text);
+        margin: 0 0 12px 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
-      .top-card-artist {
-        font-size: 0.76rem;
-        color: var(--ytm-secondary-text);
-        margin: 2px 0 0 0;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+      .top-card-stats-row {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 1rem;
+        font-size: 0.82rem;
+        color: rgba(255, 255, 255, 0.65);
+        font-family: monospace;
+      }
+
+      .top-card-play-btn {
+        width: 54px;
+        height: 54px;
+        min-width: 54px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #ff0044, #cc0033);
+        border: none;
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.75rem;
+        box-shadow: 0 6px 18px rgba(255, 0, 68, 0.45);
+        transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+
+      .top-card:hover .top-card-play-btn {
+        transform: scale(1.12);
+        box-shadow: 0 8px 24px rgba(255, 0, 68, 0.65);
+      }
+
+      /* Indicator Dots Container */
+      .top-carousel-dots {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        margin-top: 14px;
+        z-index: 2;
+        position: relative;
+        flex-wrap: wrap;
+        max-width: 90%;
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      .top-carousel-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.22);
+        border: none;
+        padding: 0;
+        cursor: pointer;
+        transition: all 0.25s ease;
+      }
+
+      .top-carousel-dot:hover {
+        background: rgba(255, 255, 255, 0.5);
+      }
+
+      .top-carousel-dot.active {
+        width: 24px;
+        border-radius: 12px;
+        background: #ff0044;
+        box-shadow: 0 0 10px rgba(255, 0, 68, 0.6);
+      }
+
+      .top-shelf-credit {
+        position: absolute;
+        bottom: 8px;
+        right: 20px;
+        font-size: 0.72rem;
+        color: rgba(255, 255, 255, 0.4);
+        z-index: 2;
+        pointer-events: none;
+        font-weight: 500;
+      }
+
+      /* Dedicated Mobile Optimization (Under 768px) */
+      @media (max-width: 767.98px) {
+        .top-tracks-shelf {
+          padding: 1.25rem 0.5rem 1rem 0.5rem;
+          border-radius: 18px;
+          margin-bottom: 1.75rem;
+        }
+
+        .top-tracks-header {
+          padding: 0 0.5rem;
+          margin-bottom: 0.85rem;
+        }
+
+        .top-tracks-title {
+          font-size: 1.35rem;
+        }
+
+        .top-tracks-subtext {
+          font-size: 0.78rem;
+        }
+
+        .top-filter-tabs {
+          gap: 0.75rem;
+        }
+
+        .top-filter-tab {
+          font-size: 0.78rem;
+        }
+
+        /* Container gives room so the 50% protrusion stays inside the shelf boundaries without horizontal scroll bugs */
+        .top-carousel-container {
+          padding: 0 18px;
+        }
+
+        .top-carousel-arrow {
+          width: 36px;
+          height: 36px;
+          font-size: 0.85rem;
+        }
+
+        .top-carousel-arrow.arrow-prev {
+          left: 18px;
+          transform: translate(-50%, -50%);
+        }
+
+        .top-carousel-arrow.arrow-next {
+          right: 18px;
+          transform: translate(50%, -50%);
+        }
+
+        .top-card {
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          padding: 1.25rem 1rem 1rem 1rem;
+          gap: 0.85rem;
+          border-radius: 16px;
+          min-height: 0;
+        }
+
+        .top-card-thumb-wrap {
+          width: 125px;
+          height: 125px;
+          min-width: 125px;
+          border-radius: 12px;
+          margin: 0 auto;
+        }
+
+        .top-card-info-pane {
+          text-align: center;
+          align-items: center;
+          width: 100%;
+        }
+
+        .top-card-title {
+          font-size: 1.15rem;
+          margin-bottom: 4px;
+        }
+
+        .top-card-artist {
+          font-size: 0.82rem;
+          margin-bottom: 8px;
+        }
+
+        .top-card-stats-row {
+          justify-content: center;
+          font-size: 0.74rem;
+          gap: 0.6rem;
+        }
+
+        .top-card-play-btn {
+          width: 44px;
+          height: 44px;
+          min-width: 44px;
+          font-size: 1.4rem;
+          margin: 4px auto 0 auto;
+        }
+
+        .top-carousel-dots {
+          margin-top: 10px;
+          gap: 5px;
+        }
+
+        .top-carousel-dot {
+          width: 6px;
+          height: 6px;
+        }
+
+        .top-carousel-dot.active {
+          width: 18px;
+        }
+
+        .top-shelf-credit {
+          display: none;
+        }
       }
     </style>
   </head>
@@ -94223,6 +96286,10 @@ function perform_cover_scan($db) {
             <a href="?access=user&page=drive" class="nav-link">
               <i class="bi bi-hdd-rack-fill"></i>
               <span>My Drive</span>
+            </a>
+            <a href="?access=profiletree" class="nav-link" target="_blank">
+              <i class="bi bi-diagram-3-fill text-warning"></i>
+              <span>PHPProfileTrees</span>
             </a>
             <a href="?access=artwork" class="nav-link">
               <i class="bi bi-palette-fill"></i>
@@ -108233,7 +110300,7 @@ SOFTWARE.</div>
 
           const existingShelf = document.getElementById('top-tracks-shelf-module');
 
-          const buildCardsHTML = (songs) => {
+          const buildSlidesHTML = (songs) => {
             return songs.map((song, idx) => {
               globalSongCache[song.id] = song;
               const rank = idx + 1;
@@ -108245,49 +110312,149 @@ SOFTWARE.</div>
               const coverSvg = getSvgPlaceholder(song.title || 'Unknown');
               const avatarUrl = song.user_id ? `?action=get_profile_picture&id=${song.user_id}` : coverSvg;
               const plays = (song.period_plays !== undefined && song.period_plays > 0) ? song.period_plays : (song.play_count || 0);
+              const durationFormatted = formatTime(song.duration || 0);
 
               return `
-                <div class="top-card" data-song-id="${song.id}" style="width: 210px !important; min-width: 210px !important; max-width: 210px !important; flex: 0 0 210px !important;">
-                  <div class="top-card-thumb-wrap" style="position: relative; width: 100%; aspect-ratio: 1/1; overflow: hidden; background: #1a1a20;">
+                <div class="top-card" data-song-id="${song.id}" data-slide-index="${idx}">
+                  <div class="top-card-thumb-wrap">
                     <span class="top-rank-badge ${badgeClass}">No. ${rank}</span>
                     <img src="?action=get_image&id=${song.id}&v=${song.last_modified || 0}&size=small" 
                          onerror="this.onerror=null; this.src='${coverSvg}';" 
                          class="top-card-thumb" 
-                         style="width: 100%; height: 100%; object-fit: cover; display: block;"
                          alt="${escapeAttr(song.title)}">
-                    <span class="top-views-tag">${formatSongCount(plays)} views</span>
                   </div>
-                  <div class="top-card-footer" style="padding: 10px 12px; display: flex; align-items: center; gap: 10px; background: #111116;">
-                    <img src="${avatarUrl}" class="top-card-avatar" style="width: 34px !important; height: 34px !important; min-width: 34px !important; max-width: 34px !important; border-radius: 50% !important; object-fit: cover !important; flex-shrink: 0 !important; border: 1px solid rgba(255, 255, 255, 0.15) !important;" onerror="this.src='?action=get_app_icon'" alt="Avatar">
-                    <div class="top-card-details" style="min-width: 0; flex-grow: 1; overflow: hidden;">
-                      <div class="top-card-title" title="${escapeAttr(song.title)}">${escapeHTML(song.title)}</div>
-                      <div class="top-card-artist" title="${escapeAttr(song.artist)}">${escapeHTML(song.artist)}</div>
+                  <div class="top-card-info-pane">
+                    <div class="top-card-meta-tag">
+                      <i class="bi bi-fire"></i> Spotlight Track
+                    </div>
+                    <div class="top-card-title" title="${escapeAttr(song.title)}">${escapeHTML(song.title)}</div>
+                    <div class="top-card-artist" title="${escapeAttr(song.artist)}">
+                      <i class="bi bi-person me-1"></i>${escapeHTML(song.artist)} &bull; ${escapeHTML(song.album || 'Single')}
+                    </div>
+                    <div class="top-card-stats-row">
+                      <span><i class="bi bi-eye text-danger me-1"></i>${formatSongCount(plays)} views</span>
+                      <span><i class="bi bi-clock me-1"></i>${durationFormatted}</span>
+                      <span><i class="bi bi-disc text-info me-1"></i>${escapeHTML(song.genre || 'Music')}</span>
                     </div>
                   </div>
+                  <button type="button" class="top-card-play-btn" title="Play Track" aria-label="Play">
+                    <i class="bi bi-play-fill" style="margin-left: 3px;"></i>
+                  </button>
                 </div>
               `;
             }).join('');
+          };
+
+          const buildDotsHTML = (count) => {
+            let dots = '';
+            for (let i = 0; i < count; i++) {
+              dots += `<button type="button" class="top-carousel-dot ${i === 0 ? 'active' : ''}" data-index="${i}" aria-label="Go to track ${i + 1}"></button>`;
+            }
+            return dots;
           };
 
           const topSong = tracks[0] || null;
           const bgUrl = topSong ? `?action=get_image&id=${topSong.id}&v=${topSong.last_modified || 0}` : '';
           const creditName = topSong ? (topSong.artist || 'Unknown') : '';
 
+          const bindCarouselEvents = (shelfEl, totalTracks) => {
+            const track = shelfEl.querySelector('#top-carousel-track');
+            const dotsContainer = shelfEl.querySelector('#top-carousel-dots');
+            const arrowPrev = shelfEl.querySelector('#top-arrow-prev');
+            const arrowNext = shelfEl.querySelector('#top-arrow-next');
+            const bgEl = shelfEl.querySelector('#top-shelf-bg');
+            const creditEl = shelfEl.querySelector('#top-shelf-credit');
+
+            let currentIndex = 0;
+
+            const updateActiveState = (idx) => {
+              if (idx < 0) idx = 0;
+              if (idx >= totalTracks) idx = totalTracks - 1;
+              currentIndex = idx;
+
+              // Update active dot
+              const dots = dotsContainer.querySelectorAll('.top-carousel-dot');
+              dots.forEach((d, i) => d.classList.toggle('active', i === currentIndex));
+
+              // Update ambient blurred background
+              const currentTrack = tracks[currentIndex];
+              if (currentTrack && bgEl) {
+                bgEl.style.backgroundImage = `url('?action=get_image&id=${currentTrack.id}&v=${currentTrack.last_modified || 0}')`;
+                if (creditEl) creditEl.textContent = `image by ${currentTrack.artist || 'Unknown'}`;
+              }
+            };
+
+            const scrollToIndex = (idx) => {
+              const slide = track.children[idx];
+              if (slide) {
+                track.scrollTo({ left: slide.offsetLeft - track.offsetLeft, behavior: 'smooth' });
+              } else {
+                const slideWidth = track.clientWidth;
+                track.scrollTo({ left: idx * slideWidth, behavior: 'smooth' });
+              }
+              updateActiveState(idx);
+            };
+
+            if (arrowPrev) {
+              arrowPrev.onclick = (e) => {
+                e.stopPropagation();
+                scrollToIndex(currentIndex > 0 ? currentIndex - 1 : totalTracks - 1);
+              };
+            }
+
+            if (arrowNext) {
+              arrowNext.onclick = (e) => {
+                e.stopPropagation();
+                scrollToIndex(currentIndex < totalTracks - 1 ? currentIndex + 1 : 0);
+              };
+            }
+
+            // Sync on manual swipe / scroll-snap
+            let scrollTimeout;
+            track.onscroll = () => {
+              clearTimeout(scrollTimeout);
+              scrollTimeout = setTimeout(() => {
+                const slideWidth = track.clientWidth || 1;
+                const idx = Math.round(track.scrollLeft / slideWidth);
+                updateActiveState(idx);
+              }, 60);
+            };
+
+            // Dot navigation click
+            if (dotsContainer) {
+              dotsContainer.onclick = (e) => {
+                const dot = e.target.closest('.top-carousel-dot');
+                if (dot) {
+                  e.stopPropagation();
+                  scrollToIndex(parseInt(dot.dataset.index, 10));
+                }
+              };
+            }
+
+            // Card click to play
+            track.onclick = (e) => {
+              const card = e.target.closest('.top-card');
+              if (card && card.dataset.songId) {
+                setQueueAndPlay(parseInt(card.dataset.songId, 10));
+              }
+            };
+          };
+
           if (existingShelf) {
-            const trackContainer = existingShelf.querySelector('.top-carousel-track');
+            const track = existingShelf.querySelector('#top-carousel-track');
+            const dotsContainer = existingShelf.querySelector('#top-carousel-dots');
             const subtextSpan = existingShelf.querySelector('#top-period-label-text');
             const bgEl = existingShelf.querySelector('#top-shelf-bg');
             const creditEl = existingShelf.querySelector('#top-shelf-credit');
 
-            if (trackContainer) trackContainer.innerHTML = buildCardsHTML(tracks);
+            if (track) track.innerHTML = buildSlidesHTML(tracks);
+            if (dotsContainer) dotsContainer.innerHTML = buildDotsHTML(tracks.length);
             if (subtextSpan) subtextSpan.textContent = periodLabels[period] || 'this day';
             if (bgEl && bgUrl) bgEl.style.backgroundImage = `url('${bgUrl}')`;
             if (creditEl) creditEl.textContent = `image by ${creditName}`;
 
-            trackContainer.scrollTo({ left: 0, behavior: 'smooth' });
-            if (contentArea.firstElementChild !== existingShelf) {
-              contentArea.prepend(existingShelf);
-            }
+            bindCarouselEvents(existingShelf, tracks.length);
+            track.scrollTo({ left: 0, behavior: 'smooth' });
             return;
           }
 
@@ -108299,7 +110466,7 @@ SOFTWARE.</div>
                 <div class="top-tracks-header-left">
                   <h2 class="top-tracks-title">Popular Tracks</h2>
                   <p class="top-tracks-subtext">
-                    These songs are displayed based on their view counts from <span id="top-period-label-text">${periodLabels[period]}</span>. The more views a track has, the higher its ranking in this list.
+                    Spotlight highlights ranked by total plays <span id="top-period-label-text">${periodLabels[period]}</span>.
                   </p>
                 </div>
                 <div class="top-tracks-header-right">
@@ -108317,16 +110484,21 @@ SOFTWARE.</div>
                 </div>
               </div>
 
-              <div class="top-carousel-container" style="position: relative; z-index: 2;">
-                <button type="button" class="top-carousel-arrow arrow-prev" id="top-arrow-prev" aria-label="Scroll left" style="left: 6px;">
+              <div class="top-carousel-container">
+                <button type="button" class="top-carousel-arrow arrow-prev" id="top-arrow-prev" aria-label="Previous Track">
                   <i class="bi bi-chevron-left fs-5"></i>
                 </button>
                 <div class="top-carousel-track" id="top-carousel-track">
-                  ${buildCardsHTML(tracks)}
+                  ${buildSlidesHTML(tracks)}
                 </div>
-                <button type="button" class="top-carousel-arrow arrow-next" id="top-arrow-next" aria-label="Scroll right" style="right: 6px;">
+                <button type="button" class="top-carousel-arrow arrow-next" id="top-arrow-next" aria-label="Next Track">
                   <i class="bi bi-chevron-right fs-5"></i>
                 </button>
+              </div>
+
+              <!-- Indicator Points / Dots -->
+              <div class="top-carousel-dots" id="top-carousel-dots">
+                ${buildDotsHTML(tracks.length)}
               </div>
 
               <div class="top-shelf-credit" id="top-shelf-credit">image by ${escapeHTML(creditName)}</div>
@@ -108334,26 +110506,11 @@ SOFTWARE.</div>
           `;
 
           contentArea.insertAdjacentHTML('afterbegin', shelfHTML);
+          const shelfModule = document.getElementById('top-tracks-shelf-module');
+          bindCarouselEvents(shelfModule, tracks.length);
 
-          // Arrow Navigation Logic
-          const carouselTrack = document.getElementById('top-carousel-track');
-          const arrowPrev = document.getElementById('top-arrow-prev');
-          const arrowNext = document.getElementById('top-arrow-next');
-
-          if (arrowPrev && carouselTrack) {
-            arrowPrev.addEventListener('click', () => {
-              carouselTrack.scrollBy({ left: -440, behavior: 'smooth' });
-            });
-          }
-
-          if (arrowNext && carouselTrack) {
-            arrowNext.addEventListener('click', () => {
-              carouselTrack.scrollBy({ left: 440, behavior: 'smooth' });
-            });
-          }
-
-          // Filter Tabs Click Listener
-          const filterTabs = document.querySelectorAll('#top-shelf-filter-tabs .top-filter-tab');
+          // Period Filter Tabs
+          const filterTabs = shelfModule.querySelectorAll('#top-shelf-filter-tabs .top-filter-tab');
           filterTabs.forEach(tab => {
             tab.addEventListener('click', async (e) => {
               e.preventDefault();
@@ -108363,27 +110520,12 @@ SOFTWARE.</div>
             });
           });
 
-          // "view more >" button to go to Top 100 Trending
-          const viewMoreBtn = document.getElementById('top-shelf-view-more');
+          // "view more" link goes to Trending
+          const viewMoreBtn = shelfModule.querySelector('#top-shelf-view-more');
           if (viewMoreBtn) {
             viewMoreBtn.addEventListener('click', (e) => {
               e.preventDefault();
-              loadView({
-                type: 'get_trending',
-                param: '',
-                sort: 'trending',
-                filter_user_id: ''
-              });
-            });
-          }
-
-          // Card Click to Play
-          if (carouselTrack) {
-            carouselTrack.addEventListener('click', (e) => {
-              const card = e.target.closest('.top-card');
-              if (card && card.dataset.songId) {
-                setQueueAndPlay(parseInt(card.dataset.songId, 10));
-              }
+              loadView({ type: 'get_trending', param: '', sort: 'trending', filter_user_id: '' });
             });
           }
         };
