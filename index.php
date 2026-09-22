@@ -558,9 +558,10 @@ self.addEventListener('fetch', event => {
           caches.open('php-music-api-cache').then(cache => cache.put(event.request, clone));
         }
         return response;
-      }).catch(() => {
+      }).catch(async () => {
         if (event.request.method === 'GET') {
-          return caches.match(event.request, { ignoreSearch: false, ignoreVary: true });
+          const cached = await caches.match(event.request, { ignoreSearch: false, ignoreVary: true });
+          if (cached) return cached;
         }
         return new Response('{"status":"error", "message":"Network error"}', {
           status: 503,
@@ -6262,7 +6263,9 @@ function track_site_visitor($db) {
 $write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'save_rhythm_score', 'toggle_rhythm_favorite'];
 $current_action = $_GET['action'] ?? '';
 
-if (!in_array($current_action, $write_actions) && !isset($_GET['access'])) {
+// Keep session open for setup and initial session handshakes
+$essential_read_actions = ['get_session', 'get_user_profile'];
+if (!in_array($current_action, $write_actions) && !in_array($current_action, $essential_read_actions) && !isset($_GET['access'])) {
   $session_user_id = $_SESSION['user_id'] ?? null;
   $session_user_artist = $_SESSION['user_artist'] ?? null;
   session_write_close();
@@ -6274,7 +6277,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.1');
+define('APP_VERSION', '13.2');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -6303,24 +6306,20 @@ define('PAGE_SIZE', $custom_page_size);
 define('ADMIN_PAGE_SIZE', $custom_admin_page_size);
 define('DAILY_UPLOAD_LIMIT', $daily_upload_limit_val);
 
-$auto_scan = true; // Auto scan songs during empty or new files
+// Auto scan is disabled by default and only allowed to execute when explicitly turned ON in admin section
+$auto_scan_setting = false;
+try {
+  $auto_scan_setting = (get_db()->query("SELECT value FROM site_settings WHERE key = 'auto_scan_enabled'")->fetchColumn() === '1');
+} catch (\Throwable $e) {}
+
+// Strictly isolate auto-scan so it ONLY activates when an administrator is in the admin panel
+$is_in_admin_section = isset($_GET['access']) && $_GET['access'] === 'admin' && !empty($_SESSION['admin_logged_in']);
+$auto_scan = ($auto_scan_setting && $is_in_admin_section);
 
 // Track visitor footprint on non-media requests (Runs safely AFTER DB_FILE is defined)
 try {
   track_site_visitor(get_db());
 } catch (\Throwable $e) {}
-
-// Disable auto scan if super admin does not exist to enforce setup page
-try {
-  $db_check = get_db();
-  $admin_exists = $db_check->query("SELECT COUNT(id) FROM users WHERE status = 'super_admin'")->fetchColumn();
-  if (empty($admin_exists)) {
-    $auto_scan = false;
-  }
-} catch (Exception $e) {
-  // If tables do not exist yet, disable auto scan to prioritize setup UI
-  $auto_scan = false;
-}
 
 // PHPBoard Configuration
 define('PHPBOARD_ALLOWED_CHANNELS', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'gif', 'h', 'hr', 'k', 'm', 'o', 'p', 'r', 's', 't', 'u', 'v', 'vg', 'vm', 'vmg', 'vr', 'vrpg', 'vst', 'w', 'wg', 'i', 'ic', 'r9k', 's4s', 'vip', 'qa', 'cm', 'hm', 'lgbt', 'mlp', 'news', 'out', 'po', 'pw', 'qst', 'sp', 'trv', 'tv', 'vp', 'wsg', 'wsr', 'x', 'y', '3', 'aco', 'adv', 'an', 'bant', 'biz', 'cgl', 'ck', 'co', 'diy', 'fa', 'fit', 'gd', 'hc', 'his', 'int', 'jp', 'lit', 'mu', 'n', 'pol', 'sci', 'soc', 'tg', 'toy', 'vt', 'xs', 'art', 'tech', 'food', 'movies', 'music', 'books', 'news2', 'dev', 'meta', 'diy2', 'crypto', 'learn', 'lang', 'travel2', 'health', 'cars', 'bikes', 'space', 'scifi', 'fantasy', 'hist2', 'phil', 'eco', 'game', 'mobi', 'prog', 'web', 'desk', 'serv', 'net', 'sec', 'ai', 'ml', 'data', 'vr2', 'ar', 'robot', 'drone', '3dp', 'hobby']);
@@ -23842,15 +23841,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $curUserId = $currentUser ? (int)$currentUser['id'] : 0;
       $userLiked = false;
       $firstChapterId = !empty($chapters[0]['id']) ? (int)$chapters[0]['id'] : 0;
-      if ($firstChapterId > 0) {
-        if ($curUserId > 0) {
-          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = ?");
-          $stLikeCheck->execute([$firstChapterId, $curUserId]);
-        } else {
-          $ip = $_SERVER['REMOTE_ADDR'] ?? '';
-          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = 0 AND ip = ?");
-          $stLikeCheck->execute([$firstChapterId, $ip]);
-        }
+      if ($firstChapterId > 0 && $curUserId > 0) {
+        $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = ?");
+        $stLikeCheck->execute([$firstChapterId, $curUserId]);
         $userLiked = (bool)$stLikeCheck->fetchColumn();
       }
 
@@ -24177,15 +24170,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $curUserId = $currentUser ? (int)$currentUser['id'] : 0;
       $userLiked = false;
       $firstChapterId = !empty($chapters[0]['id']) ? (int)$chapters[0]['id'] : 0;
-      if ($firstChapterId > 0) {
-        if ($curUserId > 0) {
-          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = ?");
-          $stLikeCheck->execute([$firstChapterId, $curUserId]);
-        } else {
-          $ip = $_SERVER['REMOTE_ADDR'] ?? '';
-          $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = 0 AND ip = ?");
-          $stLikeCheck->execute([$firstChapterId, $ip]);
-        }
+      if ($firstChapterId > 0 && $curUserId > 0) {
+        $stLikeCheck = $db->prepare("SELECT 1 FROM likes WHERE artwork_id = ? AND user_id = ?");
+        $stLikeCheck->execute([$firstChapterId, $curUserId]);
         $userLiked = (bool)$stLikeCheck->fetchColumn();
       }
 
@@ -25729,19 +25716,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   
     if ($action === 'artwork_like') {
       verifyCsrfToken();
+      $user = requireAuth($db);
       $artworkId = intval($_POST['artwork_id'] ?? 0);
+      $userId = (int)$user['id'];
       $ip = $_SERVER['REMOTE_ADDR'] ?? '';
-      $userId = $currentUser ? (int)$currentUser['id'] : 0;
-  
-      if ($userId > 0) {
-        $stmt = $db->prepare("SELECT id FROM likes WHERE artwork_id = ? AND user_id = ?");
-        $stmt->execute([$artworkId, $userId]);
-      } else {
-        $stmt = $db->prepare("SELECT id FROM likes WHERE artwork_id = ? AND user_id = 0 AND ip = ?");
-        $stmt->execute([$artworkId, $ip]);
-      }
+
+      $stmt = $db->prepare("SELECT id FROM likes WHERE artwork_id = ? AND user_id = ?");
+      $stmt->execute([$artworkId, $userId]);
       $liked = $stmt->fetch();
-  
+
       if ($liked) {
         $db->prepare("DELETE FROM likes WHERE id = ?")->execute([$liked['id']]);
         $db->prepare("UPDATE artworks SET like_count = MAX(0, like_count - 1) WHERE id = ?")->execute([$artworkId]);
@@ -25751,9 +25734,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $stmtAdd->execute([$artworkId, $userId, $ip, time()]);
         $db->prepare("UPDATE artworks SET like_count = like_count + 1 WHERE id = ?")->execute([$artworkId]);
         $isLiked = true;
-        if ($userId > 0) logActivity($db, $userId, 'like', $artworkId, 'Liked artwork');
+        logActivity($db, $userId, 'like', $artworkId, 'Liked artwork');
       }
-  
+
       $count = (int)$db->query("SELECT like_count FROM artworks WHERE id = {$artworkId}")->fetchColumn();
       jsonResponse(['success' => true, 'liked' => $isLiked, 'like_count' => $count]);
     }
@@ -27356,7 +27339,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: flex;
           flex-direction: column;
           gap: 0.2rem;
-          min-width: 220px;
+          min-width: 0;
+          flex: 1 1 auto;
+          overflow: hidden;
         }
         .popular-hero-title {
           font-size: 1.65rem;
@@ -27364,29 +27349,48 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           color: #ffffff;
           margin: 0;
           letter-spacing: -0.5px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 100%;
         }
         .popular-hero-sub {
           font-size: 0.84rem;
           color: rgba(255, 255, 255, 0.7);
           margin: 0;
-          line-height: 1.4;
+          line-height: 1.5;
+          white-space: normal !important;
+          word-wrap: break-word !important;
+          overflow-wrap: break-word !important;
+          max-width: 100%;
         }
         .popular-hero-nav-group {
           display: flex;
           flex-direction: column;
-          align-items: flex-end;
+          align-items: flex-end !important;
+          justify-content: flex-end !important;
+          margin-left: auto;
           gap: 0.45rem;
           flex-shrink: 0;
+          text-align: right;
         }
         .popular-period-tabs {
           display: inline-flex;
           gap: 1.2rem;
           align-items: center;
+          justify-content: flex-start !important;
           border-bottom: 2px solid rgba(255, 255, 255, 0.18);
           padding: 0 0 3px 0;
           margin: 0;
           white-space: nowrap;
           flex-shrink: 0;
+          max-width: 100%;
+          overflow-x: auto;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
+        }
+        .popular-period-tabs::-webkit-scrollbar {
+          display: none;
         }
         .period-tab-btn {
           font-size: 0.9rem;
@@ -27528,6 +27532,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           font-size: 0.88rem;
           color: rgba(255, 255, 255, 0.75);
           margin-top: 0.15rem;
+          min-width: 0;
+          max-width: 100%;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .spotlight-author-avatar {
           width: 22px;
@@ -27536,6 +27545,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           object-fit: cover;
           background: var(--bg-surface-elevated);
           flex-shrink: 0;
+        }
+        .spotlight-author-name {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          min-width: 0;
         }
         .spotlight-meta-row {
           display: flex;
@@ -27642,11 +27657,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             gap: 0.8rem;
           }
           .popular-hero-nav-group {
-            align-items: flex-start;
+            align-items: flex-end !important;
+            justify-content: flex-end !important;
+            margin-left: auto;
             width: 100%;
           }
           .popular-period-tabs {
             width: 100%;
+            justify-content: flex-start !important;
             overflow-x: auto;
             scrollbar-width: none;
           }
@@ -27667,8 +27685,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           .spotlight-meta-row {
             justify-content: center;
           }
-          .spotlight-controls {
-            display: none;
+          .spotlight-btn {
+            width: 38px;
+            height: 38px;
+          }
+          .spotlight-btn.left {
+            margin-left: -14px;
+          }
+          .spotlight-btn.right {
+            margin-right: -14px;
           }
           .popular-hero-bottom-row {
             flex-direction: column;
@@ -29857,17 +29882,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <img src="${thumbUrl}" alt="${this.escape(art.title)}" onerror="this.src='?action=get_app_icon'">
                     </div>
                     <div class="spotlight-info">
-                      <div class="spotlight-tag-badge">
-                        <svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;"><path d="M12 23c-4.97 0-9-4.03-9-9 0-3.53 2.04-6.58 5-8.05v2.32C6.18 9.4 5 11.55 5 14c0 3.86 3.14 7 7 7s7-3.14 7-7c0-2.45-1.18-4.6-3-5.73V5.95c2.96 1.47 5 4.52 5 8.05 0 4.97-4.03 9-9 9zM12 2C6.48 2 2 6.48 2 12c0 2.85 1.2 5.42 3.11 7.24.47-.79 1.15-1.46 1.99-1.92C5.8 15.86 5 14.04 5 12c0-3.87 3.13-7 7-7s7 3.13 7 7c0 2.04-.8 3.86-2.1 5.32.84.46 1.52 1.13 1.99 1.92C20.8 17.42 22 14.85 22 12c0-5.52-4.48-10-10-10z"/></svg>
-                        <span>SPOTLIGHT ${typeLabel.toUpperCase()}</span>
-                      </div>
                       <h3 class="spotlight-title" title="${this.escape(art.title)}">${this.escape(art.title)}</h3>
                       <div class="spotlight-author-row">
                         <img src="${avatarUrl}" class="spotlight-author-avatar" alt="" onerror="app.handleAvatarError(this)">
-                        <span>${this.escape(art.artist_name)}</span>
-                        <span>&bull;</span>
-                        <span>${typeLabel}</span>
-                        ${isR18 ? '<span class="badge bg-danger ms-1" style="font-size:0.62rem; padding:1px 5px; font-weight:800;">R-18</span>' : ''}
+                        <span class="spotlight-author-name" title="${this.escape(art.artist_name)}">${this.escape(art.artist_name)}</span>
+                        <span class="flex-shrink-0">&bull;</span>
+                        <span class="flex-shrink-0">${typeLabel}</span>
+                        ${isR18 ? '<span class="badge bg-danger ms-1 flex-shrink-0" style="font-size:0.62rem; padding:1px 5px; font-weight:800;">R-18</span>' : ''}
                       </div>
                       <div class="spotlight-meta-row">
                         <span class="spotlight-meta-item">
@@ -29902,8 +29923,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <div class="popular-hero-content">
                     <div class="popular-hero-header-row">
                       <div class="popular-hero-title-group">
-                        <h2 class="popular-hero-title">${this.escape(heroTitle)}</h2>
-                        <p class="popular-hero-sub">${this.escape(subText)}</p>
+                        <h2 class="popular-hero-title" title="${this.escape(heroTitle)}">${this.escape(heroTitle)}</h2>
+                        <p class="popular-hero-sub" title="${this.escape(subText)}">${this.escape(subText)}</p>
                       </div>
 
                       <div class="popular-hero-nav-group">
@@ -35683,13 +35704,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           }
     
           async toggleLike(artworkId, btn) {
+            if (!this.user) {
+              this.toast('Please log in to like creations.');
+              this.showAuthModal('login');
+              return;
+            }
             try {
               const res = await this.api('artwork_like', { artwork_id: artworkId }, 'POST');
               if (btn) {
                 btn.classList.toggle('active', res.liked);
                 btn.classList.toggle('like', res.liked);
-                const countSpan = btn.querySelector('span');
-                if (countSpan) countSpan.innerText = countSpan.innerText.includes('Like') ? `Like (${res.like_count})` : res.like_count;
+                const countSpan = btn.querySelector('.like-count') || btn.querySelector('span:last-child') || btn.querySelector('span');
+                if (countSpan) {
+                  countSpan.innerText = countSpan.innerText.includes('Like') ? `Like (${res.like_count})` : res.like_count;
+                }
               }
             } catch(e) {
               this.toast(e.message);
@@ -35697,6 +35725,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           }
 
           async toggleSeriesFavorite(artworkId, btn) {
+            if (!this.user) {
+              this.toast('Please log in to add series to favorites.');
+              this.showAuthModal('login');
+              return;
+            }
             try {
               const res = await this.api('artwork_like', { artwork_id: artworkId }, 'POST');
               if (btn) {
@@ -39643,6 +39676,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // SAVE SCANNER SETTINGS
+    if (isset($_POST['save_scan_settings'])) {
+      $db = get_db();
+      $enabled = !empty($_POST['auto_scan_enabled']) ? '1' : '0';
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES ('auto_scan_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute([$enabled]);
+      log_admin_activity($db, $_SESSION['admin_email'], ($enabled === '1' ? 'Enabled' : 'Disabled') . ' Auto Scan Mode', 0);
+      $_SESSION['admin_flash_msg'] = "Auto Scan mode has been " . ($enabled === '1' ? 'enabled (Admin Section only)' : 'disabled') . ".";
+      header('Location: ?access=admin&page=scan');
+      exit;
+    }
+
     // SAVE GENERAL SYSTEM SETTINGS & BRANDING
     if (isset($_POST['save_general_settings'])) {
       $db = get_db();
@@ -41822,55 +41867,67 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         if ($cfg_repo && trim($cfg_repo) !== '') $repo = trim($cfg_repo);
       } catch (\Throwable $e) {}
 
-      // Prioritize raw GitHub file directly; use CDN as resilient secondary fallback (Cache-Busted)
-      $ts = time();
-      $endpoints = [
-        "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php?t={$ts}",
-        "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}",
-        "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}"
-      ];
       $remote_code = false;
 
-      foreach ($endpoints as $remote_url) {
-        if (function_exists('curl_version')) {
-          $ch = curl_init();
-          $curl_opts = [
-            CURLOPT_URL => $remote_url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => false,
-            CURLOPT_CONNECTTIMEOUT => 20,
-            CURLOPT_TIMEOUT => 180, // Generous 3-minute limit for low-speed connections
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawUpdater',
-            CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
-          ];
-          if (defined('CURL_IPRESOLVE_V4')) {
-            $curl_opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4; // Prevent localhost IPv6 DNS stalls
-          }
-          curl_setopt_array($ch, $curl_opts);
-          $res = curl_exec($ch);
-          $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-          curl_close($ch);
-          if ($http_code === 200 && $res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
-            $remote_code = $res;
-            break;
-          }
+      // 1. Check if the probe step already verified and cached the complete update payload locally
+      $cached_payload_file = MUSIC_DIR . '/.gallery_cache/gh_payload_' . md5($repo . '_' . $branch) . '.php.tmp';
+      if (file_exists($cached_payload_file) && (time() - filemtime($cached_payload_file)) < 600) {
+        $cached_content = @file_get_contents($cached_payload_file);
+        if ($cached_content && strlen($cached_content) > 10000 && strpos($cached_content, '<?php') !== false) {
+          $remote_code = $cached_content;
         }
+      }
 
-        if (!$remote_code) {
-          $ctx = stream_context_create([
-            'http' => [
-              'timeout' => 120,
-              'follow_location' => true,
-              'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawUpdater\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
-            ],
-            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
-          ]);
-          $res = @file_get_contents($remote_url, false, $ctx);
-          if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
-            $remote_code = $res;
-            break;
+      // 2. If not cached, query CDN mirrors with fast timeouts to avoid exceeding PHP execution limits
+      if (!$remote_code) {
+        $ts = time();
+        $endpoints = [
+          "https://raw.githubusercontent.com/{$repo}/{$branch}/index.php?t={$ts}",
+          "https://cdn.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}",
+          "https://fastly.jsdelivr.net/gh/{$repo}@{$branch}/index.php?t={$ts}"
+        ];
+
+        foreach ($endpoints as $remote_url) {
+          if (function_exists('curl_version')) {
+            $ch = curl_init();
+            $curl_opts = [
+              CURLOPT_URL => $remote_url,
+              CURLOPT_RETURNTRANSFER => true,
+              CURLOPT_FOLLOWLOCATION => true,
+              CURLOPT_SSL_VERIFYPEER => false,
+              CURLOPT_SSL_VERIFYHOST => false,
+              CURLOPT_CONNECTTIMEOUT => 6,
+              CURLOPT_TIMEOUT => 25,
+              CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP-Music-RawUpdater',
+              CURLOPT_HTTPHEADER => ['Accept: text/plain, */*', 'Cache-Control: no-cache']
+            ];
+            if (defined('CURL_IPRESOLVE_V4')) {
+              $curl_opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+            }
+            curl_setopt_array($ch, $curl_opts);
+            $res = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($http_code === 200 && $res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
+              $remote_code = $res;
+              break;
+            }
+          }
+
+          if (!$remote_code) {
+            $ctx = stream_context_create([
+              'http' => [
+                'timeout' => 15,
+                'follow_location' => true,
+                'header' => "User-Agent: Mozilla/5.0 PHP-Music-RawUpdater\r\nAccept: text/plain, */*\r\nCache-Control: no-cache\r\n"
+              ],
+              'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+            ]);
+            $res = @file_get_contents($remote_url, false, $ctx);
+            if ($res && strlen($res) > 10000 && strpos($res, '<?php') !== false) {
+              $remote_code = $res;
+              break;
+            }
           }
         }
       }
@@ -41904,34 +41961,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       $backup_file = $backup_dir . '/index_backup_' . date('Ymd_His') . '_v' . APP_VERSION . '.php';
       @copy(__FILE__, $backup_file);
 
-      // Atomic File Overwrite using Temporary Buffer
+      // Atomic File Overwrite with In-Place Fallback
       $tmp_swap = __FILE__ . '.tmp_' . uniqid();
+      $written = false;
+
       if (@file_put_contents($tmp_swap, $remote_code) !== false) {
         if (@rename($tmp_swap, __FILE__) || (@copy($tmp_swap, __FILE__) && @unlink($tmp_swap))) {
-          if (function_exists('opcache_invalidate')) { @opcache_invalidate(__FILE__, true); }
-          if (function_exists('opcache_reset')) { @opcache_reset(); }
-          if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
-
-          preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $m_ver);
-          $new_version = $m_ver[1] ?? 'Updated';
-
-          log_admin_activity(get_db(), $_SESSION['admin_email'], "AJAX Smooth Update applied from branch '{$branch}' (Backup: " . basename($backup_file) . ")", 0);
-
-          echo json_encode([
-            'success' => true,
-            'message' => "Codebase successfully updated to version {$new_version}!",
-            'version' => $new_version,
-            'backup_file' => basename($backup_file),
-            'branch' => $branch
-          ]);
-          exit;
-        } else {
-          @unlink($tmp_swap);
-          echo json_encode(['success' => false, 'error' => "Filesystem error: Unable to swap temporary file to index.php. Check write permissions."]);
-          exit;
+          $written = true;
         }
+      }
+
+      // Fallback: Attempt direct write to __FILE__ if directory-level file creation is restricted
+      if (!$written) {
+        if (@file_put_contents(__FILE__, $remote_code) !== false) {
+          $written = true;
+        }
+      }
+
+      if ($written) {
+        if (function_exists('opcache_invalidate')) { @opcache_invalidate(__FILE__, true); }
+        if (function_exists('opcache_reset')) { @opcache_reset(); }
+        if (function_exists('opcache_compile_file')) { @opcache_compile_file(__FILE__); }
+
+        preg_match("/define\s*\(\s*['\"]APP_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)/i", (string)$remote_code, $m_ver);
+        $new_version = $m_ver[1] ?? 'Updated';
+
+        log_admin_activity(get_db(), $_SESSION['admin_email'], "Update applied from branch '{$branch}' (Backup: " . basename($backup_file) . ")", 0);
+
+        echo json_encode([
+          'success' => true,
+          'message' => "Codebase successfully updated to version {$new_version}!",
+          'version' => $new_version,
+          'backup_file' => basename($backup_file),
+          'branch' => $branch
+        ]);
+        exit;
       } else {
-        echo json_encode(['success' => false, 'error' => "Filesystem error: Unable to write to disk. Ensure web server has write permissions."]);
+        echo json_encode(['success' => false, 'error' => "Filesystem error: Unable to overwrite " . basename(__FILE__) . ". Verify web server write permissions."]);
         exit;
       }
     }
@@ -42391,7 +42457,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
   $is_admin_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
 
   // FETCH ADMIN PERMISSIONS & ENFORCE ACCESS
-  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'news_management', 'profiletree', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
+  $current_admin_permissions = ['hijack_recovery', 'settings', 'security', 'pwa', 'scan', 'analytics', 'storage', 'user_drive_management', 'users', 'songs', 'bitrate_management', 'artworks', 'news_management', 'profiletree', 'phpboard', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'manage', 'drive', 'dbmanager', 'ide', 'api', 'update', 'playground', 'jobs', 'db_backups', 'error_logs', 'phpinfo']; // Default to all if missing
   $is_super_admin_check = false;
   
   if ($is_admin_logged_in && isset($_SESSION['admin_id'])) {
@@ -42457,6 +42523,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     'settings' => 'General System Settings & Branding',
     'security' => 'Security, IP Firewall & Threat Defense',
     'pwa' => 'PWA Management',
+    'scan' => 'Library Scanner & Auto Scan Control',
     'jobs' => 'Background Tasks & Cron Scheduler',
     'db_backups' => 'Database Snapshot Vault & Backups',
     'error_logs' => 'PHP Error Logs & Crash Monitor',
@@ -43786,6 +43853,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php if ($is_super_admin_check || in_array('songs', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=songs" title="Song Management" class="nav-link <?php echo ($active_p === 'songs') ? 'active' : ''; ?>"><i class="bi bi-music-note-list"></i><span>Song Management</span></a>
               <?php endif; ?>
+              <?php if ($is_super_admin_check || in_array('scan', $current_admin_permissions)): ?>
+                <a href="?access=admin&page=scan" title="Library Scanner" class="nav-link <?php echo ($active_p === 'scan') ? 'active' : ''; ?>"><i class="bi bi-radar"></i><span>Library Scanner</span></a>
+              <?php endif; ?>
               <?php if ($is_super_admin_check || in_array('artworks', $current_admin_permissions)): ?>
                 <a href="?access=admin&page=artworks" title="Artwork Management" class="nav-link <?php echo ($active_p === 'artworks') ? 'active' : ''; ?>"><i class="bi bi-image-fill"></i><span>Artwork Studio</span></a>
               <?php endif; ?>
@@ -44069,6 +44139,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 const currentContent = document.querySelector('#admin-dynamic-content');
                 const mainContainer = document.querySelector('main.main-content');
 
+                // If redirected to login page or container missing, perform clean window location transition
+                if (!newContent) {
+                  window.location.href = url;
+                  return;
+                }
+
                 if (newContent && currentContent) {
                   const appContainer = document.querySelector('.app-container');
                   if (appContainer) {
@@ -44166,6 +44242,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 return;
               }
 
+              const formMethod = (form.method || 'GET').toUpperCase();
+
+              // Pass native browser navigation on GET forms to avoid fetch body errors
+              if (formMethod === 'GET') {
+                return;
+              }
+
               e.preventDefault();
               showAdminLoader();
 
@@ -44177,7 +44260,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 }
 
                 const res = await fetch(actionUrl, {
-                  method: (form.method || 'POST').toUpperCase(),
+                  method: formMethod,
                   body: fd,
                   headers: { 'X-Requested-With': 'XMLHttpRequest' }
                 });
@@ -45128,7 +45211,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.1'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.2'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -53163,6 +53246,162 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               <?php endif; ?>
             <?php endif; ?>
           </div>
+        <?php elseif (($_GET['page'] ?? '') === 'scan'): ?>
+          <?php
+            $db = get_db();
+            $auto_scan_active = $db->query("SELECT value FROM site_settings WHERE key = 'auto_scan_enabled'")->fetchColumn() === '1';
+            $total_songs_cnt = (int)($db->query("SELECT COUNT(*) FROM music")->fetchColumn() ?: 0);
+            $total_charts_cnt = (int)($db->query("SELECT COUNT(*) FROM rhythm_charts")->fetchColumn() ?: 0);
+            $missing_covers = (int)($db->query("SELECT COUNT(*) FROM music WHERE image IS NULL")->fetchColumn() ?: 0);
+          ?>
+          <div class="page-header d-flex flex-column gap-3">
+            <div class="d-flex flex-column text-start">
+              <h1 class="content-title m-0 fw-bold text-white">Library Scanner &amp; Sync Control</h1>
+              <div class="small text-secondary mt-1">Configure background auto-scanning and run manual synchronization tools.</div>
+            </div>
+          </div>
+
+          <div class="content-area-wrapper">
+            <!-- Metrics Summary Cards -->
+            <div class="row g-3 mb-4">
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Auto Scan Mode</span>
+                    <span class="<?php echo $auto_scan_active ? 'text-success' : 'text-secondary'; ?>"><i class="bi bi-radar fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo $auto_scan_active ? 'ENABLED' : 'DISABLED'; ?></div>
+                  <small class="text-secondary"><?php echo $auto_scan_active ? 'Runs only in Admin section' : 'Off globally'; ?></small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Indexed Songs</span>
+                    <span class="text-danger"><i class="bi bi-music-note-beamed fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($total_songs_cnt); ?></div>
+                  <small class="text-secondary">Tracks in music database</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Compiled Charts</span>
+                    <span class="text-info"><i class="bi bi-diagram-3-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($total_charts_cnt); ?></div>
+                  <small class="text-secondary">Rhythm game note charts</small>
+                </div>
+              </div>
+
+              <div class="col-12 col-sm-6 col-xl-3">
+                <div class="admin-card p-3 h-100">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span class="text-secondary small fw-bold text-uppercase">Pending Covers</span>
+                    <span class="<?php echo $missing_covers > 0 ? 'text-warning' : 'text-success'; ?>"><i class="bi bi-image-fill fs-5"></i></span>
+                  </div>
+                  <div class="fs-4 fw-bold text-white"><?php echo number_format($missing_covers); ?></div>
+                  <small class="text-secondary"><?php echo $missing_covers > 0 ? 'Tracks without album art' : 'All covers indexed'; ?></small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Auto Scan Configuration Card -->
+            <div class="admin-card p-4 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                <div>
+                  <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6">
+                    <i class="bi bi-sliders text-danger"></i> Automated Scanner Policy
+                  </h5>
+                  <div class="small text-secondary mt-1">Controls whether the system checks for new music files automatically.</div>
+                </div>
+                <span class="admin-badge <?php echo $auto_scan_active ? 'admin-badge-success' : 'admin-badge-secondary'; ?>">
+                  <?php echo $auto_scan_active ? 'Admin Scope Only' : 'Inactive'; ?>
+                </span>
+              </div>
+
+              <form method="POST" action="?access=admin&page=scan" class="d-flex flex-column gap-3">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                <input type="hidden" name="save_scan_settings" value="1">
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between">
+                  <div>
+                    <strong class="text-white d-block">Enable Background Auto-Scan</strong>
+                    <span class="text-secondary small">When enabled, scanning triggers exclusively when an administrator accesses the admin panel. Guests and non-admins will never trigger background scans.</span>
+                  </div>
+                  <div class="form-check form-switch m-0 ms-3">
+                    <input class="form-check-input bg-dark border-secondary" type="checkbox" name="auto_scan_enabled" value="1" <?php echo $auto_scan_active ? 'checked' : ''; ?> style="width: 42px; height: 22px; cursor: pointer;">
+                  </div>
+                </div>
+
+                <button type="submit" class="admin-btn-pill admin-btn-primary py-2 justify-content-center" style="height: 40px;">
+                  <i class="bi bi-save me-1"></i> Save Scanner Policy
+                </button>
+              </form>
+            </div>
+
+            <!-- Manual Scanner Tools Card -->
+            <div class="admin-card p-4 mb-4">
+              <h5 class="fw-bold text-white m-0 d-flex align-items-center gap-2 fs-6 mb-3">
+                <i class="bi bi-play-circle-fill text-info"></i> Manual Scan Actions
+              </h5>
+
+              <div class="d-flex flex-column gap-3">
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Standard Full Scan</strong>
+                    <span class="text-secondary small">Scans the root directory and uploads folder incrementally for newly added, updated, or removed audio files.</span>
+                  </div>
+                  <a href="?action=full_scan&step=1" target="_blank" class="admin-btn-pill admin-btn-primary" style="height: 34px;">
+                    <i class="bi bi-play-fill"></i> Run Full Scan
+                  </a>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Forced Metadata Rescan (All Songs &amp; Artists)</strong>
+                    <span class="text-secondary small">Re-reads ID3 metadata, titles, albums, genres, artists, and replaygain for all indexed audio tracks.</span>
+                  </div>
+                  <a href="?action=force_rescan&mode=all" target="_blank" class="admin-btn-pill" style="height: 34px; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 35%, transparent);">
+                    <i class="bi bi-arrow-repeat"></i> Force Rescan All
+                  </a>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Cover Art Re-extractor</strong>
+                    <span class="text-secondary small">Scans for embedded ID3 front covers and folder artwork images, generating 200px WebP thumbnails.</span>
+                  </div>
+                  <a href="?action=rescan_covers" target="_blank" class="admin-btn-pill" style="height: 34px; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 35%, transparent);">
+                    <i class="bi bi-image"></i> Rescan Covers
+                  </a>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Rhythm Charts Compiler</strong>
+                    <span class="text-secondary small">Pre-computes and compiles note charts and pattern levels across all 6 difficulty tiers.</span>
+                  </div>
+                  <a href="?action=rescan_charts&step=1&run=1" target="_blank" class="admin-btn-pill" style="height: 34px; color: #a855f7; border-color: color-mix(in srgb, #a855f7 35%, transparent);">
+                    <i class="bi bi-controller"></i> Compile Rhythm Charts
+                  </a>
+                </div>
+
+                <div class="p-3 rounded-3 bg-black border border-secondary border-opacity-25 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                  <div>
+                    <strong class="text-white d-block">Database Vacuum &amp; Compaction</strong>
+                    <span class="text-secondary small">Flushes WAL frames and runs SQLite VACUUM to defragment storage and reclaim empty space.</span>
+                  </div>
+                  <a href="?action=vacuum_database" target="_blank" class="admin-btn-pill" style="height: 34px; color: #4ade80; border-color: color-mix(in srgb, #22c55e 35%, transparent);">
+                    <i class="bi bi-database-fill-gear"></i> Vacuum Database
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
         <?php elseif (($_GET['page'] ?? '') === 'storage'): ?>
           <?php
             $db = get_db();
@@ -54705,7 +54944,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.1';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.2';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -56567,11 +56806,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   body: fd
                 });
 
-                if (!response.ok) {
-                  throw new Error(`Server returned HTTP ${response.status} (${response.statusText})`);
+                const rawText = await response.text();
+                let data;
+                try {
+                  data = JSON.parse(rawText);
+                } catch (jsonErr) {
+                  if (!response.ok) {
+                    throw new Error(`Server returned HTTP ${response.status}: ${rawText.substring(0, 100)}`);
+                  }
+                  throw new Error(`Invalid server response: ${rawText.substring(0, 120)}`);
                 }
 
-                const data = await response.json();
+                if (!response.ok) {
+                  throw new Error(data.error || `Server returned HTTP ${response.status}`);
+                }
 
                 if (data.success) {
                   setProgress(75, 'STAGE 4/5: TOKEN VALIDATION & SAFETY BACKUP', `Payload verified. Created pre-update snapshot: ${data.backup_file}`);
@@ -79221,9 +79469,6 @@ function init_db($db) {
     CREATE INDEX IF NOT EXISTS idx_analytics_created ON site_analytics(created_at);
   ");
 
-  $users_columns = $db->query("PRAGMA table_info(users);")->fetchAll(PDO::FETCH_COLUMN, 1);
-  $users_table_exists = !empty($users_columns);
-
   $db->exec("
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
@@ -79242,7 +79487,9 @@ function init_db($db) {
   ");
   $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS users_artist_idx ON users(artist);");
 
-  if ($users_table_exists) {
+  $users_columns = $db->query("PRAGMA table_info(users);")->fetchAll(PDO::FETCH_COLUMN, 1);
+
+  if (!empty($users_columns)) {
     if (!in_array('is_admin', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;");
     if (!in_array('reset_requested', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN reset_requested INTEGER DEFAULT 0;");
     if (!in_array('last_upload_date', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN last_upload_date TEXT;");
@@ -80157,16 +80404,22 @@ if (isset($_GET['action'])) {
     $origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_X_ORIGIN'] ?? '';
     if ($origin === 'null') $origin = ''; // Explicitly deny local file:/// origin bypasses
     
+    $sec_fetch_site = strtolower($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '');
+
     $is_valid_internal = false;
-    if ($origin && parse_url($origin, PHP_URL_HOST) === $host) {
+    if (in_array($sec_fetch_site, ['same-origin', 'same-site', 'none'], true)) {
+      $is_valid_internal = true;
+    } elseif ($origin && parse_url($origin, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
     } elseif ($referer && parse_url($referer, PHP_URL_HOST) === $host) {
       $is_valid_internal = true;
+    } elseif (empty($origin) && $sec_fetch_site !== 'cross-site') {
+      // Same-origin GET fetches never send Origin headers in modern browsers
+      $is_valid_internal = true;
     } elseif (in_array($action, ['embed', 'get_stream', 'get_image', 'get_profile_picture', 'get_profile_background', 'get_group_image', 'get_status_media', 'get_message_image', 'get_app_icon', 'download_song', 'download_cover', 'export_playlist', 'export_favorites', 'export_offline', 'export_notes', 'full_scan', 'force_rescan', 'rescan_covers', 'vacuum_database', 'reset_rhythm_charts', 'rescan_charts', 'verify_admin_dev', 'rss'])) {
-      // Media and Admin Scanner routes are allowed internally without headers, but data JSON routes are strictly blocked!
       $is_valid_internal = true;
     }
-    
+
     if (!$is_valid_internal) {
       http_response_code(403);
       send_json([
@@ -81654,20 +81907,21 @@ if (isset($_GET['action'])) {
       exit;
 
     case 'full_scan':
-      // Lock down backend scanner endpoint to prevent unauthorized CPU exhaustion
+      // Permit scan execution if admin is authenticated OR if manual scan flag is present
       global $auto_scan;
-      $is_active_admin = false;
-      if (isset($_SESSION['user_id'])) {
+      $is_active_admin = !empty($_SESSION['admin_logged_in']);
+      if (!$is_active_admin && isset($_SESSION['user_id'])) {
         $db_check = get_db();
-        $stmt_chk = $db_check->prepare("SELECT email, is_admin FROM users WHERE id = ?");
+        $stmt_chk = $db_check->prepare("SELECT is_admin, status FROM users WHERE id = ?");
         $stmt_chk->execute([$_SESSION['user_id']]);
         $u_chk = $stmt_chk->fetch();
         if ($u_chk && ($u_chk['is_admin'] == 1 || $u_chk['status'] === 'super_admin')) {
           $is_active_admin = true;
         }
       }
-      if (!$is_active_admin && !(isset($auto_scan) && $auto_scan)) {
-        die("Security violation: Admin session required.");
+      if (!$is_active_admin && !($auto_scan && isset($_GET['auto']))) {
+        http_response_code(403);
+        die("Security violation: Administrator authentication required to run library scanner.");
       }
       perform_full_scan($db);
       exit;
@@ -89724,10 +89978,13 @@ function perform_full_scan($db) {
         }
       }
 
-      if ($old_base && $new_base && strcasecmp($old_base, $new_base) !== 0) {
+      $clean_new_base = rtrim(str_replace('\\', '/', MUSIC_DIR), '/');
+      $clean_old_base = $old_base ? rtrim(str_replace('\\', '/', $old_base), '/') : null;
+
+      if ($clean_old_base && $clean_new_base && strcasecmp($clean_old_base, $clean_new_base) !== 0) {
         echo " -> Mismatch detected: Database base path differs from Current environment.\n";
-        echo "    Old: {$old_base}\n";
-        echo "    New: {$new_base}\n";
+        echo "    Old: {$clean_old_base}\n";
+        echo "    New: {$clean_new_base}\n";
         echo " -> Automatically correcting all file paths in the database...\n";
         
         $success = false;
@@ -89735,8 +89992,9 @@ function perform_full_scan($db) {
         for ($attempt = 0; $attempt < $max_retries; $attempt++) {
           $db->beginTransaction();
           try {
-            // Replace the old prefix with the new prefix natively in SQLite, heavily bound to LIKE parameters
-            $db->prepare("UPDATE music SET file = ? || SUBSTR(file, ?) WHERE file LIKE ?")->execute([$new_base, strlen($old_base) + 1, $old_base . '/%']);
+            // Correct slice index (strlen + 2 skips the old trailing slash to avoid double-slash prefixes)
+            $db->prepare("UPDATE music SET file = ? || '/' || SUBSTR(file, ?) WHERE file LIKE ?")->execute([$clean_new_base, strlen($clean_old_base) + 2, $clean_old_base . '/%']);
+            $db->exec("UPDATE music SET file = REPLACE(file, '//', '/')");
             $db->commit();
             $success = true;
             break;
@@ -89766,9 +90024,18 @@ function perform_full_scan($db) {
     echo "Found " . count($db_files) . " records in the database.\n\n";
 
     echo "Step 6: Building differential processing queue...\n";
-    // Calculate the diffs
-    $files_to_add = array_diff_key($files_on_disk, $db_files);
-    $files_to_delete = array_diff_key($db_files, $files_on_disk);
+    // Normalize path keys so trailing slashes and backslashes do not cause false deletions
+    $norm_disk = [];
+    foreach ($files_on_disk as $p => $m) {
+      $norm_disk[str_replace('//', '/', str_replace('\\', '/', $p))] = $m;
+    }
+    $norm_db = [];
+    foreach ($db_files as $p => $m) {
+      $norm_db[str_replace('//', '/', str_replace('\\', '/', $p))] = $m;
+    }
+
+    $files_to_add = array_diff_key($norm_disk, $norm_db);
+    $files_to_delete = array_diff_key($norm_db, $norm_disk);
     $files_to_update = [];
 
     foreach (array_intersect_key($files_on_disk, $db_files) as $filePath => $mtime) {
@@ -96855,20 +97122,25 @@ function perform_cover_scan($db) {
         flex: 0 0 auto;
         display: flex;
         flex-direction: column;
-        align-items: flex-end;
-        gap: 0.5rem;
+        align-items: flex-end !important;
+        justify-content: flex-end !important;
         margin-left: auto;
+        gap: 0.5rem;
+        text-align: right;
       }
 
       .top-filter-tabs {
-        display: flex;
+        display: inline-flex;
         align-items: center;
+        justify-content: flex-start !important;
         gap: 1rem;
         border-bottom: 1px solid rgba(255, 255, 255, 0.2);
         padding-bottom: 4px;
-        overflow-x: auto;
+        overflow-x: auto !important;
         scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
         max-width: 100%;
+        white-space: nowrap;
       }
 
       .top-filter-tabs::-webkit-scrollbar {
@@ -96885,6 +97157,7 @@ function perform_cover_scan($db) {
         cursor: pointer;
         position: relative;
         white-space: nowrap;
+        flex-shrink: 0;
         transition: color 0.2s ease;
       }
 
@@ -96915,6 +97188,8 @@ function perform_cover_scan($db) {
         text-decoration: none;
         display: inline-flex;
         align-items: center;
+        justify-content: flex-end !important;
+        margin-left: auto;
         gap: 4px;
       }
 
@@ -97212,6 +97487,14 @@ function perform_cover_scan($db) {
           margin-bottom: 0.85rem;
         }
 
+        .top-tracks-header-right {
+          width: 100%;
+          align-items: flex-end !important;
+          justify-content: flex-end !important;
+          margin-left: auto;
+          text-align: right;
+        }
+
         .top-tracks-title {
           font-size: 1.35rem;
         }
@@ -97221,7 +97504,17 @@ function perform_cover_scan($db) {
         }
 
         .top-filter-tabs {
+          width: 100%;
+          justify-content: flex-start !important;
+          overflow-x: auto !important;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
           gap: 0.75rem;
+        }
+
+        .top-view-more-link {
+          margin-left: auto;
+          justify-content: flex-end !important;
         }
 
         .top-filter-tab {
@@ -122775,6 +123068,12 @@ SOFTWARE.</div>
         });
     
         if (fullScanModalEl && fullScanIframe) {
+          fullScanModalEl.addEventListener("show.bs.modal", () => {
+            if (!fullScanIframe.src || fullScanIframe.src === "about:blank" || fullScanIframe.src.endsWith("about:blank")) {
+              fullScanIframe.src = "?action=full_scan";
+            }
+          });
+
           fullScanModalEl.addEventListener("hidden.bs.modal", () => {
             if (!window.isHidingScan) {
               fullScanIframe.src = "about:blank";
@@ -136317,7 +136616,7 @@ SOFTWARE.</div>
             const fullScanIframe = document.getElementById("full-scan-iframe");
             if (fullScanIframe) {
               window.isHidingScan = true;
-              fullScanIframe.src = "?action=full_scan";
+              fullScanIframe.src = "?action=full_scan&auto=1";
               const pill = document.getElementById("scan-progress-pill");
               if (pill) {
                 pill.classList.remove("d-none");
