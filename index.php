@@ -6274,7 +6274,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.0');
+define('APP_VERSION', '13.1');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -23000,6 +23000,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
   }
 
   function migrateArtworkAssetsFormat($db, $config) {
+    global $baseDir;
     try {
       $stmt = $db->query("
         SELECT ai.id as img_id, ai.artwork_id, ai.file_name, ai.sort_order, a.user_id
@@ -23587,7 +23588,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $config['allowed_exts'] = array_values(array_diff($config['allowed_exts'], ['mp4', 'webm', 'mov', 'mkv', 'ogg']));
     }
     
-    // Custom post cards pagination & top rankings container settings$config['page_size'] = max(4, min(200, (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_page_size'")->fetchColumn() ?: 24)));
+    // Custom post cards pagination & top rankings container settings
+    $config['page_size'] = max(4, min(200, (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_page_size'")->fetchColumn() ?: 24)));
     $config['enable_rankings_hero'] = $db->query("SELECT value FROM site_settings WHERE key = 'art_enable_rankings_hero'")->fetchColumn() !== '0';
     $config['rankings_hero_limit'] = max(3, min(50, (int)($db->query("SELECT value FROM site_settings WHERE key = 'art_rankings_hero_limit'")->fetchColumn() ?: 10)));
     $config['rankings_hero_period'] = $db->query("SELECT value FROM site_settings WHERE key = 'art_rankings_hero_period'")->fetchColumn() ?: 'day';
@@ -24518,7 +24520,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
       $artworkId = intval($_POST['id'] ?? 0);
       $title = trim($_POST['title'] ?? '');
       $seriesName = trim($_POST['series_name'] ?? '');
-      $type = in_array($_POST['type'] ?? '', ['illust', 'video', 'manga', 'novel']) ? $_POST['type'] : 'illust';
+      $type = in_array($_POST['type'] ?? '', ['illust', 'video', 'manga', 'novel', 'product/advertisement']) ? $_POST['type'] : 'illust';
 
       // Auto-assign series name and auto-increment next chapter number for manga and novel
       if ($type === 'manga' || $type === 'novel') {
@@ -24770,11 +24772,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         if ($type !== 'manga' && strpos($leadMime, 'video/') === 0) $type = 'video';
   
         if ($artworkId > 0) {
-          $stmt = $db->prepare("SELECT id, user_id FROM artworks WHERE id = ?");
+          $stmt = $db->prepare("SELECT id, user_id, type FROM artworks WHERE id = ?");
           $stmt->execute([$artworkId]);
           $existing = $stmt->fetch();
           if (!$existing || ($existing['user_id'] != $user['id'] && !$user['is_admin'])) {
             jsonResponse(['error' => 'Unauthorized or artwork not found.'], 403);
+          }
+
+          $oldType = $existing['type'] ?? 'illust';
+          // Strict Type Guard: Novels cannot be turned into Artworks/Manga and vice-versa
+          if ($oldType === 'novel' && $type !== 'novel') {
+            jsonResponse(['error' => 'Strict Policy: A novel cannot be converted into an artwork, manga, or video.'], 400);
+          }
+          if ($oldType !== 'novel' && $type === 'novel') {
+            jsonResponse(['error' => 'Strict Policy: An existing artwork or manga cannot be converted into a novel.'], 400);
+          }
+          if ($oldType === 'manga' && $type !== 'manga') {
+            jsonResponse(['error' => 'Strict Policy: A manga series cannot be converted into an illustration or video.'], 400);
+          }
+          if ($oldType !== 'manga' && $oldType !== 'novel' && $type === 'manga') {
+            jsonResponse(['error' => 'Strict Policy: An existing illustration or video cannot be converted into a manga series.'], 400);
           }
   
           $stmt = $db->prepare("
@@ -24964,7 +24981,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         $where[] = "a.type = 'novel'";
       } elseif ($feed === 'artworks' || $type === 'artworks') {
         $where[] = "a.type NOT IN ('manga', 'novel')";
-      } elseif ($type !== 'all' && in_array($type, ['illust', 'video', 'manga', 'novel'])) {
+      } elseif ($type !== 'all' && in_array($type, ['illust', 'video', 'manga', 'novel', 'product/advertisement'])) {
         $where[] = "a.type = ?";
         $params[] = $type;
       }
@@ -27293,30 +27310,31 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: none !important;
         }
 
-        /* Popular Artworks Rankings Hero Banner */
+        /* Popular Rankings Hero Banner Container */
         .popular-hero-banner {
           position: relative;
           border-radius: 20px;
           overflow: hidden;
-          margin-bottom: 2rem;
-          padding: 1.5rem 2rem 1.1rem 2rem;
-          box-shadow: var(--shadow-lg);
-          border: 1px solid rgba(255, 255, 255, 0.12);
+          margin-bottom: 2.2rem;
+          padding: 1.8rem 2.4rem 1.4rem 2.4rem;
+          box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          background: #080c10;
         }
         .popular-hero-bg {
           position: absolute;
           inset: -30px;
           background-size: cover;
           background-position: center 25%;
-          filter: blur(34px) brightness(0.42);
+          filter: blur(48px) brightness(0.35);
           transform: scale(1.15);
           z-index: 1;
-          transition: background-image 0.35s ease;
+          transition: background-image 0.4s ease;
         }
         .popular-hero-overlay {
           position: absolute;
           inset: 0;
-          background: linear-gradient(180deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0.7) 100%);
+          background: linear-gradient(180deg, rgba(8, 14, 18, 0.5) 0%, rgba(5, 8, 10, 0.88) 100%);
           z-index: 2;
         }
         .popular-hero-content {
@@ -27324,95 +27342,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           z-index: 3;
           display: flex;
           flex-direction: column;
-          gap: 0.85rem;
+          gap: 1.1rem;
         }
-        .popular-hero-top-nav {
+        .popular-hero-header-row {
           display: flex;
           justify-content: space-between;
-          align-items: center;
+          align-items: flex-start;
           gap: 1rem;
           width: 100%;
           flex-wrap: wrap;
-          overflow: hidden;
         }
-        .popular-nav-scroll-group {
-          display: flex;
-          align-items: center;
-          gap: 0.85rem;
-          overflow-x: auto;
-          overflow-y: hidden !important;
-          white-space: nowrap;
-          scrollbar-width: none;
-          -webkit-overflow-scrolling: touch;
-          max-width: 100%;
-          padding: 0;
-          margin: 0;
-          box-sizing: border-box;
-        }
-        .popular-nav-scroll-group::-webkit-scrollbar {
-          display: none;
-          height: 0;
-          width: 0;
-        }
-        .popular-period-tabs {
-          display: inline-flex;
-          gap: 1.1rem;
-          align-items: center;
-          border-bottom: 2px solid rgba(255, 255, 255, 0.18);
-          padding: 0;
-          margin: 0;
-          white-space: nowrap;
-          flex-shrink: 0;
-          box-sizing: border-box;
-          overflow-y: hidden !important;
-        }
-        .period-tab-btn {
-          font-size: 0.92rem;
-          font-weight: 700;
-          color: rgba(255, 255, 255, 0.65);
-          background: none;
-          border: none;
-          border-bottom: 2px solid transparent;
-          cursor: pointer;
-          padding: 0 2px 6px 2px;
-          margin-bottom: -2px;
-          transition: color 0.15s ease, border-color 0.15s ease;
-          text-transform: lowercase;
-          white-space: nowrap;
-          flex-shrink: 0;
-          box-sizing: border-box;
-        }
-        .period-tab-btn:hover {
-          color: #ffffff;
-        }
-        .period-tab-btn.active {
-          color: #ffffff;
-          border-bottom: 2px solid #ffffff;
-        }
-        .popular-view-more {
-          display: flex;
-          align-items: center;
-          gap: 3px;
-          color: #ffffff;
-          font-size: 0.92rem;
-          font-weight: 600;
-          text-decoration: none;
-          opacity: 0.85;
-          transition: opacity 0.15s ease, transform 0.15s ease;
-          flex-shrink: 0;
-        }
-        .popular-view-more:hover {
-          opacity: 1;
-          transform: translateX(2px);
-        }
-        .popular-hero-text {
+        .popular-hero-title-group {
           display: flex;
           flex-direction: column;
-          gap: 0.25rem;
-          overflow: hidden;
+          gap: 0.2rem;
+          min-width: 220px;
         }
         .popular-hero-title {
-          font-size: 1.55rem;
+          font-size: 1.65rem;
           font-weight: 800;
           color: #ffffff;
           margin: 0;
@@ -27420,192 +27367,316 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         }
         .popular-hero-sub {
           font-size: 0.84rem;
-          color: rgba(255, 255, 255, 0.85);
+          color: rgba(255, 255, 255, 0.7);
           margin: 0;
-          line-height: 1.45;
-          max-width: 850px;
+          line-height: 1.4;
         }
-        .popular-carousel-wrapper {
-          position: relative;
-          width: 100%;
-          display: flex;
-          align-items: center;
-          margin: 0.4rem 0;
-          overflow-y: hidden !important;
-        }
-        .popular-carousel-track {
-          display: flex;
-          gap: 1.15rem;
-          overflow-x: auto;
-          overflow-y: hidden !important;
-          scroll-behavior: smooth;
-          scrollbar-width: none;
-          width: 100%;
-          padding: 6px 2px 10px 2px;
-          box-sizing: border-box;
-        }
-        .popular-carousel-track::-webkit-scrollbar {
-          display: none;
-        }
-        .popular-carousel-arrow {
-          position: absolute;
-          top: 50%;
-          transform: translateY(-50%);
-          width: 44px;
-          height: 44px;
-          border-radius: 50%;
-          background: rgba(0, 0, 0, 0.55);
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
-          border: 1px solid rgba(255, 255, 255, 0.2);
-          color: #ffffff;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 10;
-          cursor: pointer;
-          transition: background 0.15s ease, transform 0.15s ease;
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
-        }
-        .popular-carousel-arrow:hover {
-          background: rgba(0, 0, 0, 0.85);
-          transform: translateY(-50%) scale(1.08);
-        }
-        .popular-carousel-arrow.left { left: -18px; }
-        .popular-carousel-arrow.right { right: -18px; }
-        
-        /* Ranked Card Component (Matching UI Screenshot) */
-        .popular-card {
-          flex: 0 0 200px;
-          width: 200px;
-          border-radius: 12px;
-          overflow: hidden;
-          background: #ffffff;
-          cursor: pointer;
+        .popular-hero-nav-group {
           display: flex;
           flex-direction: column;
-          transition: transform 0.2s ease, box-shadow 0.2s ease;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-          border: 1px solid rgba(255, 255, 255, 0.15);
+          align-items: flex-end;
+          gap: 0.45rem;
+          flex-shrink: 0;
         }
-        .popular-card:hover {
-          transform: translateY(-4px);
-          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.7);
+        .popular-period-tabs {
+          display: inline-flex;
+          gap: 1.2rem;
+          align-items: center;
+          border-bottom: 2px solid rgba(255, 255, 255, 0.18);
+          padding: 0 0 3px 0;
+          margin: 0;
+          white-space: nowrap;
+          flex-shrink: 0;
         }
-        .popular-card-thumb {
+        .period-tab-btn {
+          font-size: 0.9rem;
+          font-weight: 700;
+          color: rgba(255, 255, 255, 0.65);
+          background: none;
+          border: none;
+          border-bottom: 2px solid transparent;
+          cursor: pointer;
+          padding: 0 2px 4px 2px;
+          margin-bottom: -5px;
+          transition: color 0.15s ease, border-color 0.15s ease;
+          text-transform: lowercase;
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .period-tab-btn:hover {
+          color: #ffffff;
+        }
+        .period-tab-btn.active {
+          color: #ffffff;
+          border-bottom: 2px solid var(--accent, #ff0044);
+        }
+        .popular-view-more {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          color: rgba(255, 255, 255, 0.78);
+          font-size: 0.85rem;
+          font-weight: 600;
+          text-decoration: none !important;
+          transition: color 0.15s ease, transform 0.15s ease;
+          padding: 0;
+        }
+        .popular-view-more:hover {
+          color: #ffffff;
+          transform: translateX(2px);
+        }
+        .popular-view-more svg {
+          width: 15px;
+          height: 15px;
+          fill: currentColor;
+        }
+
+        /* Inner Spotlight Container Card */
+        .spotlight-wrapper {
+          position: relative;
+          margin: 0.4rem 0 0.1rem 0;
+          width: 100%;
+        }
+        .spotlight-carousel {
           position: relative;
           width: 100%;
-          aspect-ratio: 1 / 1;
-          background: #18181c;
           overflow: hidden;
+          border-radius: 18px;
+          background: rgba(18, 22, 28, 0.82);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 32px rgba(0, 0, 0, 0.55);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
         }
-        .popular-card-thumb img {
+        .spotlight-slides {
+          display: flex;
+          transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+        }
+        .spotlight-slide {
+          min-width: 100%;
+          display: flex;
+          align-items: center;
+          padding: 1.6rem 2.2rem;
+          gap: 2rem;
+          box-sizing: border-box;
+          transition: opacity 0.3s ease;
+          cursor: pointer;
+        }
+        .spotlight-cover-wrap {
+          position: relative;
+          width: 165px;
+          height: 165px;
+          border-radius: 14px;
+          overflow: hidden;
+          flex-shrink: 0;
+          box-shadow: 0 10px 28px rgba(0, 0, 0, 0.7);
+          background: #08080a;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .spotlight-cover-wrap img {
           width: 100%;
           height: 100%;
           object-fit: cover;
           display: block;
         }
-        .popular-card-rank-badge {
+        .spotlight-rank-badge {
           position: absolute;
           top: 8px;
           left: 8px;
+          background: #f59e0b;
+          color: #000000;
           font-size: 0.72rem;
           font-weight: 800;
-          padding: 2.5px 7.5px;
-          border-radius: 4px;
-          line-height: 1.2;
-          z-index: 3;
+          padding: 2px 7px;
+          border-radius: 6px;
           box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+          z-index: 2;
         }
-        .popular-card-rank-badge.rank-1 { background: #eab308; color: #000000; }
-        .popular-card-rank-badge.rank-2 { background: #94a3b8; color: #ffffff; }
-        .popular-card-rank-badge.rank-3 { background: #c2410c; color: #ffffff; }
-        .popular-card-rank-badge.rank-other { background: rgba(148, 163, 184, 0.65); color: #ffffff; backdrop-filter: blur(4px); }
-        .popular-card-views {
-          display: none !important;
+        .spotlight-info {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          gap: 0.35rem;
         }
-        .popular-card-info {
-          background: #ffffff;
-          color: #111111;
-          padding: 0.65rem 0.85rem;
+        .spotlight-tag-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          color: #f43f5e;
+          font-size: 0.72rem;
+          font-weight: 800;
+          letter-spacing: 0.6px;
+          text-transform: uppercase;
+        }
+        .spotlight-title {
+          font-size: 1.65rem;
+          font-weight: 800;
+          color: #ffffff;
+          margin: 0;
+          line-height: 1.25;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          letter-spacing: -0.4px;
+        }
+        .spotlight-author-row {
           display: flex;
           align-items: center;
-          gap: 0.65rem;
+          gap: 0.5rem;
+          font-size: 0.88rem;
+          color: rgba(255, 255, 255, 0.75);
+          margin-top: 0.15rem;
         }
-        .popular-card-avatar {
-          width: 32px;
-          height: 32px;
+        .spotlight-author-avatar {
+          width: 22px;
+          height: 22px;
           border-radius: 50%;
-          background: #ffffff;
-          border: 1.5px solid #e2e8f0;
+          object-fit: cover;
+          background: var(--bg-surface-elevated);
+          flex-shrink: 0;
+        }
+        .spotlight-meta-row {
+          display: flex;
+          align-items: center;
+          gap: 1.2rem;
+          font-size: 0.82rem;
+          color: rgba(255, 255, 255, 0.6);
+          margin-top: 0.4rem;
+        }
+        .spotlight-meta-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+        }
+
+        /* Half-Outside Chevrons */
+        .spotlight-controls {
+          position: absolute;
+          top: 50%;
+          left: 0;
+          right: 0;
+          transform: translateY(-50%);
+          display: flex;
+          justify-content: space-between;
+          pointer-events: none;
+          z-index: 10;
+        }
+        .spotlight-btn {
+          width: 44px;
+          height: 44px;
+          border-radius: 50%;
+          background: rgba(18, 20, 24, 0.95);
+          color: #ffffff;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          cursor: pointer;
+          pointer-events: auto;
+          transition: all 0.2s ease;
+          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+        }
+        .spotlight-btn:hover {
+          background: var(--accent, #ff0044);
+          border-color: var(--accent, #ff0044);
+          transform: scale(1.08);
+        }
+        .spotlight-btn.left {
+          margin-left: -22px;
+        }
+        .spotlight-btn.right {
+          margin-right: -22px;
+        }
+
+        /* Bottom Section: Dots & Attribution */
+        .popular-hero-bottom-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          position: relative;
+          margin-top: 0.4rem;
+          width: 100%;
+        }
+        .spotlight-dots {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-weight: 800;
-          font-size: 0.85rem;
-          color: #0f172a;
-          flex-shrink: 0;
-          overflow: hidden;
+          gap: 6px;
+          flex: 1;
         }
-        .popular-card-avatar img {
-          width: 100%;
-          height: 100%;
-          object-fit: cover;
+        .spotlight-dot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          background: rgba(255, 255, 255, 0.22);
+          cursor: pointer;
+          transition: all 0.25s ease;
         }
-        .popular-card-text {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-          gap: 1px;
-        }
-        .popular-card-title {
-          font-size: 0.88rem;
-          font-weight: 800;
-          color: #0f172a;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .popular-card-author {
-          font-size: 0.76rem;
-          color: #64748b;
-          font-weight: 500;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+        .spotlight-dot.active {
+          background: var(--accent, #ff0044);
+          width: 22px;
+          border-radius: 4px;
         }
         .popular-hero-attribution {
-          align-self: flex-end;
-          font-size: 0.88rem;
-          color: rgba(255, 255, 255, 0.88);
-          font-weight: 500;
-          text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+          position: absolute;
+          right: 0;
+          font-size: 0.78rem;
+          color: rgba(255, 255, 255, 0.5);
+          white-space: nowrap;
+        }
+        .popular-hero-attribution a {
+          color: rgba(255, 255, 255, 0.85);
+          text-decoration: underline;
+          font-weight: 600;
         }
 
-        @media (max-width: 768px) {
+        @media (max-width: 860px) {
           .popular-hero-banner {
-            padding: 1.1rem 1rem 0.9rem 1rem;
-            border-radius: 14px;
-            margin-bottom: 1.4rem;
+            padding: 1.2rem 1.1rem 1rem 1.1rem;
+            border-radius: 16px;
           }
-          .popular-hero-top-nav {
-            justify-content: space-between;
-            gap: 0.6rem;
+          .popular-hero-header-row {
+            flex-direction: column;
+            gap: 0.8rem;
           }
-          .popular-period-tabs {
-            gap: 0.9rem;
-            overflow-x: auto;
+          .popular-hero-nav-group {
+            align-items: flex-start;
             width: 100%;
           }
-          .period-tab-btn {
-            font-size: 0.85rem;
+          .popular-period-tabs {
+            width: 100%;
+            overflow-x: auto;
+            scrollbar-width: none;
           }
-          .popular-card {
-            flex: 0 0 155px;
-            width: 155px;
+          .spotlight-slide {
+            flex-direction: column;
+            text-align: center;
+            padding: 1.4rem 1.1rem;
+            gap: 1.1rem;
           }
-          .popular-carousel-arrow {
+          .spotlight-cover-wrap {
+            width: 140px;
+            height: 140px;
+            margin: 0 auto;
+          }
+          .spotlight-author-row {
+            justify-content: center;
+          }
+          .spotlight-meta-row {
+            justify-content: center;
+          }
+          .spotlight-controls {
             display: none;
+          }
+          .popular-hero-bottom-row {
+            flex-direction: column;
+            gap: 0.6rem;
+            align-items: center;
+          }
+          .popular-hero-attribution {
+            position: static;
           }
         }
 
@@ -29665,8 +29736,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               this.loadSidebarTags();
             }
   
-            window.addEventListener('hashchange', () => this.handleRoute());
             this.handleRoute();
+          }
+
+          goToSpotlight(index, total) {
+            if (index < 0) index = total - 1;
+            if (index >= total) index = 0;
+            this.currentSpotlightIndex = index;
+            const track = document.getElementById('spotlight-track');
+            if (track) {
+              track.style.transform = `translateX(-${index * 100}%)`;
+              let covers = [];
+              try {
+                covers = JSON.parse(decodeURIComponent(track.dataset.covers || '[]'));
+              } catch(e) {
+                try { covers = JSON.parse(track.dataset.covers || '[]'); } catch(err) {}
+              }
+              const bg = document.querySelector('.popular-hero-bg');
+              if (bg && covers[index]) {
+                bg.style.backgroundImage = `url('${covers[index]}')`;
+              }
+            }
+            document.querySelectorAll('.spotlight-dot').forEach((d, i) => {
+              d.classList.toggle('active', i === index);
+            });
           }
     
           setTitle(pageTitle) {
@@ -29747,45 +29840,73 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 ? `#/user/${userId}?tab=rankings&period=${period === 'all' ? 'all_time' : period}`
                 : `#/rankings?period=${period === 'all' ? 'all_time' : period}`;
 
-              const trackId = `popular-track-${mountId}`;
+              this.currentSpotlightIndex = 0;
+              const coversArr = artworks.map(a => a.cover_file ? `?access=artwork&action=raw&f=${encodeURIComponent(a.cover_file)}` : '');
 
-              const cardsHtml = artworks.map((art, idx) => {
-                const rankNum = idx + 1;
-                let rankClass = 'rank-other';
-                if (rankNum === 1) rankClass = 'rank-1';
-                else if (rankNum === 2) rankClass = 'rank-2';
-                else if (rankNum === 3) rankClass = 'rank-3';
-
+              const slidesHtml = artworks.map((art, idx) => {
                 const thumbUrl = art.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(art.cover_file)}` : '';
-                const initial = (art.artist_name || 'A').charAt(0).toUpperCase();
-
+                const avatarUrl = this.getAvatar(art.avatar, art.artist_name, art.email_hash);
+                const isR18 = art.rating === 'r18';
+                const typeLabel = art.type === 'manga' ? 'Manga' : (art.type === 'novel' ? 'Novel' : (art.type === 'product/advertisement' ? 'Product' : (art.type === 'video' ? 'Video' : 'Artwork')));
+                const rankNum = idx + 1;
+                
                 return `
-                  <div class="popular-card" onclick="app.nav('#/artwork/${art.id}')">
-                    <div class="popular-card-thumb">
-                      <span class="popular-card-rank-badge ${rankClass}">No. ${rankNum}</span>
-                      <img src="${thumbUrl}" alt="${this.escape(art.title)}" loading="lazy" decoding="async" onerror="this.onerror=null; this.src='?action=get_app_icon&size=128';">
+                  <div class="spotlight-slide" onclick="app.nav('#/artwork/${art.id}')">
+                    <div class="spotlight-cover-wrap">
+                      <span class="spotlight-rank-badge">No. ${rankNum}</span>
+                      <img src="${thumbUrl}" alt="${this.escape(art.title)}" onerror="this.src='?action=get_app_icon'">
                     </div>
-                    <div class="popular-card-info">
-                      <div class="popular-card-avatar" title="${this.escape(art.artist_name)}">
-                        ${art.avatar ? `<img src="${art.avatar}" alt="" onerror="this.parentElement.innerHTML='${initial}';">` : initial}
+                    <div class="spotlight-info">
+                      <div class="spotlight-tag-badge">
+                        <svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:currentColor;"><path d="M12 23c-4.97 0-9-4.03-9-9 0-3.53 2.04-6.58 5-8.05v2.32C6.18 9.4 5 11.55 5 14c0 3.86 3.14 7 7 7s7-3.14 7-7c0-2.45-1.18-4.6-3-5.73V5.95c2.96 1.47 5 4.52 5 8.05 0 4.97-4.03 9-9 9zM12 2C6.48 2 2 6.48 2 12c0 2.85 1.2 5.42 3.11 7.24.47-.79 1.15-1.46 1.99-1.92C5.8 15.86 5 14.04 5 12c0-3.87 3.13-7 7-7s7 3.13 7 7c0 2.04-.8 3.86-2.1 5.32.84.46 1.52 1.13 1.99 1.92C20.8 17.42 22 14.85 22 12c0-5.52-4.48-10-10-10z"/></svg>
+                        <span>SPOTLIGHT ${typeLabel.toUpperCase()}</span>
                       </div>
-                      <div class="popular-card-text">
-                        <div class="popular-card-title" title="${this.escape(art.title)}">${this.escape(art.title)}</div>
-                        <div class="popular-card-author">${this.escape(art.artist_name)}</div>
+                      <h3 class="spotlight-title" title="${this.escape(art.title)}">${this.escape(art.title)}</h3>
+                      <div class="spotlight-author-row">
+                        <img src="${avatarUrl}" class="spotlight-author-avatar" alt="" onerror="app.handleAvatarError(this)">
+                        <span>${this.escape(art.artist_name)}</span>
+                        <span>&bull;</span>
+                        <span>${typeLabel}</span>
+                        ${isR18 ? '<span class="badge bg-danger ms-1" style="font-size:0.62rem; padding:1px 5px; font-weight:800;">R-18</span>' : ''}
+                      </div>
+                      <div class="spotlight-meta-row">
+                        <span class="spotlight-meta-item">
+                          <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;opacity:0.75;"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                          <span>${this.formatCompactNumber(art.view_count || art.total_views || 0)} views</span>
+                        </span>
+                        <span class="spotlight-meta-item">
+                          <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;opacity:0.75;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                          <span>${this.formatCompactNumber(art.like_count || art.total_likes || 0)} likes</span>
+                        </span>
+                        ${(art.page_count && art.page_count > 1) ? `
+                          <span class="spotlight-meta-item">
+                            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;opacity:0.75;"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg>
+                            <span>${art.page_count} Pages</span>
+                          </span>
+                        ` : ''}
                       </div>
                     </div>
                   </div>
                 `;
               }).join('');
 
+              const dotsHtml = artworks.map((_, idx) => `
+                <div class="spotlight-dot ${idx === 0 ? 'active' : ''}" onclick="event.stopPropagation(); app.goToSpotlight(${idx}, ${artworks.length})"></div>
+              `).join('');
+
               mount.innerHTML = `
                 <div class="popular-hero-banner">
-                  <div class="popular-hero-bg" style="background-image: url('${topBgUrl}');"></div>
+                  <div class="popular-hero-bg" id="popular-hero-bg" style="background-image: url('${topBgUrl}');"></div>
                   <div class="popular-hero-overlay"></div>
                   
                   <div class="popular-hero-content">
-                    <div class="popular-hero-top-nav">
-                      <div class="popular-nav-scroll-group">
+                    <div class="popular-hero-header-row">
+                      <div class="popular-hero-title-group">
+                        <h2 class="popular-hero-title">${this.escape(heroTitle)}</h2>
+                        <p class="popular-hero-sub">${this.escape(subText)}</p>
+                      </div>
+
+                      <div class="popular-hero-nav-group">
                         <div class="popular-period-tabs">
                           <button type="button" class="period-tab-btn ${period === 'day' ? 'active' : ''}" onclick="app.switchPopularPeriod('day', ${userId}, '${this.escape(artistName)}', '${mountId}')">this day</button>
                           <button type="button" class="period-tab-btn ${period === 'week' ? 'active' : ''}" onclick="app.switchPopularPeriod('week', ${userId}, '${this.escape(artistName)}', '${mountId}')">this week</button>
@@ -29793,37 +29914,39 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           <button type="button" class="period-tab-btn ${period === 'year' ? 'active' : ''}" onclick="app.switchPopularPeriod('year', ${userId}, '${this.escape(artistName)}', '${mountId}')">this year</button>
                           <button type="button" class="period-tab-btn ${period === 'all' ? 'active' : ''}" onclick="app.switchPopularPeriod('all', ${userId}, '${this.escape(artistName)}', '${mountId}')">all time</button>
                         </div>
+                        <a href="${viewMoreUrl}" class="popular-view-more">
+                          <span>view more</span>
+                          <svg viewBox="0 0 24 24"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+                        </a>
                       </div>
-                      <a href="${viewMoreUrl}" class="popular-view-more flex-shrink-0 ms-auto">
-                        <span>view more</span>
-                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M8.59 16.59L13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
-                      </a>
                     </div>
 
-                    <div class="popular-hero-text">
-                      <h2 class="popular-hero-title">${heroTitle}</h2>
-                      <p class="popular-hero-sub">${subText}</p>
+                    <div class="spotlight-wrapper">
+                      <div class="spotlight-carousel">
+                        <div class="spotlight-slides" id="spotlight-track" data-covers="${encodeURIComponent(JSON.stringify(coversArr))}">
+                          ${slidesHtml}
+                        </div>
+                      </div>
+                      <div class="spotlight-controls">
+                        <div class="spotlight-btn left" onclick="event.stopPropagation(); app.goToSpotlight(app.currentSpotlightIndex - 1, ${artworks.length})" title="Previous">
+                          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor;"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                        </div>
+                        <div class="spotlight-btn right" onclick="event.stopPropagation(); app.goToSpotlight(app.currentSpotlightIndex + 1, ${artworks.length})" title="Next">
+                          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor;"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </div>
+                      </div>
                     </div>
 
-                    <div class="popular-carousel-wrapper">
-                      <button type="button" class="popular-carousel-arrow left" onclick="app.scrollPopularCarousel(-1, '${trackId}')" title="Previous">
-                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
-                      </button>
-
-                      <div class="popular-carousel-track" id="${trackId}">
-                        ${cardsHtml}
+                    <div class="popular-hero-bottom-row">
+                      <div class="spotlight-dots">
+                        ${dotsHtml}
                       </div>
-
-                      <button type="button" class="popular-carousel-arrow right" onclick="app.scrollPopularCarousel(1, '${trackId}')" title="Next">
-                        <svg viewBox="0 0 24 24" style="width:18px;height:18px;"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
-                      </button>
+                      ${userId <= 0 ? `
+                        <div class="popular-hero-attribution">
+                          image by <a href="#/user/${topArtistId}" onclick="event.stopPropagation();">${this.escape(topArtist)}</a>
+                        </div>
+                      ` : ''}
                     </div>
-
-                    ${userId <= 0 ? `
-                      <div class="popular-hero-attribution">
-                        image by <a href="#/user/${topArtistId}" style="color:#ffffff; font-weight:700; text-decoration:underline; cursor:pointer;" onclick="event.stopPropagation();">${this.escape(topArtist)}</a>
-                      </div>
-                    ` : ''}
                   </div>
                 </div>
               `;
@@ -30080,9 +30203,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               ? `style="--thumb-ratio: ${imgW} / ${imgH}; aspect-ratio: ${imgW} / ${imgH} !important;"` 
               : '';
 
-            // Extract tags for HDPost preview pills
+            // Extract tags and prepend R-18 as the first child pill
             const rawTags = art.tag_list || (art.tags ? art.tags.split(/[,，、\s]+/).filter(Boolean) : []);
-            const tagsHtml = rawTags.slice(0, 3).map(t => `<span class="art-card-tag-pill">#${this.escape(t.replace(/^#/, ''))}</span>`).join('');
+            const tagPills = rawTags.slice(0, 3).map(t => `<span class="art-card-tag-pill">#${this.escape(t.replace(/^#/, ''))}</span>`);
+
+            if (art.rating === 'r18') {
+              tagPills.unshift(`<span class="art-card-tag-pill" style="color:var(--r18); background:rgba(255,0,68,0.15); border-color:rgba(255,0,68,0.35); font-weight:800;">R-18</span>`);
+            }
+
+            const tagsHtml = tagPills.length > 0 ? `<div class="art-card-tags-row">${tagPills.join('')}</div>` : '';
 
             if (isList) {
               return `
@@ -30127,17 +30256,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     ${options.totalChapters ? `<span class="badge-pill page-pill"><svg viewBox="0 0 24 24" style="width:11px;height:11px;"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg> ${options.totalChapters} Ch.</span>` : ''}
                   </div>
 
-                  <!-- Top-Left Flags -->
+                  <!-- Top-Left Flags (Space-Saving) -->
                   <div style="position:absolute; top:8px; left:8px; display:flex; flex-direction:column; gap:4px; z-index:5;">
                     ${isVid ? `<div class="badge-flag video" style="position:static;">VIDEO</div>` : ''}
                     ${isManga ? `<div class="badge-flag manga" style="position:static;">MANGA</div>` : ''}
                     ${isNovel ? `<div class="badge-flag novel" style="position:static;">NOVEL</div>` : ''}
-                    ${art.rating === 'r18' ? `<div class="badge-flag badge-r18" style="position:static;">R-18</div>` : ''}
+                    ${art.type === 'product/advertisement' ? `<div class="badge-flag" style="position:static;background:#f59e0b;color:#000;">PRODUCT</div>` : ''}
                     ${art.is_ai ? `<div class="badge-flag ai" style="position:static;">AI</div>` : ''}
                   </div>
                 </div>
 
-                <!-- HDPost Structured Bottom Info Section -->
+                <!-- HDPost Structured Bottom Info Section with R-18 in Tag Pills -->
                 <div class="art-card-info">
                   <div class="art-card-title" title="${this.escape(art.title || art.series_title || '')}">
                     ${this.escape(art.title || art.series_title || '')}
@@ -30146,7 +30275,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     ${avatarUrl && !options.noAvatar ? `<img src="${avatarUrl}" class="art-card-avatar" alt="" onerror="app.handleAvatarError(this)">` : ''}
                     <span class="text-truncate">${this.escape(art.artist_name || '')}</span>
                   </div>
-                  ${tagsHtml ? `<div class="art-card-tags-row">${tagsHtml}</div>` : ''}
+                  ${tagsHtml}
                   <div class="art-card-bottom-stats">
                     <span>${viewCount.toLocaleString()} views</span>
                     <span class="stat-btn ${art.user_liked ? 'active' : ''}" onclick="event.stopPropagation(); app.toggleLike(${songId}, this)" title="Favorite">
@@ -30582,12 +30711,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             });
     
             const searchInput = document.getElementById('global-search');
-            searchInput.addEventListener('keydown', (e) => {
-              if (e.key === 'Enter') {
-                const q = searchInput.value.trim();
-                if (q) this.nav(`#/?q=${encodeURIComponent(q)}`);
-              }
-            });
+            if (searchInput) {
+              searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                  const q = searchInput.value.trim();
+                  if (q) this.nav(`#/?q=${encodeURIComponent(q)}`);
+                }
+              });
+            }
+
+            // Bind hash change listener for dynamic single-page routing
+            window.addEventListener('hashchange', () => this.handleRoute());
   
             window.addEventListener('keydown', (e) => {
               const tag = (e.target.tagName || '').toUpperCase();
@@ -34513,9 +34647,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       <a href="#/user/${prof.id}/following" style="color:inherit; text-decoration:none; cursor:pointer;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='inherit'"><strong>${prof.following_count}</strong> Following</a>
                     </div>
                   </div>
-                  <div style="display:flex; gap:0.6rem;">
+                  <div style="display:flex; gap:0.6rem; flex-wrap:wrap;">
                     ${isOwner ? `
-                      <a href="./" class="btn-subtle" title="Edit Profile &amp; Picture on PHP Music">Edit Profile on Music</a>
+                      <a href="?access=profiletree" target="_blank" class="btn-primary" style="background:#f59e0b; border-color:#f59e0b; color:#000;" title="Manage Featured Works & Products"><i class="bi bi-shop me-1"></i> Highlight Products</a>
+                      <a href="./" class="btn-subtle" title="Edit Profile &amp; Picture on PHP Music">Edit Profile</a>
                       <button class="btn-subtle" style="color:var(--r18);" onclick="app.logout()">Log Out</button>
                     ` : `
                       <button class="btn-primary" style="background:${prof.is_following ? 'var(--bg-surface-hover)' : 'var(--accent)'}; color:${prof.is_following ? 'var(--text-primary)' : '#fff'};" onclick="app.toggleFollow(${prof.id}, this)">
@@ -34960,12 +35095,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <div class="form-grid-2" style="margin-top:1rem;">
                     <div class="form-group">
                       <label class="form-label">Category</label>
-                      <select name="type" class="form-select custom-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
-                        <option value="illust" ${artData.type === 'illust' ? 'selected' : ''}>Illustration / Picture</option>
-                        <option value="manga" ${artData.type === 'manga' ? 'selected' : ''}>Manga / Comic Series</option>
-                        <option value="novel" ${artData.type === 'novel' ? 'selected' : ''}>Light Novel / Web Novel</option>
-                        ${this.allowVideo ? `<option value="video" ${artData.type === 'video' ? 'selected' : ''}>Animation / Video Clip</option>` : ''}
-                      </select>
+                      ${editId ? `
+                        <input type="hidden" name="type" id="studio-type-select" value="${artData.type}">
+                        <input type="text" class="admin-pill-input w-100 font-monospace text-warning fw-bold" value="${artData.type === 'novel' ? 'Light Novel / Web Novel (Locked)' : (artData.type === 'manga' ? 'Manga / Comic Series (Locked)' : (artData.type === 'product/advertisement' ? 'Product / Advertisement (Locked)' : (artData.type === 'video' ? 'Animation / Video Clip (Locked)' : 'Illustration / Picture (Locked)')))}" readonly disabled style="opacity:0.85; cursor:not-allowed;">
+                        <small class="text-secondary d-block mt-1" style="font-size:0.72rem;">Category is strictly locked for existing publications.</small>
+                      ` : `
+                        <select name="type" class="form-select custom-select" id="studio-type-select" onchange="app.toggleMangaStudioFields(this.value)">
+                          <option value="illust" ${artData.type === 'illust' ? 'selected' : ''}>Illustration / Picture</option>
+                          <option value="manga" ${artData.type === 'manga' ? 'selected' : ''}>Manga / Comic Series</option>
+                          <option value="novel" ${artData.type === 'novel' ? 'selected' : ''}>Light Novel / Web Novel</option>
+                          <option value="product/advertisement" ${artData.type === 'product/advertisement' ? 'selected' : ''}>Product / Advertisement</option>
+                          ${this.allowVideo ? `<option value="video" ${artData.type === 'video' ? 'selected' : ''}>Animation / Video Clip</option>` : ''}
+                        </select>
+                      `}
                     </div>
                     <div class="form-group">
                       <label class="form-label">Age Rating</label>
@@ -44986,7 +45128,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.0'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.1'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -49955,6 +50097,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <option value="illust" <?php echo $type_filter === 'illust' ? 'selected' : ''; ?>>Illustrations</option>
                     <option value="manga" <?php echo $type_filter === 'manga' ? 'selected' : ''; ?>>Manga</option>
                     <option value="novel" <?php echo $type_filter === 'novel' ? 'selected' : ''; ?>>Novels</option>
+                    <option value="product/advertisement" <?php echo $type_filter === 'product/advertisement' ? 'selected' : ''; ?>>Products / Ads</option>
                     <option value="video" <?php echo $type_filter === 'video' ? 'selected' : ''; ?>>Videos</option>
                   </select>
                   <select name="rating" class="admin-pill-select flex-shrink-0" style="font-size: 0.8rem; height: 38px; min-width: 110px;" onchange="this.form.submit()">
@@ -54562,7 +54705,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.0';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.1';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
