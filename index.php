@@ -6276,7 +6276,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.4');
+define('APP_VERSION', '13.5');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -23199,6 +23199,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     ");
 
     try { $db->exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT '';"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE users ADD COLUMN dates TEXT DEFAULT '';"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT '';"); } catch(Exception $e) {}
+    try { $db->exec("ALTER TABLE users ADD COLUMN place TEXT DEFAULT '';"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE users ADD COLUMN twitter TEXT DEFAULT '';"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE users ADD COLUMN website TEXT DEFAULT '';"); } catch(Exception $e) {}
     try { $db->exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;"); } catch(Exception $e) {}
@@ -23238,7 +23241,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
     $_SESSION['user_id'] = $uid;
 
     try {
-      $stmt = $db->prepare("SELECT id, artist as artist_name, email, COALESCE(bio, '') as bio, COALESCE(twitter, '') as twitter, COALESCE(website, '') as website, COALESCE(is_admin, 0) as is_admin, COALESCE(banned, 0) as is_banned, COALESCE(status, 'user') as status, COALESCE(created_at, 0) as created_at FROM users WHERE id = ?");
+      $stmt = $db->prepare("SELECT id, artist as artist_name, email, COALESCE(bio, '') as bio, COALESCE(dates, '') as dates, COALESCE(gender, '') as gender, COALESCE(place, '') as place, COALESCE(twitter, '') as twitter, COALESCE(website, '') as website, COALESCE(is_admin, 0) as is_admin, COALESCE(banned, 0) as is_banned, COALESCE(status, 'user') as status, COALESCE(created_at, 0) as created_at FROM users WHERE id = ?");
       $stmt->execute([$uid]);
       $user = $stmt->fetch();
       if (!$user || !empty($user['is_banned'])) {
@@ -24466,6 +24469,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           $imgInfo = @getimagesize($finalPath);
           $w = $imgInfo ? $imgInfo[0] : 0;
           $h = $imgInfo ? $imgInfo[1] : 0;
+          if ($imgInfo && $imgInfo['mime'] === 'image/jpeg' && function_exists('exif_read_data')) {
+            $exif = @exif_read_data($finalPath);
+            if (!empty($exif['Orientation']) && in_array((int)$exif['Orientation'], [5, 6, 7, 8], true)) {
+              list($w, $h) = [$h, $w];
+            }
+          }
           $sz = filesize($finalPath);
 
           $thumbName = 'thumb_' . $finalName . '.jpg';
@@ -25999,6 +26008,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             COALESCE(u.artist, 'Anonymous') as artist_name, 
             COALESCE(u.email, '') as email, 
             COALESCE(u.bio, '') as bio, 
+            COALESCE(u.dates, '') as dates,
+            COALESCE(u.gender, '') as gender,
+            COALESCE(u.place, '') as place,
             COALESCE(u.twitter, '') as twitter, 
             COALESCE(u.website, '') as website, 
             COALESCE(u.created_at, 0) as created_at, 
@@ -26957,8 +26969,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           margin-bottom: 0.4rem;
         }
 
-        /* Pixiv-Style Dynamic Search Tabs */
-        .search-pixiv-tabs {
+        /* phpmusicpost-Style Dynamic Search Tabs */
+        .search-phpmusicpost-tabs {
           display: flex;
           align-items: center;
           gap: 0.4rem;
@@ -26971,7 +26983,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           margin-bottom: 1.4rem;
           padding-bottom: 2px;
         }
-        .search-pixiv-tabs::-webkit-scrollbar {
+        .search-phpmusicpost-tabs::-webkit-scrollbar {
           display: none;
         }
         .search-tab-item {
@@ -27019,8 +27031,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           color: var(--accent);
         }
 
-        /* Pixiv-Style Highlighted Works / Products Showcase */
-        .pixiv-highlight-section {
+        /* phpmusicpost-Style Highlighted Works / Products Showcase */
+        .phpmusicpost-highlight-section {
           background: linear-gradient(180deg, rgba(245, 158, 11, 0.05) 0%, rgba(14, 14, 18, 0.95) 100%);
           border: 1px solid rgba(245, 158, 11, 0.25);
           border-radius: 16px;
@@ -27029,7 +27041,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           position: relative;
           box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
         }
-        .pixiv-highlight-header {
+        .phpmusicpost-highlight-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
@@ -27037,7 +27049,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           gap: 0.8rem;
           flex-wrap: wrap;
         }
-        .pixiv-highlight-title {
+        .phpmusicpost-highlight-title {
           font-size: 1.05rem;
           font-weight: 800;
           color: #ffffff;
@@ -27047,12 +27059,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           margin: 0;
           letter-spacing: -0.3px;
         }
-        .pixiv-highlight-title svg {
+        .phpmusicpost-highlight-title svg {
           width: 18px;
           height: 18px;
           fill: #f59e0b;
         }
-        .pixiv-highlight-rail {
+        .phpmusicpost-highlight-rail {
           display: flex;
           gap: 0.85rem;
           overflow-x: auto;
@@ -27061,10 +27073,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           scrollbar-width: none;
           padding: 0.25rem 0.15rem;
         }
-        .pixiv-highlight-rail::-webkit-scrollbar {
+        .phpmusicpost-highlight-rail::-webkit-scrollbar {
           display: none;
         }
-        .pixiv-highlight-card {
+        .phpmusicpost-highlight-card {
           flex: 0 0 170px;
           width: 170px;
           border-radius: 12px;
@@ -27077,36 +27089,36 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
           position: relative;
         }
-        .pixiv-highlight-card:hover {
+        .phpmusicpost-highlight-card:hover {
           transform: translateY(-4px);
           border-color: rgba(245, 158, 11, 0.6);
           box-shadow: 0 10px 26px rgba(0, 0, 0, 0.75);
         }
-        .pixiv-highlight-thumb {
+        .phpmusicpost-highlight-thumb {
           width: 100%;
           aspect-ratio: 1 / 1.25;
           position: relative;
           overflow: hidden;
           background: #08080a;
         }
-        .pixiv-highlight-thumb img {
+        .phpmusicpost-highlight-thumb img {
           width: 100%;
           height: 100%;
           object-fit: cover;
           display: block;
           transition: transform 0.25s ease;
         }
-        .pixiv-highlight-card:hover .pixiv-highlight-thumb img {
+        .phpmusicpost-highlight-card:hover .phpmusicpost-highlight-thumb img {
           transform: scale(1.05);
         }
-        .pixiv-highlight-info {
+        .phpmusicpost-highlight-info {
           padding: 0.6rem 0.75rem;
           display: flex;
           flex-direction: column;
           gap: 0.2rem;
           min-width: 0;
         }
-        .pixiv-highlight-card-title {
+        .phpmusicpost-highlight-card-title {
           font-size: 0.82rem;
           font-weight: 700;
           color: #ffffff;
@@ -27114,7 +27126,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           overflow: hidden;
           text-overflow: ellipsis;
         }
-        .pixiv-highlight-card-stats {
+        .phpmusicpost-highlight-card-stats {
           display: flex;
           justify-content: space-between;
           align-items: center;
@@ -27122,7 +27134,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           color: var(--text-muted);
           margin-top: 2px;
         }
-        .pixiv-highlight-empty {
+        .phpmusicpost-highlight-empty {
           border: 2px dashed rgba(245, 158, 11, 0.35);
           border-radius: 14px;
           padding: 1.6rem 1.2rem;
@@ -27134,18 +27146,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           background: rgba(245, 158, 11, 0.03);
         }
 
-        /* Pixiv-Style Modal Selection Grid */
-        .pixiv-modal-filter-pills {
+        /* phpmusicpost-Style Modal Selection Grid */
+        .phpmusicpost-modal-filter-pills {
           display: flex;
           gap: 0.4rem;
           overflow-x: auto;
           scrollbar-width: none;
           padding-bottom: 0.2rem;
         }
-        .pixiv-modal-filter-pills::-webkit-scrollbar {
+        .phpmusicpost-modal-filter-pills::-webkit-scrollbar {
           display: none;
         }
-        .pixiv-modal-pill {
+        .phpmusicpost-modal-pill {
           padding: 0.35rem 0.75rem;
           border-radius: 20px;
           font-size: 0.78rem;
@@ -27157,12 +27169,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           white-space: nowrap;
           transition: all 0.15s ease;
         }
-        .pixiv-modal-pill.active {
+        .phpmusicpost-modal-pill.active {
           background: #f59e0b;
           color: #000000;
           border-color: #f59e0b;
         }
-        .pixiv-modal-card {
+        .phpmusicpost-modal-card {
           position: relative;
           aspect-ratio: 1 / 1;
           border-radius: 10px;
@@ -27172,17 +27184,17 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           cursor: pointer;
           transition: transform 0.15s ease, border-color 0.15s ease;
         }
-        .pixiv-modal-card img {
+        .phpmusicpost-modal-card img {
           width: 100%;
           height: 100%;
           object-fit: cover;
           display: block;
         }
-        .pixiv-modal-card.selected {
+        .phpmusicpost-modal-card.selected {
           border-color: #f59e0b !important;
           box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
         }
-        .pixiv-modal-card-check {
+        .phpmusicpost-modal-card-check {
           position: absolute;
           top: 6px;
           right: 6px;
@@ -27197,12 +27209,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           z-index: 2;
           color: #ffffff;
         }
-        .pixiv-modal-card.selected .pixiv-modal-card-check {
+        .phpmusicpost-modal-card.selected .phpmusicpost-modal-card-check {
           background: #f59e0b !important;
           border-color: #f59e0b !important;
           color: #000000 !important;
         }
-        .pixiv-modal-card-label {
+        .phpmusicpost-modal-card-label {
           position: absolute;
           bottom: 0;
           left: 0;
@@ -27569,7 +27581,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           border-radius: inherit !important;
         }
         .art-grid.layout-grid .art-card.ratio-9-16 {
-          aspect-ratio: 9 / 16;
+          height: auto !important;
+          aspect-ratio: auto !important;
         }
 
         /* 1. Masonry Columns Layout (Height-Aware Distribution) */
@@ -28256,8 +28269,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           .viewer-media-wrap {
             border-radius: 12px !important;
           }
-          .viewer-media-wrap img, .viewer-media-wrap video {
-            max-height: 72dvh !important;
+          .viewer-media-wrap img, .viewer-media-wrap video,
+          #main-artwork-display {
+            max-height: 78dvh !important;
+            width: auto !important;
+            max-width: 100% !important;
+            height: auto !important;
+            object-fit: contain !important;
+            margin: 0 auto !important;
           }
           .artwork-owner-actions {
             width: 100%;
@@ -28296,13 +28315,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           position: absolute;
           top: 8px;
           left: 8px;
-          width: 26px;
-          height: 26px;
-          border-radius: 50%;
-          background: rgba(0, 0, 0, 0.65);
+          width: 24px;
+          height: 24px;
+          border-radius: 7px;
+          background: rgba(0, 0, 0, 0.7);
           backdrop-filter: blur(6px);
           -webkit-backdrop-filter: blur(6px);
-          border: 2px solid rgba(255, 255, 255, 0.65);
+          border: 2px solid rgba(255, 255, 255, 0.75);
           display: none;
           align-items: center;
           justify-content: center;
@@ -28779,9 +28798,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: flex;
           align-items: center;
           gap: 4px;
-          overflow: hidden;
+          overflow-x: auto;
+          overflow-y: hidden;
+          white-space: nowrap;
           flex-wrap: nowrap;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
           margin-top: 2px;
+          padding: 2px 14px 2px 4px;
+          mask-image: linear-gradient(to right, transparent 0%, black 16px, black calc(100% - 20px), transparent 100%);
+          -webkit-mask-image: linear-gradient(to right, transparent 0%, black 16px, black calc(100% - 20px), transparent 100%);
+        }
+        .art-card-tags-row::-webkit-scrollbar {
+          display: none;
         }
         .art-card-tag-pill {
           font-size: 0.7rem;
@@ -28793,7 +28822,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           white-space: nowrap;
           text-overflow: ellipsis;
           overflow: hidden;
-          max-width: 90px;
+          max-width: 280px;
+          flex-shrink: 0;
         }
         .art-card-bottom-stats {
           display: flex;
@@ -29073,8 +29103,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
         .author-names { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
         .author-artist-name { font-weight: 700; font-size: 1rem; }
         .author-handle { font-size: 0.78rem; color: var(--text-muted); }
-    
-        .tag-cloud { display: flex; flex-wrap: wrap; gap: 0.45rem; }
 
         /* GitHub Topics-Style Autocomplete Dropdown */
         .topic-suggest-dropdown {
@@ -29139,6 +29167,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           flex-shrink: 0;
           font-family: 'JetBrains Mono', monospace;
         }
+        .tag-cloud {
+          display: flex;
+          gap: 0.45rem;
+          overflow-x: auto;
+          overflow-y: hidden;
+          white-space: nowrap;
+          flex-wrap: nowrap;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
+          padding: 2px 18px 4px 6px;
+          mask-image: linear-gradient(to right, transparent 0%, black 20px, black calc(100% - 24px), transparent 100%);
+          -webkit-mask-image: linear-gradient(to right, transparent 0%, black 20px, black calc(100% - 24px), transparent 100%);
+        }
+        .tag-cloud::-webkit-scrollbar {
+          display: none;
+        }
         .tag-pill {
           background: var(--bg-surface-elevated);
           border: 1px solid var(--border-subtle);
@@ -29152,6 +29196,11 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           display: inline-flex;
           align-items: center;
           gap: 0.35rem;
+          flex-shrink: 0;
+          max-width: 320px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .tag-pill svg { width: 13px; height: 13px; }
         .tag-pill:hover { background: var(--accent-alpha); color: var(--accent); border-color: var(--accent); }
@@ -30834,15 +30883,34 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               ? `style="--thumb-ratio: ${imgW} / ${imgH}; aspect-ratio: ${imgW} / ${imgH} !important;"` 
               : '';
 
-            // Extract tags and prepend R-18 as the first child pill
-            const rawTags = art.tag_list || (art.tags ? art.tags.split(/[,，、\s]+/).filter(Boolean) : []);
-            const tagPills = rawTags.slice(0, 3).map(t => `<span class="art-card-tag-pill">#${this.escape(t.replace(/^#/, ''))}</span>`);
+            // Build type and category indicator pills (Manga, Product, Novel, Artwork)
+            const typePills = [];
 
-            if (art.rating === 'r18') {
-              tagPills.unshift(`<span class="art-card-tag-pill" style="color:var(--r18); background:rgba(255,0,68,0.15); border-color:rgba(255,0,68,0.35); font-weight:800;">R-18</span>`);
+            if (art.type === 'product/advertisement' || art.is_highlighted) {
+              typePills.push(`<span class="art-card-tag-pill" style="color:#f59e0b; background:rgba(245,158,11,0.15); border-color:rgba(245,158,11,0.35); font-weight:800;">Product</span>`);
             }
 
-            const tagsHtml = tagPills.length > 0 ? `<div class="art-card-tags-row">${tagPills.join('')}</div>` : '';
+            if (isManga) {
+              typePills.push(`<span class="art-card-tag-pill" style="color:#f97316; background:rgba(249,115,22,0.15); border-color:rgba(249,115,22,0.35); font-weight:800;">Manga</span>`);
+            } else if (isNovel) {
+              typePills.push(`<span class="art-card-tag-pill" style="color:#10b981; background:rgba(16,185,129,0.15); border-color:rgba(16,185,129,0.35); font-weight:800;">Novel</span>`);
+            } else if (art.type !== 'product/advertisement') {
+              typePills.push(`<span class="art-card-tag-pill" style="color:#38bdf8; background:rgba(56,189,248,0.15); border-color:rgba(56,189,248,0.35); font-weight:800;">${isVid ? 'Video' : 'Artwork'}</span>`);
+            }
+
+            if (art.rating === 'r18') {
+              typePills.push(`<span class="art-card-tag-pill" style="color:var(--r18); background:rgba(255,0,68,0.15); border-color:rgba(255,0,68,0.35); font-weight:800;">R-18</span>`);
+            }
+
+            // Extract general tags (scrollable row with 100-character truncation)
+            const rawTags = art.tag_list || (art.tags ? art.tags.split(/[,，、\s]+/).filter(Boolean) : []);
+            const userTagPills = rawTags.map(t => {
+              const cleanTag = t.replace(/^#/, '').slice(0, 100);
+              return `<span class="art-card-tag-pill" title="${this.escape(cleanTag)}">#${this.escape(cleanTag)}</span>`;
+            });
+            const allPills = [...typePills, ...userTagPills];
+
+            const tagsHtml = allPills.length > 0 ? `<div class="art-card-tags-row">${allPills.join('')}</div>` : '';
 
             if (isList) {
               return `
@@ -30893,10 +30961,6 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
                   <!-- Top-Left Flags (Space-Saving) -->
                   <div style="position:absolute; top:8px; left:8px; display:flex; flex-direction:column; gap:4px; z-index:5;">
-                    ${isVid ? `<div class="badge-flag video" style="position:static;">VIDEO</div>` : ''}
-                    ${isManga ? `<div class="badge-flag manga" style="position:static;">MANGA</div>` : ''}
-                    ${isNovel ? `<div class="badge-flag novel" style="position:static;">NOVEL</div>` : ''}
-                    ${(art.type === 'product/advertisement' || art.is_highlighted) ? `<div class="badge-flag highlighted-badge" style="position:static;">PRODUCT</div>` : ''}
                     ${art.is_ai ? `<div class="badge-flag ai" style="position:static;">AI</div>` : ''}
                   </div>
                 </div>
@@ -31333,6 +31397,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             document.addEventListener('pointerdown', (e) => {
               const card = e.target.closest('.art-card');
               if (!card || e.target.closest('button, a, input, select, textarea, .stat-btn, .safe-blur-overlay')) return;
+              if (e.pointerType === 'mouse' && e.button !== 0) return; // Only left-click triggers long-press hold
+
               holdTarget = card;
               startX = e.clientX;
               startY = e.clientY;
@@ -31347,6 +31413,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   this.enterSelectionMode(artId);
                 }
               }, 500);
+            });
+
+            // Instant Mouse Right-Click to toggle multi-selection
+            document.addEventListener('contextmenu', (e) => {
+              const card = e.target.closest('.art-card');
+              if (!card || e.target.closest('button, a, input, select, textarea, .stat-btn, .safe-blur-overlay')) return;
+              e.preventDefault();
+              const artId = parseInt(card.dataset.artId || '0', 10);
+              if (artId > 0) {
+                if (!this.selectionMode) {
+                  this.enterSelectionMode(artId);
+                } else {
+                  this.toggleCardSelection(artId);
+                }
+              }
             });
 
             document.addEventListener('pointermove', (e) => {
@@ -31955,7 +32036,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
             const switchTabUrl = (targetTab) => `#/search?q=${encodeURIComponent(query)}&tab=${targetTab}`;
 
             const tabsHeaderHtml = `
-              <div class="search-pixiv-tabs">
+              <div class="search-phpmusicpost-tabs">
                 ${tabs.map(t => `
                   <button type="button" class="search-tab-item ${tab === t.id ? 'active' : ''}" onclick="app.nav('${switchTabUrl(t.id)}')">
                     ${t.icon}
@@ -32588,6 +32669,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                             </div>
                           ` : ''}
 
+                          <!-- Novel Category & Tag Indicators -->
+                          <div class="tag-cloud" style="align-items: center;">
+                            <span class="tag-pill" style="color:#10b981; border-color:rgba(16,185,129,0.35); background:rgba(16,185,129,0.14); font-weight:800;">Novel</span>
+                            ${(res.is_highlighted) ? `<span class="tag-pill" style="color:#f59e0b; border-color:rgba(245,158,11,0.35); background:rgba(245,158,11,0.14); font-weight:800;">Product</span>` : ''}
+                            ${res.rating === 'r18' ? `<span class="tag-pill" style="color:var(--r18); border-color:rgba(255,51,75,0.35); background:rgba(255,51,75,0.14); font-weight:800;">R-18</span>` : ''}
+                            ${res.parodies ? res.parodies.map(p => `<a href="#/explore?parody=${encodeURIComponent(p.name)}" class="tag-pill special-parody"><span>${this.escape(p.name.slice(0, 100))}</span><span style="opacity:0.6; font-size:0.75rem;">(${p.count})</span></a>`).join('') : ''}
+                            ${res.characters ? res.characters.map(c => `<a href="#/explore?character=${encodeURIComponent(c.name)}" class="tag-pill special-character"><span>${this.escape(c.name.slice(0, 100))}</span><span style="opacity:0.6; font-size:0.75rem;">(${c.count})</span></a>`).join('') : ''}
+                            ${res.tags ? res.tags.map(t => `<a href="#/explore?tag=${encodeURIComponent(t.name)}" class="tag-pill"><span>#${this.escape(t.name.slice(0, 100))}</span><span style="opacity:0.6; font-size:0.75rem;">(${t.count})</span></a>`).join('') : ''}
+                          </div>
+
                           <div style="display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text-muted); align-items: center;">
                             ${res.rating === 'r18' ? '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;">R-18</span>' : '<span class="badge-flag" style="position:static;font-size:0.75rem;padding:0.2rem 0.55rem;background:rgba(34,197,94,0.9);">ALL AGES</span>'}
                             <span><strong style="color:var(--text-primary);">${res.total_chapters}</strong> Chapters</span>
@@ -32927,11 +33018,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                           ` : ''}
 
                           <!-- Metadata Badges -->
-                          <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center;">
-                            ${res.group_name ? renderChip(`Group: ${res.group_name}`, res.group_count, `#/explore?q=${encodeURIComponent(res.group_name)}`, 'special-tool') : ''}
-                            ${res.parodies ? res.parodies.map(p => renderChip(p.name, p.count, `#/explore?parody=${encodeURIComponent(p.name)}`, 'special-parody')).join('') : ''}
-                            ${res.characters ? res.characters.map(c => renderChip(c.name, c.count, `#/explore?character=${encodeURIComponent(c.name)}`, 'special-character')).join('') : ''}
-                            ${res.tags ? res.tags.map(t => renderChip(`#${t.name}`, t.count, `#/explore?tag=${encodeURIComponent(t.name)}`)).join('') : ''}
+                          <div class="tag-cloud" style="align-items: center;">
+                            <span class="tag-pill" style="color:#f97316; border-color:rgba(249,115,22,0.35); background:rgba(249,115,22,0.14); font-weight:800;">Manga</span>
+                            ${(res.is_highlighted) ? `<span class="tag-pill" style="color:#f59e0b; border-color:rgba(245,158,11,0.35); background:rgba(245,158,11,0.14); font-weight:800;">Product</span>` : ''}
+                            ${res.rating === 'r18' ? `<span class="tag-pill" style="color:var(--r18); border-color:rgba(255,51,75,0.35); background:rgba(255,51,75,0.14); font-weight:800;">R-18</span>` : ''}
+                            ${res.group_name ? renderChip(`Group: ${res.group_name.slice(0, 100)}`, res.group_count, `#/explore?q=${encodeURIComponent(res.group_name)}`, 'special-tool') : ''}
+                            ${res.parodies ? res.parodies.map(p => renderChip(p.name.slice(0, 100), p.count, `#/explore?parody=${encodeURIComponent(p.name)}`, 'special-parody')).join('') : ''}
+                            ${res.characters ? res.characters.map(c => renderChip(c.name.slice(0, 100), c.count, `#/explore?character=${encodeURIComponent(c.name)}`, 'special-character')).join('') : ''}
+                            ${res.tags ? res.tags.map(t => renderChip(`#${t.name.slice(0, 100)}`, t.count, `#/explore?tag=${encodeURIComponent(t.name)}`)).join('') : ''}
                           </div>
 
                           <!-- Stats Bar -->
@@ -34185,8 +34279,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               if (!items.length) {
                 if (isOwner) {
                   mount.innerHTML = `
-                    <div class="pixiv-highlight-section">
-                      <div class="pixiv-highlight-empty">
+                    <div class="phpmusicpost-highlight-section">
+                      <div class="phpmusicpost-highlight-empty">
                         <i class="bi bi-star-fill text-warning fs-3"></i>
                         <h4 style="font-size:1.05rem; font-weight:800; color:#ffffff; margin:0;">Highlighted Works &amp; Products</h4>
                         <p style="font-size:0.84rem; color:var(--text-secondary); max-width:480px; margin:0; line-height:1.45;">
@@ -34216,16 +34310,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 }
 
                 return `
-                  <div class="pixiv-highlight-card" onclick="app.nav('${targetUrl}')">
-                    <div class="pixiv-highlight-thumb">
+                  <div class="phpmusicpost-highlight-card" onclick="app.nav('${targetUrl}')">
+                    <div class="phpmusicpost-highlight-thumb">
                       <img src="${cover}" alt="${this.escape(art.title)}" loading="lazy" onerror="this.src='?action=get_app_icon'">
                       <div class="badge-flag highlighted-badge" style="font-size:0.65rem; padding:2px 6px;">
                         ${art.type === 'product/advertisement' ? 'PRODUCT' : art.type.toUpperCase()}
                       </div>
                     </div>
-                    <div class="pixiv-highlight-info">
-                      <div class="pixiv-highlight-card-title" title="${this.escape(art.title)}">${this.escape(art.title)}</div>
-                      <div class="pixiv-highlight-card-stats">
+                    <div class="phpmusicpost-highlight-info">
+                      <div class="phpmusicpost-highlight-card-title" title="${this.escape(art.title)}">${this.escape(art.title)}</div>
+                      <div class="phpmusicpost-highlight-card-stats">
                         <span>${(art.view_count || 0).toLocaleString()} views</span>
                         <span style="display:flex; align-items:center; gap:2px; color:var(--like);">
                           <svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:currentColor;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -34238,9 +34332,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
               }).join('');
 
               mount.innerHTML = `
-                <div class="pixiv-highlight-section">
-                  <div class="pixiv-highlight-header">
-                    <h3 class="pixiv-highlight-title">
+                <div class="phpmusicpost-highlight-section">
+                  <div class="phpmusicpost-highlight-header">
+                    <h3 class="phpmusicpost-highlight-title">
                       <svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
                       <span>Highlighted Works &amp; Products</span>
                       <span style="font-size:0.75rem; color:#f59e0b; font-weight:700; background:rgba(245,158,11,0.15); padding:1px 7px; border-radius:10px;">Products</span>
@@ -34252,7 +34346,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       </button>
                     ` : ''}
                   </div>
-                  <div class="pixiv-highlight-rail" id="pixiv-highlight-rail">
+                  <div class="phpmusicpost-highlight-rail" id="phpmusicpost-highlight-rail">
                     ${cardsHtml}
                   </div>
                 </div>
@@ -34277,13 +34371,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 </p>
 
                 <!-- Filter Navigation Pills -->
-                <div class="pixiv-modal-filter-pills" id="modal-category-pills">
-                  <button type="button" class="pixiv-modal-pill active" data-type="all" onclick="app.filterModalHighlightType('all')">All Works</button>
-                  <button type="button" class="pixiv-modal-pill" data-type="illust" onclick="app.filterModalHighlightType('illust')">Illustrations</button>
-                  <button type="button" class="pixiv-modal-pill" data-type="manga" onclick="app.filterModalHighlightType('manga')">Manga</button>
-                  <button type="button" class="pixiv-modal-pill" data-type="novel" onclick="app.filterModalHighlightType('novel')">Novels</button>
-                  <button type="button" class="pixiv-modal-pill" data-type="video" onclick="app.filterModalHighlightType('video')">Videos</button>
-                  <button type="button" class="pixiv-modal-pill" data-type="product/advertisement" onclick="app.filterModalHighlightType('product/advertisement')">Products</button>
+                <div class="phpmusicpost-modal-filter-pills" id="modal-category-pills">
+                  <button type="button" class="phpmusicpost-modal-pill active" data-type="all" onclick="app.filterModalHighlightType('all')">All Works</button>
+                  <button type="button" class="phpmusicpost-modal-pill" data-type="illust" onclick="app.filterModalHighlightType('illust')">Illustrations</button>
+                  <button type="button" class="phpmusicpost-modal-pill" data-type="manga" onclick="app.filterModalHighlightType('manga')">Manga</button>
+                  <button type="button" class="phpmusicpost-modal-pill" data-type="novel" onclick="app.filterModalHighlightType('novel')">Novels</button>
+                  <button type="button" class="phpmusicpost-modal-pill" data-type="video" onclick="app.filterModalHighlightType('video')">Videos</button>
+                  <button type="button" class="phpmusicpost-modal-pill" data-type="product/advertisement" onclick="app.filterModalHighlightType('product/advertisement')">Products</button>
                 </div>
 
                 <!-- Instant Search Bar -->
@@ -34323,12 +34417,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                 const isH = (art.is_highlighted == 1 || art.type === 'product/advertisement');
                 const cover = art.cover_file ? `?access=artwork&action=thumb&f=${encodeURIComponent(art.cover_file)}` : '';
                 return `
-                  <div class="pixiv-modal-card ${isH ? 'selected' : ''}" data-id="${art.id}" data-type="${art.type}" data-title="${this.escape(art.title).toLowerCase()}" onclick="app.toggleModalCardSelection(this)">
+                  <div class="phpmusicpost-modal-card ${isH ? 'selected' : ''}" data-id="${art.id}" data-type="${art.type}" data-title="${this.escape(art.title).toLowerCase()}" onclick="app.toggleModalCardSelection(this)">
                     <img src="${cover}" alt="${this.escape(art.title)}" onerror="this.src='?action=get_app_icon'">
-                    <div class="pixiv-modal-card-check">
+                    <div class="phpmusicpost-modal-card-check">
                       <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor;"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                     </div>
-                    <div class="pixiv-modal-card-label">${this.escape(art.title)}</div>
+                    <div class="phpmusicpost-modal-card-label">${this.escape(art.title)}</div>
                   </div>
                 `;
               }).join('');
@@ -34347,7 +34441,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
           updateModalHighlightCount() {
             const countLabel = document.getElementById('modal-highlight-selected-count');
-            const totalSelected = document.querySelectorAll('.pixiv-modal-card.selected').length;
+            const totalSelected = document.querySelectorAll('.phpmusicpost-modal-card.selected').length;
             if (countLabel) {
               countLabel.textContent = `${totalSelected} Highlighted`;
               countLabel.style.color = totalSelected > 0 ? '#f59e0b' : 'var(--text-secondary)';
@@ -34355,10 +34449,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
           }
 
           filterModalHighlightType(type) {
-            document.querySelectorAll('.pixiv-modal-pill').forEach(btn => {
+            document.querySelectorAll('.phpmusicpost-modal-pill').forEach(btn => {
               btn.classList.toggle('active', btn.dataset.type === type);
             });
-            document.querySelectorAll('.pixiv-modal-card').forEach(card => {
+            document.querySelectorAll('.phpmusicpost-modal-card').forEach(card => {
               const matchesType = (type === 'all' || card.dataset.type === type);
               card.style.display = matchesType ? '' : 'none';
             });
@@ -34366,14 +34460,14 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
 
           filterModalHighlightSearch(query) {
             const q = query.trim().toLowerCase();
-            document.querySelectorAll('.pixiv-modal-card').forEach(card => {
+            document.querySelectorAll('.phpmusicpost-modal-card').forEach(card => {
               const matches = (!q || card.dataset.title.includes(q));
               card.style.display = matches ? '' : 'none';
             });
           }
 
           async saveHighlightedProducts(userId) {
-            const allCards = Array.from(document.querySelectorAll('.pixiv-modal-card'));
+            const allCards = Array.from(document.querySelectorAll('.phpmusicpost-modal-card'));
             if (!allCards.length) return;
 
             const selectedIds = allCards.filter(c => c.classList.contains('selected')).map(c => parseInt(c.dataset.id, 10));
@@ -35003,7 +35097,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                                data-raw="?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}"
                                data-loaded="0"
                                onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(leadImg.file_name || '')}';"
-                               style="width:100%; height:auto; display:block; opacity:1; transition:opacity 0.2s ease-in-out;" alt="">
+                               style="max-width:100%; max-height:85dvh; width:auto; height:auto; object-fit:contain; margin:0 auto; display:block; opacity:1; transition:opacity 0.2s ease-in-out;" alt="">
                           <div id="hd-indicator-badge" style="position:absolute; bottom:12px; right:12px; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px); color:#fff; font-size:0.72rem; font-weight:700; padding:0.25rem 0.6rem; border-radius:6px; border:1px solid rgba(255,255,255,0.2); pointer-events:none;">
                             Tap for Original HD
                           </div>
@@ -35186,10 +35280,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                       ${renderedDescription ? `<div class="rich-text-content" style="font-size:0.92rem; line-height:1.7;">${renderedDescription}</div>` : ''}
   
                       <div class="tag-cloud">
+                        ${(art.type === 'product/advertisement' || art.is_highlighted) ? `<span class="tag-pill" style="color:#f59e0b; border-color:rgba(245,158,11,0.35); background:rgba(245,158,11,0.14); font-weight:800;">Product</span>` : ''}
+                        ${art.type === 'manga' ? `<span class="tag-pill" style="color:#f97316; border-color:rgba(249,115,22,0.35); background:rgba(249,115,22,0.14); font-weight:800;">Manga</span>` : ''}
+                        ${art.type === 'novel' ? `<span class="tag-pill" style="color:#10b981; border-color:rgba(16,185,129,0.35); background:rgba(16,185,129,0.14); font-weight:800;">Novel</span>` : ''}
+                        ${(art.type !== 'manga' && art.type !== 'novel' && art.type !== 'product/advertisement') ? `<span class="tag-pill" style="color:#38bdf8; border-color:rgba(56,189,248,0.35); background:rgba(56,189,248,0.14); font-weight:800;">${isLeadVid ? 'Video' : 'Artwork'}</span>` : ''}
+                        ${art.rating === 'r18' ? `<span class="tag-pill" style="color:var(--r18); border-color:rgba(255,51,75,0.35); background:rgba(255,51,75,0.14); font-weight:800;">R-18</span>` : ''}
                         ${parodyArr.map(p => `
                           <span class="tag-pill special-parody" onclick="app.nav('#/explore?parody=${encodeURIComponent(p)}')">
                             <svg viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
-                            <span>Series: ${this.escape(p)}</span>
+                            <span>Series: ${this.escape(p.slice(0, 100))}</span>
                             <span style="opacity:0.65; display:inline-flex; align-items:center; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('parody', '${this.escape(p)}')" title="View Encyclopedia">
                               <svg viewBox="0 0 24 24" style="width:13px; height:13px; fill:currentColor;"><path d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15-.05.25-.05C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm-1 14c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5v12z"/></svg>
                             </span>
@@ -35198,7 +35297,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         ${charArr.map(c => `
                           <span class="tag-pill special-character" onclick="app.nav('#/explore?character=${encodeURIComponent(c)}')">
                             <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-                            <span>Character: ${this.escape(c)}</span>
+                            <span>Character: ${this.escape(c.slice(0, 100))}</span>
                             <span style="opacity:0.65; display:inline-flex; align-items:center; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('character', '${this.escape(c)}')" title="View Encyclopedia">
                               <svg viewBox="0 0 24 24" style="width:13px; height:13px; fill:currentColor;"><path d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15-.05.25-.05C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm-1 14c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5v12z"/></svg>
                             </span>
@@ -35207,13 +35306,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                         ${tagsArr.map(t => `
                           <span class="tag-pill" onclick="app.nav('#/explore?tag=${encodeURIComponent(t)}')">
                             <svg viewBox="0 0 24 24"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
-                            <span>#${this.escape(t)}</span>
+                            <span>#${this.escape(t.slice(0, 100))}</span>
                             <span style="opacity:0.65; display:inline-flex; align-items:center; padding-left:2px;" onclick="event.stopPropagation(); app.openEncyclopediaModal('tag', '${this.escape(t)}')" title="View Encyclopedia">
                               <svg viewBox="0 0 24 24" style="width:13px; height:13px; fill:currentColor;"><path d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15-.05.25-.05C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm-1 14c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5v12z"/></svg>
                             </span>
                           </span>
                         `).join('')}
-                        ${toolsArr.map(tl => `<span class="tag-pill special-tool"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> <span>Tool: ${this.escape(tl)}</span></span>`).join('')}
+                        ${toolsArr.map(tl => `<span class="tag-pill special-tool"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg> <span>Tool: ${this.escape(tl.slice(0, 100))}</span></span>`).join('')}
                       </div>
   
                       <div style="display:flex; gap:0.6rem; margin-top:0.4rem; flex-wrap:wrap;">
@@ -35375,7 +35474,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <img id="main-artwork-display" class="${targetClass}" src="?access=artwork&action=thumb&f=${encodeURIComponent(imgObj.file_name)}"
                        data-raw="?access=artwork&action=raw&f=${encodeURIComponent(imgObj.file_name)}"
                        data-loaded="0"
-                       style="width:100%; height:auto; display:block; opacity:1; transition:opacity 0.2s ease-in-out;"
+                       style="max-width:100%; max-height:85dvh; width:auto; height:auto; object-fit:contain; margin:0 auto; display:block; opacity:1; transition:opacity 0.2s ease-in-out;"
                        onerror="this.onerror=null; this.src='?access=artwork&action=raw&f=${encodeURIComponent(imgObj.file_name)}';" alt="">
                   <div id="hd-indicator-badge" style="position:absolute; bottom:12px; right:12px; background:rgba(0,0,0,0.72); backdrop-filter:blur(4px); color:#fff; font-size:0.72rem; font-weight:700; padding:0.25rem 0.6rem; border-radius:6px; border:1px solid rgba(255,255,255,0.2); pointer-events:none;">
                     Tap for Original HD
@@ -36000,6 +36099,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                     artist_name: this.user.artist_name || 'My Studio',
                     email: this.user.email || '',
                     bio: this.user.bio || '',
+                    dates: this.user.dates || '',
+                    gender: this.user.gender || '',
+                    place: this.user.place || '',
                     artwork_count: 0,
                     follower_count: 0,
                     following_count: 0,
@@ -36070,6 +36172,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   <div>
                     <h1 style="font-size:1.6rem; font-weight:800; letter-spacing:-0.5px;">${this.escape(prof.artist_name)}</h1>
                     ${prof.bio ? `<p style="font-size:0.9rem; color:var(--text-secondary); max-width:650px; margin-top:0.6rem; line-height:1.5;">${this.escape(prof.bio)}</p>` : ''}
+                    ${(prof.dates || prof.gender || prof.place) ? `
+                      <div style="display:flex; flex-wrap:wrap; gap:1.1rem; font-size:0.82rem; color:var(--text-muted); margin-top:0.45rem;">
+                        ${prof.dates ? `<span><i class="bi bi-calendar-event me-1 text-secondary"></i>${this.escape(prof.dates)}</span>` : ''}
+                        ${prof.gender ? `<span><i class="bi bi-gender-ambiguous me-1 text-secondary"></i>${this.escape(prof.gender)}</span>` : ''}
+                        ${prof.place ? `<span><i class="bi bi-geo-alt me-1 text-secondary"></i>${this.escape(prof.place)}</span>` : ''}
+                      </div>
+                    ` : ''}
                     <div style="display:flex; gap:1.4rem; font-size:0.85rem; color:var(--text-muted); margin-top:0.6rem;">
                       <span><strong>${prof.artwork_count}</strong> Total Creations</span>
                       <a href="#/user/${prof.id}/followers" style="color:inherit; text-decoration:none; cursor:pointer;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='inherit'"><strong>${prof.follower_count}</strong> Followers</a>
@@ -36089,7 +36198,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'artwork') {
                   </div>
                 </div>
 
-                <!-- Pixiv-Style Highlighted Works / Products Showcase Mount -->
+                <!-- phpmusicpost-Style Highlighted Works / Products Showcase Mount -->
                 <div id="user-highlight-showcase-mount"></div>
 
                 <!-- Scrollable Underline Profile Tabs with All, Artworks, Manga, and Favorites -->
@@ -41694,29 +41803,43 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
-    // SAVE USER DIRECTORY POLICIES & ESSENTIAL SETTINGS
-    if (isset($_POST['save_users_policies'])) {
+    // SAVE FULL USER PROFILE DETAILS FROM ADMIN
+    if (isset($_POST['save_admin_user_profile']) && isset($_POST['user_id'])) {
       $db = get_db();
-      $reg_mode = in_array($_POST['reg_mode'] ?? '', ['open', 'approval', 'closed']) ? $_POST['reg_mode'] : 'open';
-      $min_pwd = max(6, min(32, (int)($_POST['min_password_len'] ?? 6)));
-      $max_login_attempts = max(3, min(20, (int)($_POST['max_login_attempts'] ?? 5)));
-      $auto_verify = !empty($_POST['auto_verify']) ? '1' : '0';
-      $allow_name_change = !empty($_POST['allow_name_change']) ? '1' : '0';
-      $allow_dms = !empty($_POST['allow_dms']) ? '1' : '0';
-      $allow_self_delete = !empty($_POST['allow_self_delete']) ? '1' : '0';
+      $target_uid = (int)$_POST['user_id'];
+      $artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $email = filter_var(trim($_POST['email'] ?? ''), FILTER_VALIDATE_EMAIL);
+      $bio = trim(htmlspecialchars($_POST['bio'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $dates = trim(htmlspecialchars($_POST['dates'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $gender = trim(htmlspecialchars($_POST['gender'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $place = trim(htmlspecialchars($_POST['place'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $twitter = trim(htmlspecialchars($_POST['twitter'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $website = trim($_POST['website'] ?? '');
 
-      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-      $stmt->execute(['users_reg_mode', $reg_mode]);
-      $stmt->execute(['users_min_password_len', (string)$min_pwd]);
-      $stmt->execute(['users_max_login_attempts', (string)$max_login_attempts]);
-      $stmt->execute(['users_auto_verify', $auto_verify]);
-      $stmt->execute(['users_allow_name_change', $allow_name_change]);
-      $stmt->execute(['users_allow_dms', $allow_dms]);
-      $stmt->execute(['users_allow_self_delete', $allow_self_delete]);
+      if (!empty($artist) && $email) {
+        $stmt_check = $db->prepare("SELECT id FROM users WHERE (email = ? OR artist = ?) AND id != ?");
+        $stmt_check->execute([$email, $artist, $target_uid]);
+        if ($stmt_check->fetch()) {
+          $_SESSION['admin_flash_msg'] = "Error: Email or Artist name is already in use by another account.";
+        } else {
+          $stmt_up = $db->prepare("
+            UPDATE users SET 
+              artist = ?, email = ?, bio = ?, dates = ?, gender = ?, place = ?, twitter = ?, website = ?
+            WHERE id = ?
+          ");
+          $stmt_up->execute([$artist, $email, $bio, $dates, $gender, $place, $twitter, $website, $target_uid]);
+          log_admin_activity($db, $_SESSION['admin_email'], "Updated full profile details for User #{$target_uid} ({$artist})", $target_uid);
+          $_SESSION['admin_flash_msg'] = "Full profile information for User #{$target_uid} updated successfully.";
+        }
+      } else {
+        $_SESSION['admin_flash_msg'] = "Error: Artist name and a valid email address are required.";
+      }
 
-      log_admin_activity($db, $_SESSION['admin_email'], 'Saved User Policies & Essential Settings', 0);
-      $_SESSION['admin_flash_msg'] = "User policies and settings updated.";
-      header('Location: ?access=admin&page=users&tab=settings');
+      $redirect_url = '?access=admin&page=users';
+      if (!empty($_POST['current_search'])) $redirect_url .= '&search=' . urlencode($_POST['current_search']);
+      if (!empty($_POST['current_sort'])) $redirect_url .= '&sort=' . urlencode($_POST['current_sort']);
+      if (!empty($_POST['current_page'])) $redirect_url .= '&p=' . (int)$_POST['current_page'];
+      header('Location: ' . $redirect_url);
       exit;
     }
 
@@ -46753,7 +46876,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.4'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.5'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -56486,7 +56609,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.4';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.5';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -79449,7 +79572,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             ];
             $admin_order_by = $admin_sort_map[$sort_admin] ?? 'ORDER BY id DESC';
             
-            $sql = "SELECT id, email, artist, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes, settings, status FROM users $where $admin_order_by LIMIT ? OFFSET ?";
+            $sql = "SELECT id, email, artist, COALESCE(bio, '') as bio, COALESCE(dates, '') as dates, COALESCE(gender, '') as gender, COALESCE(place, '') as place, COALESCE(twitter, '') as twitter, COALESCE(website, '') as website, verified, last_upload_date, daily_upload_count, banned, is_admin, reset_requested, rhythm_strikes, settings, status, COALESCE(drive_quota, 2147483648) as drive_quota, created_at, last_active FROM users $where $admin_order_by LIMIT ? OFFSET ?";
             $stmt = $db->prepare($sql);
             $param_index = 1;
             foreach ($params as $p_val) {
@@ -79680,6 +79803,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                           <td>
                             <div class="fw-bold text-white"><?php echo htmlspecialchars($user['artist']); ?></div>
                             <small class="text-secondary font-monospace" style="font-size: 0.75rem;"><?php echo htmlspecialchars($user['email'] ?? 'Anonymous'); ?></small>
+                            <?php if (!empty($user['dates']) || !empty($user['gender']) || !empty($user['place'])): ?>
+                              <div class="d-flex align-items-center gap-2 mt-1 text-secondary font-monospace" style="font-size: 0.7rem;">
+                                <?php if (!empty($user['gender'])): ?><span><i class="bi bi-gender-ambiguous me-1"></i><?php echo htmlspecialchars($user['gender']); ?></span><?php endif; ?>
+                                <?php if (!empty($user['dates'])): ?><span><i class="bi bi-calendar-event me-1"></i><?php echo htmlspecialchars($user['dates']); ?></span><?php endif; ?>
+                                <?php if (!empty($user['place'])): ?><span><i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars($user['place']); ?></span><?php endif; ?>
+                              </div>
+                            <?php endif; ?>
                           </td>
                           <td>
                             <div class="d-flex flex-wrap gap-1 align-items-center">
@@ -79858,6 +79988,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               const userData = JSON.parse(btn.getAttribute('data-user'));
               const modalBody = document.getElementById('user-details-modal-body');
               
+              const esc = (s) => (s || '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+              const formatBytes = (bytes) => {
+                const b = parseInt(bytes || 0, 10);
+                if (b <= 0) return 'Unlimited';
+                if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+                if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+                return (b / 1024).toFixed(1) + ' KB';
+              };
+              const formatDate = (d) => {
+                if (!d) return 'Never';
+                const dt = new Date(d);
+                return isNaN(dt.getTime()) ? d : dt.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+              };
+
               let u_perms = ['hijack_recovery', 'settings', 'security', 'pwa', 'users', 'songs', 'artworks', 'phpboard', 'storage', 'user_drive_management', 'bitrate_management', 'analytics', 'comments', 'logs', 'reports', 'rhythm_analytics', 'appeals', 'jobs', 'db_backups', 'error_logs', 'phpinfo', 'manage', 'drive', 'ide', 'dbmanager', 'api', 'playground', 'update'];
               try {
                 const settings = JSON.parse(userData.settings || '{}');
@@ -79892,10 +80036,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </div>
                     <div class="flex-grow-1 min-w-0">
                       <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
-                        <h4 class="text-white fw-bold m-0 text-truncate" style="font-size: 1.25rem;">${userData.artist}</h4>
+                        <h4 class="text-white fw-bold m-0 text-truncate" style="font-size: 1.25rem;">${esc(userData.artist)}</h4>
                         <span class="text-secondary font-monospace small">#${userData.id}</span>
                       </div>
-                      <div class="text-secondary small font-monospace text-truncate mb-2">${userData.email || 'Anonymous'}</div>
+                      <div class="text-secondary small font-monospace text-truncate mb-2">${esc(userData.email || 'Anonymous')}</div>
                       <div class="d-flex flex-wrap gap-1 align-items-center">
                         ${roleBadge}
                         ${verifyBadge}
@@ -79907,39 +80051,116 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                   <!-- Quick Stats Grid -->
                   <div class="row g-2 mt-3 pt-3 border-top border-secondary border-opacity-25 font-monospace">
-                    <div class="col-4">
+                    <div class="col-6 col-md-3">
                       <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
-                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Uploads Today</div>
+                        <div class="text-secondary small" style="font-size: 0.65rem; text-transform: uppercase;">Uploads Today</div>
                         <div class="text-white fw-bold fs-6 mt-1">${userData.daily_upload_count || 0} / 10</div>
                       </div>
                     </div>
-                    <div class="col-4">
+                    <div class="col-6 col-md-3">
                       <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
-                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Last Upload</div>
-                        <div class="text-white fw-bold small text-truncate mt-1">${userData.last_upload_date || 'Never'}</div>
+                        <div class="text-secondary small" style="font-size: 0.65rem; text-transform: uppercase;">Last Upload</div>
+                        <div class="text-white fw-bold small text-truncate mt-1">${esc(userData.last_upload_date || 'Never')}</div>
                       </div>
                     </div>
-                    <div class="col-4">
+                    <div class="col-6 col-md-3">
                       <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
-                        <div class="text-secondary small" style="font-size: 0.68rem; text-transform: uppercase;">Reset Request</div>
-                        <div class="fw-bold fs-6 mt-1 ${userData.reset_requested == 1 ? 'text-warning' : 'text-secondary'}">${userData.reset_requested == 1 ? 'Pending' : 'None'}</div>
+                        <div class="text-secondary small" style="font-size: 0.65rem; text-transform: uppercase;">Registered</div>
+                        <div class="text-white fw-bold small text-truncate mt-1">${formatDate(userData.created_at)}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="p-2 rounded-3 bg-black bg-opacity-40 border border-secondary border-opacity-25 text-center">
+                        <div class="text-secondary small" style="font-size: 0.65rem; text-transform: uppercase;">Last Active</div>
+                        <div class="text-white fw-bold small text-truncate mt-1">${formatDate(userData.last_active)}</div>
                       </div>
                     </div>
                   </div>
 
                   <!-- Quick Resource Jump Buttons -->
-                  <div class="d-flex gap-2 mt-3 pt-2">
+                  <div class="d-flex gap-2 mt-3 pt-2 flex-wrap">
                     <a href="?access=admin&page=songs&search=uid:${encodeURIComponent(userData.id)}" class="admin-btn-pill flex-grow-1 justify-content-center text-decoration-none" style="height: 34px; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);">
                       <i class="bi bi-music-note-beamed"></i> User Songs
                     </a>
                     <a href="?access=admin&page=drive&path=${encodeURIComponent('users_drive/user_' + userData.id + '_folder')}" class="admin-btn-pill flex-grow-1 justify-content-center text-decoration-none" style="height: 34px; color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 30%, transparent);">
                       <i class="bi bi-folder2-open"></i> User Drive
                     </a>
+                    <a href="?access=admin&page=storage&search=${encodeURIComponent(userData.id)}" class="admin-btn-pill flex-grow-1 justify-content-center text-decoration-none" style="height: 34px; color: #a855f7; border-color: color-mix(in srgb, #a855f7 30%, transparent);">
+                      <i class="bi bi-hdd-network"></i> Quota (${formatBytes(userData.drive_quota)})
+                    </a>
                     <button type="button" class="admin-btn-pill flex-grow-1 justify-content-center" style="height: 34px; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewRhythmHistory(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
                       <i class="bi bi-controller"></i> Rhythm Scores
                     </button>
                   </div>
                 </div>
+
+                <!-- Full Profile Details Form (All Fields) -->
+                <form method="POST" action="?access=admin&page=users" class="p-4 rounded-4 bg-black border border-secondary border-opacity-25 mb-4 text-start">
+                  <input type="hidden" name="csrf_token" value="${userData.csrf_token}">
+                  <input type="hidden" name="save_admin_user_profile" value="1">
+                  <input type="hidden" name="user_id" value="${userData.id}">
+                  <input type="hidden" name="current_search" value="${esc(userData.current_search)}">
+                  <input type="hidden" name="current_sort" value="${esc(userData.current_sort)}">
+                  <input type="hidden" name="current_page" value="${userData.current_page || 1}">
+
+                  <div class="d-flex align-items-center justify-content-between mb-3 pb-2 border-bottom border-secondary border-opacity-25">
+                    <span class="text-white fw-bold small text-uppercase d-flex align-items-center gap-2">
+                      <i class="bi bi-person-lines-fill text-danger fs-6"></i> Full Profile Information (All Fields)
+                    </span>
+                    <span class="admin-badge admin-badge-info font-monospace">UID #${userData.id}</span>
+                  </div>
+
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">ARTIST / DISPLAY NAME *</label>
+                      <input type="text" name="artist" class="admin-pill-input w-100" value="${esc(userData.artist)}" required>
+                    </div>
+
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1">EMAIL ADDRESS *</label>
+                      <input type="email" name="email" class="admin-pill-input w-100" value="${esc(userData.email)}" required>
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-calendar-event text-danger me-1"></i> DATES / BIRTHDATE</label>
+                      <input type="date" name="dates" class="admin-pill-input w-100" value="${esc(userData.dates)}">
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-gender-ambiguous text-info me-1"></i> GENDER</label>
+                      <select name="gender" class="admin-pill-input w-100">
+                        <option value="" ${!userData.gender ? 'selected' : ''}>Select gender</option>
+                        <option value="male" ${userData.gender === 'male' ? 'selected' : ''}>Male</option>
+                        <option value="female" ${userData.gender === 'female' ? 'selected' : ''}>Female</option>
+                        <option value="don't want to say" ${userData.gender === "don't want to say" ? 'selected' : ''}>Don't want to say</option>
+                      </select>
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                      <label class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-geo-alt text-warning me-1"></i> PLACE / LOCATION</label>
+                      <input type="text" name="place" class="admin-pill-input w-100" value="${esc(userData.place)}" placeholder="e.g. Tokyo, Japan">
+                    </div>
+
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-twitter-x me-1"></i> TWITTER / X HANDLE</label>
+                      <input type="text" name="twitter" class="admin-pill-input w-100" value="${esc(userData.twitter)}" placeholder="@username">
+                    </div>
+
+                    <div class="col-12 col-md-6">
+                      <label class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-globe me-1"></i> WEBSITE / PORTFOLIO</label>
+                      <input type="url" name="website" class="admin-pill-input w-100" value="${esc(userData.website)}" placeholder="https://...">
+                    </div>
+
+                    <div class="col-12">
+                      <label class="form-label text-secondary small fw-bold mb-1">BIOGRAPHY / ABOUT ME</label>
+                      <textarea name="bio" class="form-control bg-dark text-white border-secondary" rows="3" style="border-radius: 12px; font-size: 0.85rem;" placeholder="User biography, story, or statement...">${esc(userData.bio)}</textarea>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2 mt-3" style="height: 40px;">
+                    <i class="bi bi-save me-1"></i> Save Profile Details
+                  </button>
+                </form>
 
                 <!-- Account Management Action Form -->
                 <form method="POST" action="?access=admin&page=users&search=${encodeURIComponent(userData.current_search)}&sort=${encodeURIComponent(userData.current_sort)}">
@@ -81076,6 +81297,9 @@ function init_db($db) {
     if (!in_array('settings', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT;");
     if (!in_array('drive_quota', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN drive_quota INTEGER DEFAULT 2147483648;");
     if (!in_array('bio', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;");
+    if (!in_array('dates', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN dates TEXT DEFAULT '';");
+    if (!in_array('gender', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT '';");
+    if (!in_array('place', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN place TEXT DEFAULT '';");
     if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
     if (!in_array('profile_background_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background_type TEXT;");
   }
@@ -82209,7 +82433,7 @@ if (isset($_GET['action'])) {
 
   // This allows the user's browser to make multiple AJAX requests at the exact same time without queueing.
   // We run this safely AFTER $_SESSION['db_initialized'] has been set and saved to prevent SQLite lock crashes.
-  $write_actions = ['login', 'register', 'logout', 'change_name', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'save_rhythm_score', 'toggle_rhythm_favorite'];
+  $write_actions = ['login', 'register', 'logout', 'change_name', 'save_profile', 'save_bio', 'change_password', 'upload_chunk', 'upload_song', 'delete_song', 'edit_metadata', 'toggle_favorite', 'toggle_offline', 'toggle_follow', 'update_favorite_order', 'update_offline_order', 'import_offline', 'create_playlist', 'edit_playlist', 'delete_playlist', 'add_to_playlist', 'add_mix_to_playlist', 'remove_from_playlist', 'update_playlist_order', 'log_play', 'save_global_settings', 'save_song_settings', 'reset_song_settings', 'upload_profile_picture', 'toggle_listen_later', 'update_listen_later_order', 'save_note', 'delete_note', 'toggle_song_reaction', 'toggle_comment_reaction', 'add_song_comment', 'edit_song_comment', 'delete_song_comment', 'create_community_post', 'toggle_post_reaction', 'edit_community_post', 'delete_community_post', 'leave_collab', 'request_verification', 'save_blog', 'delete_blog', 'import_blogs', 'export_blogs', 'toggle_blog_reaction', 'toggle_blog_comment_reaction', 'add_blog_comment', 'edit_blog_comment', 'delete_blog_comment', 'post_phpboard', 'delete_phpboard_post', 'inspect_audio', 'save_audio_editor', 'send_message', 'edit_message', 'delete_message', 'toggle_message_reaction', 'toggle_star_message', 'post_status', 'delete_status', 'create_chat_group', 'edit_chat_group', 'delete_chat_group', 'leave_chat_group', 'save_rhythm_score', 'toggle_rhythm_favorite'];
   $current_action = $_GET['action'] ?? '';
   $essential_read_actions = ['get_session', 'get_user_profile'];
 
@@ -82828,7 +83052,7 @@ if (isset($_GET['action'])) {
         try { $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;"); } catch(Exception $e) {}
         $db->prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?")->execute([$user_id]);
 
-        $stmt = $db->prepare("SELECT id, email, artist, bio, verified, last_upload_date, daily_upload_count, banned, settings, is_admin, status, rhythm_strikes FROM users WHERE id = ?");
+        $stmt = $db->prepare("SELECT id, email, artist, bio, COALESCE(dates, '') as dates, COALESCE(gender, '') as gender, COALESCE(place, '') as place, verified, last_upload_date, daily_upload_count, banned, settings, is_admin, status, rhythm_strikes FROM users WHERE id = ?");
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user && empty($user['banned'])) {
@@ -83100,12 +83324,54 @@ if (isset($_GET['action'])) {
       send_json(['status' => 'success', 'message' => 'Name changed successfully.']);
       break;
 
+    case 'save_profile':
     case 'save_bio':
       if (!$user_id) { http_response_code(403); exit; }
       $data = json_decode(file_get_contents('php://input'), true);
+
+      // Self-healing schema check to prevent 500 error if columns are missing
+      try { $db->exec("ALTER TABLE users ADD COLUMN dates TEXT DEFAULT '';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT '';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE users ADD COLUMN place TEXT DEFAULT '';"); } catch(Exception $e) {}
+      try { $db->exec("ALTER TABLE users ADD COLUMN bio TEXT;"); } catch(Exception $e) {}
+
+      $new_name = trim(htmlspecialchars($data['artist'] ?? $data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
       $bio = trim(htmlspecialchars($data['bio'] ?? '', ENT_QUOTES, 'UTF-8'));
-      $db->prepare("UPDATE users SET bio = ? WHERE id = ?")->execute([$bio, $user_id]);
-      send_json(['status' => 'success', 'message' => 'Bio updated.']);
+      $dates = trim(htmlspecialchars($data['dates'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $gender = trim(htmlspecialchars($data['gender'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $place = trim(htmlspecialchars($data['place'] ?? '', ENT_QUOTES, 'UTF-8'));
+
+      // Validate name change if provided
+      if (!empty($new_name)) {
+        $cur_stmt = $db->prepare("SELECT artist FROM users WHERE id = ?");
+        $cur_stmt->execute([$user_id]);
+        $cur_artist = $cur_stmt->fetchColumn();
+
+        if ($cur_artist !== $new_name) {
+          $allow_name_change = $db->query("SELECT value FROM site_settings WHERE key = 'users_allow_name_change'")->fetchColumn() !== '0';
+          if (!$allow_name_change && empty($is_admin) && empty($is_super_admin)) {
+            http_response_code(403);
+            send_json(['status' => 'error', 'message' => 'Display name modifications are disabled by administrator.']);
+          }
+
+          $check_stmt = $db->prepare("SELECT id FROM users WHERE artist = ? AND id != ? COLLATE NOCASE");
+          $check_stmt->execute([$new_name, $user_id]);
+          if ($check_stmt->fetch()) {
+            http_response_code(409);
+            send_json(['status' => 'error', 'message' => 'Display name is already taken.']);
+          }
+          $_SESSION['user_artist'] = $new_name;
+        }
+      } else {
+        $cur_stmt = $db->prepare("SELECT artist FROM users WHERE id = ?");
+        $cur_stmt->execute([$user_id]);
+        $new_name = $cur_stmt->fetchColumn() ?: 'User';
+      }
+
+      $stmt = $db->prepare("UPDATE users SET artist = ?, bio = ?, dates = ?, gender = ?, place = ? WHERE id = ?");
+      $stmt->execute([$new_name, $bio, $dates, $gender, $place, $user_id]);
+
+      send_json(['status' => 'success', 'message' => 'Profile updated successfully.']);
       break;
 
     case 'get_connections':
@@ -87557,7 +87823,7 @@ if (isset($_GET['action'])) {
       if ($type === 'profile') {
         if (!$user_id) { http_response_code(403); exit; }
         
-        $stmt_user = $db->prepare("SELECT artist, bio FROM users WHERE id = ?");
+        $stmt_user = $db->prepare("SELECT artist, bio, COALESCE(dates, '') as dates, COALESCE(gender, '') as gender, COALESCE(place, '') as place FROM users WHERE id = ?");
         $stmt_user->execute([$user_id]);
         $user_details = $stmt_user->fetch();
 
@@ -87574,6 +87840,9 @@ if (isset($_GET['action'])) {
         $details['image_url'] = '?action=get_profile_picture&id=' . $user_id;
         $details['background_url'] = '?action=get_profile_background&id=' . $user_id;
         $details['bio'] = $user_details['bio'] ?? '';
+        $details['dates'] = $user_details['dates'] ?? '';
+        $details['gender'] = $user_details['gender'] ?? '';
+        $details['place'] = $user_details['place'] ?? '';
         
         $stmt_following = $db->prepare("SELECT COUNT(*) FROM follows WHERE follower_id = ?");
         $stmt_following->execute([$user_id]);
@@ -87765,7 +88034,7 @@ if (isset($_GET['action'])) {
         $details['public_id'] = null;
 
         if ($type === 'artist') {
-          $stmt_user = $db->prepare("SELECT id, banned, email, bio FROM users WHERE artist = ? COLLATE NOCASE");
+          $stmt_user = $db->prepare("SELECT id, banned, email, bio, COALESCE(dates, '') as dates, COALESCE(gender, '') as gender, COALESCE(place, '') as place FROM users WHERE artist = ? COLLATE NOCASE");
           $stmt_user->execute([$name]);
           $artist_user = $stmt_user->fetch();
 
@@ -87788,6 +88057,9 @@ if (isset($_GET['action'])) {
             $details['image_url'] = '?action=get_profile_picture&id=' . $artist_user_id;
             $details['background_url'] = '?action=get_profile_background&id=' . $artist_user_id;
             $details['bio'] = $artist_user['bio'] ?? '';
+            $details['dates'] = $artist_user['dates'] ?? '';
+            $details['gender'] = $artist_user['gender'] ?? '';
+            $details['place'] = $artist_user['place'] ?? '';
             
             $stmt_rec_art = $db->prepare("SELECT id, artist FROM users WHERE id != ? AND banned = 0 AND email NOT LIKE 'deleted_%' ORDER BY RANDOM() LIMIT 25");
             $stmt_rec_art->execute([$artist_user_id]);
@@ -102382,24 +102654,40 @@ function perform_cover_scan($db) {
                 </div>
                 
                 <div class="phpmusic-settings-section">
-                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-textarea-t text-primary"></i> Public Info</h6>
-                  <form id="change-name-form" class="mb-4">
+                  <h6 class="phpmusic-settings-section-title"><i class="bi bi-person-lines-fill text-primary"></i> Public Profile</h6>
+                  <form id="profile-form">
                     <div class="mb-3">
-                      <label for="new-name" class="form-label text-secondary small fw-bold mb-1">DISPLAY NAME</label>
-                      <input type="text" class="form-control" id="new-name" required>
+                      <label for="settings-artist" class="form-label text-secondary small fw-bold mb-1">DISPLAY NAME</label>
+                      <input type="text" class="form-control bg-dark text-white border-secondary" id="settings-artist" required>
                     </div>
-                    <button type="submit" class="btn btn-danger w-100 fw-bold">Save Name</button>
-                  </form>
-                  <hr class="border-secondary mb-4 mt-4">
-                  <form id="bio-form">
+                    <div class="row g-2 mb-3">
+                      <div class="col-12 col-md-4">
+                        <label for="settings-dates" class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-calendar-event text-danger me-1"></i> BIRTHDATE</label>
+                        <input type="date" class="form-control bg-dark text-white border-secondary" id="settings-dates">
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <label for="settings-gender" class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-gender-ambiguous text-info me-1"></i> GENDER</label>
+                        <select class="form-select bg-dark text-white border-secondary" id="settings-gender">
+                          <option value="">Select gender</option>
+                          <option value="male">Male</option>
+                          <option value="female">Female</option>
+                          <option value="don't want to say">Don't want to say</option>
+                        </select>
+                      </div>
+                      <div class="col-12 col-md-4">
+                        <label for="settings-place" class="form-label text-secondary small fw-bold mb-1"><i class="bi bi-geo-alt text-warning me-1"></i> LOCATION</label>
+                        <input type="text" class="form-control bg-dark text-white border-secondary" id="settings-place" placeholder="e.g. Tokyo, Japan">
+                      </div>
+                    </div>
                     <div class="mb-3">
                       <label for="settings-bio" class="form-label text-secondary small fw-bold mb-1">BIOGRAPHY</label>
-                      <textarea class="form-control" id="settings-bio" rows="4" placeholder="Tell us about yourself..."></textarea>
+                      <textarea class="form-control bg-dark text-white border-secondary" id="settings-bio" rows="4" placeholder="Tell us about yourself..."></textarea>
                       <div class="d-flex justify-content-end mt-2">
                         <a href="#" class="text-info small text-decoration-none" data-bs-toggle="modal" data-bs-target="#bbcode-info-modal"><i class="bi bi-info-circle"></i> Formatting Help</a>
                       </div>
                     </div>
-                    <button type="submit" class="btn btn-danger w-100 fw-bold">Save Bio</button>
+                    <div id="profile-save-indicator" class="alert d-none py-2 px-3 small rounded-3 mb-3 fw-medium" role="alert"></div>
+                    <button type="submit" class="btn btn-danger w-100 fw-bold py-2" id="profile-form-submit-btn">Save Profile</button>
                   </form>
                 </div>
               </div>
@@ -112442,6 +112730,35 @@ SOFTWARE.</div>
                 ? `<div class="mt-2 text-secondary" style="font-size: 0.85rem; font-weight: 500; white-space: pre-wrap; max-width: 800px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHTML(details.description)}">${parseUserText(details.description)}</div>`
                 : "";
 
+          const pDates = details.dates || (type === "profile" && currentUser ? (currentUser.dates || "") : "");
+          const pGender = details.gender || (type === "profile" && currentUser ? (currentUser.gender || "") : "");
+          const pPlace = details.place || (type === "profile" && currentUser ? (currentUser.place || "") : "");
+
+          const formatDisplayDate = (d) => {
+            if (!d) return "";
+            const dt = new Date(d + "T00:00:00");
+            return isNaN(dt.getTime()) ? d : dt.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+          };
+
+          const formatDisplayGender = (g) => {
+            if (!g) return "";
+            if (g.toLowerCase() === "male") return "Male";
+            if (g.toLowerCase() === "female") return "Female";
+            if (g.toLowerCase() === "don't want to say") return "Don't want to say";
+            return g.charAt(0).toUpperCase() + g.slice(1);
+          };
+
+          const metaInfoHTML =
+            (type === "artist" || type === "profile") && (pDates || pGender || pPlace)
+              ? `
+                <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-3 mt-2 text-secondary font-monospace" style="font-size: 0.82rem;">
+                  ${pGender ? `<span><i class="bi bi-gender-ambiguous text-info me-1"></i>${escapeHTML(formatDisplayGender(pGender))}</span>` : ""}
+                  ${pDates ? `<span><i class="bi bi-calendar-event text-danger me-1"></i>${escapeHTML(formatDisplayDate(pDates))}</span>` : ""}
+                  ${pPlace ? `<span><i class="bi bi-geo-alt text-warning me-1"></i>${escapeHTML(pPlace)}</span>` : ""}
+                </div>
+              `
+              : "";
+
           const headerHTML = `
             <div id="dynamic-view-header" class="view-details-header position-relative overflow-hidden" style="min-height: 250px; background-color: var(--ytm-surface);">
               ${(type === "profile" || type === "artist") && details.background_url ? `<div class="position-absolute w-100 h-100 top-0 start-0" style="background-image: url('${details.background_url}'); background-size: cover; background-position: center; filter: brightness(0.3) blur(8px); transform: scale(1.1); z-index: 0;"></div>` : ""}
@@ -112456,6 +112773,7 @@ SOFTWARE.</div>
                   ${avgMonthlyHTML}
                   <div class="stats mb-2" style="color: rgba(255,255,255,0.7); font-size: 0.85rem; font-weight: 500; text-shadow: 0 1px 3px rgba(0,0,0,0.5);">${finalStatsText}</div>
                   ${bioHTML}
+                  ${metaInfoHTML}
                   <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-md-start gap-2 mt-3 w-100">
                     ${playButtonHTML}
                     ${followButtonHTML}
@@ -132587,46 +132905,70 @@ SOFTWARE.</div>
           });
         }
     
-        if (bioForm) {
-          bioForm.addEventListener("submit", async (e) => {
+        const profileForm = document.getElementById("profile-form");
+        if (profileForm) {
+          profileForm.addEventListener("submit", async (e) => {
             e.preventDefault();
-            const bio = document.getElementById("settings-bio").value;
-            const res = await fetchData("?action=save_bio", {
+            const submitBtn = document.getElementById("profile-form-submit-btn");
+            const origHtml = submitBtn ? submitBtn.innerHTML : "Save Profile";
+
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Saving...';
+            }
+
+            const artist = (document.getElementById("settings-artist")?.value || "").trim();
+            const dates = (document.getElementById("settings-dates")?.value || "").trim();
+            const gender = (document.getElementById("settings-gender")?.value || "").trim();
+            const place = (document.getElementById("settings-place")?.value || "").trim();
+            const bio = (document.getElementById("settings-bio")?.value || "").trim();
+
+            const res = await fetchData("?action=save_profile", {
               method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
               body: JSON.stringify({
+                artist,
+                dates,
+                gender,
+                place,
                 bio,
               }),
             });
+
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = origHtml;
+            }
+
+            const indicator = document.getElementById("profile-save-indicator");
+
             if (res && res.status === "success") {
+              if (indicator) {
+                indicator.className = "alert alert-success py-2 px-3 small rounded-3 mb-3 fw-medium d-flex align-items-center gap-2";
+                indicator.innerHTML = `<i class="bi bi-check-circle-fill fs-5"></i> <span>${escapeHTML(res.message || "Profile settings saved successfully!")}</span>`;
+                indicator.classList.remove("d-none");
+                setTimeout(() => {
+                  indicator.classList.add("d-none");
+                }, 4000);
+              }
               showToast(res.message, "success");
               await checkSession();
-              if (currentView.type === "user_profile") loadView(currentView);
+              if (currentView.type === "user_profile") {
+                loadView(currentView);
+              }
+            } else {
+              const errorMsg = (res && res.message) ? res.message : "Failed to update profile settings.";
+              if (indicator) {
+                indicator.className = "alert alert-warning text-dark py-2 px-3 small rounded-3 mb-3 fw-medium d-flex align-items-center gap-2";
+                indicator.innerHTML = `<i class="bi bi-exclamation-triangle-fill fs-5 text-dark"></i> <span>${escapeHTML(errorMsg)}</span>`;
+                indicator.classList.remove("d-none");
+              }
+              showToast(errorMsg, "error");
             }
           });
         }
-    
-        changeNameForm.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          const new_name = document.getElementById("new-name").value;
-          const data = await fetchData("?action=change_name", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              new_name,
-            }),
-          });
-          if (data && data.status === "success") {
-            bootstrap.Modal.getInstance(
-              document.getElementById("settings-modal"),
-            ).hide();
-            changeNameForm.reset();
-            showToast(data.message, "success");
-            await checkSession();
-            if (currentView.type === "user_profile") loadView(currentView);
-          }
-        });
     
         changePwForm.addEventListener("submit", async (e) => {
           e.preventDefault();
@@ -134220,8 +134562,14 @@ SOFTWARE.</div>
               }
             }
     
-            const newNameInput = document.getElementById("new-name");
-            if (newNameInput) newNameInput.value = currentUser.artist;
+            const artistInput = document.getElementById("settings-artist") || document.getElementById("new-name");
+            if (artistInput) artistInput.value = currentUser.artist || "";
+            const datesInput = document.getElementById("settings-dates");
+            if (datesInput) datesInput.value = currentUser.dates || "";
+            const genderInput = document.getElementById("settings-gender");
+            if (genderInput) genderInput.value = currentUser.gender || "";
+            const placeInput = document.getElementById("settings-place");
+            if (placeInput) placeInput.value = currentUser.place || "";
             const bioInput = document.getElementById("settings-bio");
             if (bioInput) bioInput.value = currentUser.bio || "";
             if (uploadLimitText) uploadLimitText.textContent = data.upload_limit;
