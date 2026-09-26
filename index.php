@@ -6276,7 +6276,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.5');
+define('APP_VERSION', '13.6');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -43067,6 +43067,37 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         $genre = trim(htmlspecialchars($_POST['multi_genre'][$sid] ?? '', ENT_QUOTES, 'UTF-8'));
         $uid = (int)($_POST['multi_userid'][$sid] ?? 0);
         $stmt->execute([$title, $artist, $album, $genre, $uid, $sid]);
+
+        // Process custom artwork upload for this song
+        if (isset($_FILES['multi_cover']['error'][$sid]) && $_FILES['multi_cover']['error'][$sid] === UPLOAD_ERR_OK) {
+          $raw_img = @file_get_contents($_FILES['multi_cover']['tmp_name'][$sid]);
+          if ($raw_img) {
+            $webp_data = process_image_to_webp($raw_img);
+            $jpeg_data = process_image_to_jpeg($raw_img);
+            if ($webp_data) {
+              $now = time();
+              $db->prepare("UPDATE music SET image = ?, last_modified = ? WHERE id = ?")->execute([$webp_data, $now, $sid]);
+
+              $covers_songs_dir = MUSIC_DIR . '/covers/songs';
+              if (!is_dir($covers_songs_dir)) @mkdir($covers_songs_dir, 0755, true);
+              if ($jpeg_data) @file_put_contents($covers_songs_dir . '/' . $sid . '.jpg', $jpeg_data);
+
+              if (!empty($_POST['apply_album_cover'][$sid]) && !empty($album) && strtolower($album) !== 'unknown album') {
+                $db->prepare("UPDATE music SET image = ?, last_modified = ? WHERE album = ?")->execute([$webp_data, $now, $album]);
+                $covers_albums_dir = MUSIC_DIR . '/covers/albums';
+                if (!is_dir($covers_albums_dir)) @mkdir($covers_albums_dir, 0755, true);
+                $slug = sanitize_for_path($album);
+                if ($slug !== '' && $jpeg_data) @file_put_contents($covers_albums_dir . '/' . $slug . '.jpg', $jpeg_data);
+              }
+
+              $shard = substr(md5((string)$sid), 0, 2);
+              $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+              if (is_dir($thumb_dir)) {
+                foreach (glob($thumb_dir . '/small_' . $sid . '_*.webp') as $f) { @unlink($f); }
+              }
+            }
+          }
+        }
       }
       log_admin_activity($db, $_SESSION['admin_email'], 'Multi-Edited Songs: ' . implode(',', $_POST['multi_edit_ids']), 0);
       $_SESSION['admin_flash_msg'] = "Selected songs updated successfully.";
@@ -43077,6 +43108,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     if (isset($_POST['admin_song_action']) && isset($_POST['song_ids']) && is_array($_POST['song_ids'])) {
       $db = get_db();
       $action = $_POST['admin_song_action'];
+      $recovered_count = 0;
       
       foreach ($_POST['song_ids'] as $sid) {
         $sid = (int)$sid;
@@ -43101,11 +43133,101 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (file_exists($dynamic_path)) @unlink($dynamic_path);
             }
           }
+        } elseif ($action === 'sync_folder_art') {
+          $stmt_f = $db->prepare("SELECT id, file, album FROM music WHERE id = ?");
+          $stmt_f->execute([$sid]);
+          $srow = $stmt_f->fetch();
+          if ($srow && !empty($srow['file'])) {
+            $fpath = $srow['file'];
+            if (!file_exists($fpath)) {
+              $candidates = [
+                MUSIC_DIR . '/' . ltrim($fpath, '/'),
+                MUSIC_DIR . '/uploads/' . basename(dirname(dirname($fpath))) . '/' . basename(dirname($fpath)) . '/' . basename($fpath),
+                MUSIC_DIR . '/uploads/' . basename(dirname($fpath)) . '/' . basename($fpath),
+                MUSIC_DIR . '/uploads/' . basename($fpath)
+              ];
+              foreach ($candidates as $cand) {
+                if (file_exists($cand) && is_file($cand)) { $fpath = $cand; break; }
+              }
+            }
+            if (file_exists($fpath)) {
+              $raw_art = null;
+              $folder_art = find_folder_artwork($fpath);
+              if ($folder_art) {
+                $raw_art = @file_get_contents($folder_art);
+              } elseif (class_exists('getID3')) {
+                $gID3 = new getID3;
+                $gID3->setOption(['encoding' => 'UTF-8']);
+                $info = $gID3->analyze($fpath);
+                getid3_lib::CopyTagsToComments($info);
+                $raw_art = $info['comments']['picture'][0]['data'] ?? null;
+              }
+              if ($raw_art) {
+                $webp_art = process_image_to_webp($raw_art);
+                if ($webp_art) {
+                  $now = time();
+                  $db->prepare("UPDATE music SET image = ?, last_modified = ? WHERE id = ?")->execute([$webp_art, $now, $sid]);
+                  $shard = substr(md5((string)$sid), 0, 2);
+                  $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+                  if (is_dir($thumb_dir)) {
+                    foreach (glob($thumb_dir . '/small_' . $sid . '_*.webp') as $f) { @unlink($f); }
+                  }
+                  $recovered_count++;
+                }
+              }
+            }
+          }
         }
       }
       
-      log_admin_activity($db, $_SESSION['admin_email'], "Bulk Action ({$action}) on Songs: " . implode(',', $_POST['song_ids']), 0);
-      $_SESSION['admin_flash_msg'] = "Bulk action executed successfully.";
+      if ($action === 'sync_folder_art') {
+        log_admin_activity($db, $_SESSION['admin_email'], "Recovered artwork for {$recovered_count} song(s) from folder/tags", 0);
+        $_SESSION['admin_flash_msg'] = "Recovered and updated artwork for {$recovered_count} song(s) from folder/embedded tags.";
+      } else {
+        log_admin_activity($db, $_SESSION['admin_email'], "Bulk Action ({$action}) on Songs: " . implode(',', $_POST['song_ids']), 0);
+        $_SESSION['admin_flash_msg'] = "Bulk action executed successfully.";
+      }
+      header('Location: ' . $_SERVER['REQUEST_URI']);
+      exit;
+    }
+
+    if (isset($_POST['bulk_set_artwork']) && isset($_POST['bulk_art_song_ids']) && is_array($_POST['bulk_art_song_ids'])) {
+      $db = get_db();
+      $sids = array_map('intval', $_POST['bulk_art_song_ids']);
+      if (!empty($sids) && isset($_FILES['artwork_file']) && $_FILES['artwork_file']['error'] === UPLOAD_ERR_OK) {
+        $raw = @file_get_contents($_FILES['artwork_file']['tmp_name']);
+        $webp_data = process_image_to_webp($raw);
+        $jpeg_data = process_image_to_jpeg($raw);
+        if ($webp_data) {
+          $now = time();
+          $placeholders = implode(',', array_fill(0, count($sids), '?'));
+          $db->prepare("UPDATE music SET image = ?, last_modified = ? WHERE id IN ({$placeholders})")->execute(array_merge([$webp_data, $now], $sids));
+
+          if (!empty($_POST['save_as_album_cover'])) {
+            $stmt_albums = $db->prepare("SELECT DISTINCT album FROM music WHERE id IN ({$placeholders}) AND album != '' AND album != 'Unknown Album'");
+            $stmt_albums->execute($sids);
+            $covers_albums_dir = MUSIC_DIR . '/covers/albums';
+            if (!is_dir($covers_albums_dir)) @mkdir($covers_albums_dir, 0755, true);
+            while ($alb = $stmt_albums->fetchColumn()) {
+              $slug = sanitize_for_path($alb);
+              if ($slug !== '' && $jpeg_data) @file_put_contents($covers_albums_dir . '/' . $slug . '.jpg', $jpeg_data);
+            }
+          }
+
+          foreach ($sids as $sid) {
+            $shard = substr(md5((string)$sid), 0, 2);
+            $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+            if (is_dir($thumb_dir)) {
+              foreach (glob($thumb_dir . '/small_' . $sid . '_*.webp') as $f) { @unlink($f); }
+            }
+          }
+
+          log_admin_activity($db, $_SESSION['admin_email'], 'Batch Applied Custom Artwork to ' . count($sids) . ' Songs', 0);
+          $_SESSION['admin_flash_msg'] = "Custom artwork applied to " . count($sids) . " song(s) successfully.";
+        } else {
+          $_SESSION['admin_flash_msg'] = "Failed to process uploaded image format.";
+        }
+      }
       header('Location: ' . $_SERVER['REQUEST_URI']);
       exit;
     }
@@ -44208,6 +44330,8 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&amp;family=Roboto:wght@400;500;700&amp;display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ace.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-searchbox.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ext-modelist.min.js"></script>
@@ -46876,7 +47000,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.5'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.6'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -51037,6 +51161,16 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                   <button type="button" class="admin-btn-pill" style="color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="openAdminMultiEditModal()"><i class="bi bi-pencil-square"></i> Batch Edit / Transfer</button>
                   
                   <div class="dropdown">
+                    <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown" style="color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);">
+                      <i class="bi bi-image"></i> Artwork
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-dark border-secondary">
+                      <li><button type="submit" name="admin_song_action" value="sync_folder_art" class="dropdown-item text-info fw-bold"><i class="bi bi-folder-symlink me-2"></i> Pull from Folder / Tags</button></li>
+                      <li><button type="button" class="dropdown-item text-warning fw-bold" onclick="openAdminBulkArtworkModal()"><i class="bi bi-upload me-2"></i> Batch Upload Artwork</button></li>
+                    </ul>
+                  </div>
+
+                  <div class="dropdown">
                     <button class="admin-btn-pill dropdown-toggle" type="button" data-bs-toggle="dropdown">
                       <i class="bi bi-shield-slash text-warning"></i> Moderation
                     </button>
@@ -51172,10 +51306,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
             <div class="modal-dialog modal-dialog-centered modal-lg">
               <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
                 <div class="modal-header border-0 pb-1">
-                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-pencil-square text-danger me-2"></i> Batch Edit (<span id="multi-edit-count">0</span> Selected)</h5>
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-pencil-square text-danger me-2"></i> Song Details &amp; Artwork (<span id="multi-edit-count">0</span> Selected)</h5>
                   <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-                <form method="POST" action="?access=admin&page=songs">
+                <form method="POST" action="?access=admin&page=songs" enctype="multipart/form-data">
                   <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
                   <input type="hidden" name="multi_edit_admin_songs" value="1">
                   <div class="modal-body p-4 text-start" style="max-height: 70vh; overflow-y: auto;" id="admin-multi-edit-container">
@@ -51185,6 +51319,72 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <button type="submit" class="admin-btn-pill admin-btn-primary">Save Changes</button>
                   </div>
                 </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Batch Upload Artwork Modal -->
+          <div class="modal fade" id="admin-bulk-artwork-modal" tabindex="-1">
+            <div class="modal-dialog modal-dialog-centered modal-sm">
+              <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #333; border-radius: 16px;">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6"><i class="bi bi-image text-danger me-2"></i> Batch Set Artwork</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="?access=admin&page=songs" enctype="multipart/form-data" id="admin-bulk-artwork-form">
+                  <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf_token']; ?>">
+                  <input type="hidden" name="bulk_set_artwork" value="1">
+                  <div id="bulk-artwork-ids-container"></div>
+                  <div class="modal-body p-3 text-start">
+                    <div class="mb-2 text-secondary small fw-bold" id="bulk-art-target-summary">0 tracks selected</div>
+                    
+                    <!-- Live Image Preview Container -->
+                    <div id="bulk-art-preview-wrap" class="d-none text-center mb-3">
+                      <div style="width: 110px; height: 110px; border-radius: 12px; overflow: hidden; background: #000; border: 2px solid rgba(255, 0, 68, 0.6); margin: 0 auto; box-shadow: 0 4px 16px rgba(0,0,0,0.6);">
+                        <img id="bulk-art-preview-img" src="" alt="Preview" style="width: 100%; height: 100%; object-fit: cover;">
+                      </div>
+                      <span class="badge bg-danger bg-opacity-25 text-danger border border-danger mt-1 font-monospace" style="font-size: 0.68rem;">1:1 Cropped Preview</span>
+                    </div>
+
+                    <div class="mb-3">
+                      <label class="form-label text-secondary small fw-bold mb-1">SELECT ARTWORK IMAGE</label>
+                      <input type="file" name="artwork_file" id="bulk-artwork-file-input" class="form-control form-control-sm bg-dark text-white border-secondary" accept="image/png, image/jpeg, image/webp" required onchange="adminHandleArtworkFileSelect(this, 'bulk')">
+                    </div>
+                    <div class="form-check mb-3">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="save_as_album_cover" value="1" id="bulk_save_album_cover" checked>
+                      <label class="form-check-label text-secondary small" for="bulk_save_album_cover">Also update album covers in <code>covers/albums/</code></label>
+                    </div>
+                    <button type="submit" class="admin-btn-pill admin-btn-primary w-100 justify-content-center py-2">Apply Artwork</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dedicated Admin 1:1 Square Artwork Crop Modal -->
+          <div class="modal fade" id="admin-artwork-crop-modal" tabindex="-1" data-bs-backdrop="static" style="z-index: 1065;">
+            <div class="modal-dialog modal-dialog-centered">
+              <div class="modal-content" style="background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.95);">
+                <div class="modal-header border-0 pb-1">
+                  <h5 class="modal-title text-white fw-bold fs-6 d-flex align-items-center gap-2">
+                    <i class="bi bi-crop text-danger"></i> Crop Artwork (1:1 Ratio)
+                  </h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-3 text-center">
+                  <div style="max-height: 55vh; overflow: hidden; background: #000; border-radius: 12px;" class="d-flex align-items-center justify-content-center">
+                    <img id="admin-crop-target-img" src="" alt="Crop" style="max-width: 100%; display: block;">
+                  </div>
+                  <div class="d-flex justify-content-between align-items-center mt-3 pt-2 border-top border-secondary border-opacity-25">
+                    <span class="text-secondary small font-monospace"><i class="bi bi-lock-fill text-danger me-1"></i> Locked to 1:1 Square</span>
+                    <div class="d-flex gap-2">
+                      <button type="button" class="admin-btn-pill" data-bs-dismiss="modal">Cancel</button>
+                      <button type="button" class="admin-btn-pill admin-btn-primary px-3" id="admin-apply-crop-btn">
+                        <i class="bi bi-check2 me-1"></i> Apply 1:1 Crop
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -51210,6 +51410,99 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               bar.classList.remove('d-flex');
             }
 
+            let adminArtworkCropper = null;
+            let adminActiveCropCallback = null;
+
+            function adminOpen1to1Cropper(file, onCropComplete, onCancel) {
+              const cropModalEl = document.getElementById('admin-artwork-crop-modal');
+              const targetImg = document.getElementById('admin-crop-target-img');
+              const applyBtn = document.getElementById('admin-apply-crop-btn');
+              if (!cropModalEl || !targetImg || !file) return;
+
+              const cropModal = bootstrap.Modal.getOrCreateInstance(cropModalEl);
+
+              const reader = new FileReader();
+              reader.onload = function(e) {
+                targetImg.src = e.target.result;
+
+                cropModalEl.addEventListener('shown.bs.modal', function initCropper() {
+                  cropModalEl.removeEventListener('shown.bs.modal', initCropper);
+                  if (adminArtworkCropper) adminArtworkCropper.destroy();
+
+                  adminArtworkCropper = new Cropper(targetImg, {
+                    aspectRatio: 1, // Automatically and always lock to 1:1 square
+                    viewMode: 1,
+                    autoCropArea: 1,
+                    dragMode: 'move',
+                    background: false,
+                    responsive: true,
+                    guides: true,
+                    center: true,
+                    highlight: false,
+                    cropBoxMovable: true,
+                    cropBoxResizable: true,
+                    toggleDragModeOnDblclick: false
+                  });
+                });
+
+                adminActiveCropCallback = (blob) => {
+                  if (onCropComplete) onCropComplete(blob);
+                };
+
+                cropModal.show();
+              };
+              reader.readAsDataURL(file);
+
+              applyBtn.onclick = function() {
+                if (!adminArtworkCropper) return;
+                // Generate clean, high-resolution 640x640 1:1 image
+                adminArtworkCropper.getCroppedCanvas({ width: 640, height: 640 }).toBlob((blob) => {
+                  if (adminActiveCropCallback) adminActiveCropCallback(blob);
+                  cropModal.hide();
+                }, 'image/jpeg', 0.88);
+              };
+
+              // Re-enable body scroll if another modal was open underneath
+              cropModalEl.addEventListener('hidden.bs.modal', function onHidden() {
+                cropModalEl.removeEventListener('hidden.bs.modal', onHidden);
+                if (adminArtworkCropper) {
+                  adminArtworkCropper.destroy();
+                  adminArtworkCropper = null;
+                }
+                if (document.querySelector('.modal.show')) {
+                  document.body.classList.add('modal-open');
+                }
+              });
+            }
+
+            function adminHandleArtworkFileSelect(input, targetId) {
+              if (!input.files || !input.files[0]) return;
+              const originalFile = input.files[0];
+
+              adminOpen1to1Cropper(originalFile, (croppedBlob) => {
+                const croppedFile = new File([croppedBlob], originalFile.name.replace(/\.[^/.]+$/, "") + ".jpg", { type: "image/jpeg" });
+                
+                // Replace input files using browser-native DataTransfer
+                const dt = new DataTransfer();
+                dt.items.add(croppedFile);
+                input.files = dt.files;
+
+                if (targetId === 'bulk') {
+                  const previewImg = document.getElementById('bulk-art-preview-img');
+                  if (previewImg) previewImg.src = URL.createObjectURL(croppedBlob);
+                  const previewWrap = document.getElementById('bulk-art-preview-wrap');
+                  if (previewWrap) previewWrap.classList.remove('d-none');
+                } else {
+                  const previewImg = document.getElementById(`preview_song_cover_${targetId}`);
+                  if (previewImg) previewImg.src = URL.createObjectURL(croppedBlob);
+                  const badge = document.getElementById(`badge_preview_${targetId}`);
+                  if (badge) badge.classList.remove('d-none');
+                }
+              }, () => {
+                input.value = '';
+              });
+            }
+
             function openAdminSingleSongEdit(song) {
               const container = document.getElementById('admin-multi-edit-container');
               container.innerHTML = '';
@@ -51220,8 +51513,28 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               fieldset.style.background = '#111';
               fieldset.style.marginBottom = '1rem';
               fieldset.innerHTML = `
-                <h6 class="text-danger fw-bold mb-3"><i class="bi bi-music-note-beamed me-1"></i> Editing Song #${song.id}</h6>
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                  <h6 class="text-danger fw-bold m-0"><i class="bi bi-music-note-beamed me-1"></i> Editing Song #${song.id}</h6>
+                  <span class="text-secondary small font-monospace">UID #${song.user_id || 0}</span>
+                </div>
                 <input type="hidden" name="multi_edit_ids[]" value="${song.id}">
+
+                <!-- Cover Artwork 1:1 Preview & Custom Crop Upload -->
+                <div class="d-flex align-items-center gap-3 p-3 mb-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                  <div style="position: relative; width: 68px; height: 68px; border-radius: 10px; overflow: hidden; background: #000; flex-shrink: 0; border: 1px solid #333;">
+                    <img id="preview_song_cover_${song.id}" src="?action=get_image&id=${song.id}&size=small&v=${song.last_modified || 0}" alt="" style="width:100%; height:100%; object-fit:cover; transition: transform 0.2s;" onerror="this.src='?action=get_app_icon'">
+                    <span id="badge_preview_${song.id}" class="badge bg-success position-absolute bottom-0 start-0 end-0 rounded-0 d-none text-uppercase" style="font-size: 0.58rem; padding: 2px 0; text-align: center;">1:1 Cropped</span>
+                  </div>
+                  <div class="flex-grow-1">
+                    <label class="form-label text-secondary small fw-bold mb-1">REPLACE ARTWORK (1:1 RATIO)</label>
+                    <input type="file" name="multi_cover[${song.id}]" class="form-control form-control-sm bg-dark text-white border-secondary" accept="image/png, image/jpeg, image/webp" onchange="adminHandleArtworkFileSelect(this, ${song.id})">
+                    <div class="form-check mt-1">
+                      <input class="form-check-input bg-dark border-secondary" type="checkbox" name="apply_album_cover[${song.id}]" value="1" id="apply_album_${song.id}" checked>
+                      <label class="form-check-label text-secondary" style="font-size: 0.74rem;" for="apply_album_${song.id}">Also apply to all songs in album "${(song.album || 'Unknown Album').replace(/"/g, '&quot;')}"</label>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="row g-2">
                   <div class="col-12 col-md-6 mb-2">
                     <label class="form-label text-secondary small fw-bold mb-1">Title</label>
@@ -51248,6 +51561,101 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               container.appendChild(fieldset);
               document.getElementById('multi-edit-count').textContent = '1';
               new bootstrap.Modal(document.getElementById('admin-multi-edit-modal')).show();
+            }
+
+            function openAdminMultiEditModal() {
+              const checkedBoxes = document.querySelectorAll('.song-cb:checked');
+              if (checkedBoxes.length === 0) {
+                alert('Please select at least one song to edit.');
+                return;
+              }
+              const container = document.getElementById('admin-multi-edit-container');
+              container.innerHTML = '';
+              checkedBoxes.forEach(cb => {
+                const row = cb.closest('tr');
+                const song = JSON.parse(row.dataset.song);
+                const fieldset = document.createElement('div');
+                fieldset.style.border = '1px solid #333';
+                fieldset.style.padding = '1.25rem';
+                fieldset.style.borderRadius = '12px';
+                fieldset.style.background = '#111';
+                fieldset.style.marginBottom = '1rem';
+                fieldset.innerHTML = `
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h6 class="text-danger fw-bold m-0"><i class="bi bi-music-note-beamed me-1"></i> Editing Song #${song.id}</h6>
+                    <span class="text-secondary small font-monospace">UID #${song.user_id || 0}</span>
+                  </div>
+                  <input type="hidden" name="multi_edit_ids[]" value="${song.id}">
+
+                  <!-- Cover Artwork 1:1 Preview & Custom Crop Upload -->
+                  <div class="d-flex align-items-center gap-3 p-3 mb-3 rounded-3 bg-black border border-secondary border-opacity-25">
+                    <div style="position: relative; width: 68px; height: 68px; border-radius: 10px; overflow: hidden; background: #000; flex-shrink: 0; border: 1px solid #333;">
+                      <img id="preview_song_cover_${song.id}" src="?action=get_image&id=${song.id}&size=small&v=${song.last_modified || 0}" alt="" style="width:100%; height:100%; object-fit:cover; transition: transform 0.2s;" onerror="this.src='?action=get_app_icon'">
+                      <span id="badge_preview_${song.id}" class="badge bg-success position-absolute bottom-0 start-0 end-0 rounded-0 d-none text-uppercase" style="font-size: 0.58rem; padding: 2px 0; text-align: center;">1:1 Cropped</span>
+                    </div>
+                    <div class="flex-grow-1">
+                      <label class="form-label text-secondary small fw-bold mb-1">REPLACE ARTWORK (1:1 RATIO)</label>
+                      <input type="file" name="multi_cover[${song.id}]" class="form-control form-control-sm bg-dark text-white border-secondary" accept="image/png, image/jpeg, image/webp" onchange="adminHandleArtworkFileSelect(this, ${song.id})">
+                      <div class="form-check mt-1">
+                        <input class="form-check-input bg-dark border-secondary" type="checkbox" name="apply_album_cover[${song.id}]" value="1" id="apply_album_${song.id}" checked>
+                        <label class="form-check-label text-secondary" style="font-size: 0.74rem;" for="apply_album_${song.id}">Apply to album "${(song.album || 'Unknown Album').replace(/"/g, '&quot;')}"</label>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="row g-2">
+                    <div class="col-12 col-md-6 mb-2">
+                      <label class="form-label text-secondary small fw-bold mb-1">Title</label>
+                      <input type="text" name="multi_title[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.title || '').replace(/"/g, '&quot;')}">
+                    </div>
+                    <div class="col-12 col-md-6 mb-2">
+                      <label class="form-label text-secondary small fw-bold mb-1">Artist</label>
+                      <input type="text" name="multi_artist[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.artist || '').replace(/"/g, '&quot;')}">
+                    </div>
+                    <div class="col-12 col-md-6 mb-2">
+                      <label class="form-label text-secondary small fw-bold mb-1">Album</label>
+                      <input type="text" name="multi_album[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.album || '').replace(/"/g, '&quot;')}">
+                    </div>
+                    <div class="col-6 col-md-3 mb-2">
+                      <label class="form-label text-secondary small fw-bold mb-1">Genre</label>
+                      <input type="text" name="multi_genre[${song.id}]" class="form-control bg-dark text-white border-secondary" value="${(song.genre || '').replace(/"/g, '&quot;')}">
+                    </div>
+                    <div class="col-6 col-md-3 mb-2">
+                      <label class="form-label text-warning small fw-bold mb-1">Owner User ID</label>
+                      <input type="number" name="multi_userid[${song.id}]" class="form-control bg-dark text-warning border-warning" value="${song.user_id || ''}">
+                    </div>
+                  </div>
+                `;
+                container.appendChild(fieldset);
+              });
+              document.getElementById('multi-edit-count').textContent = checkedBoxes.length;
+              new bootstrap.Modal(document.getElementById('admin-multi-edit-modal')).show();
+            }
+
+            function openAdminBulkArtworkModal() {
+              const checked = document.querySelectorAll('.song-cb:checked');
+              if (checked.length === 0) {
+                alert('Please select at least one song from the table to set its artwork.');
+                return;
+              }
+              const container = document.getElementById('bulk-artwork-ids-container');
+              container.innerHTML = '';
+              checked.forEach(cb => {
+                const inp = document.createElement('input');
+                inp.type = 'hidden';
+                inp.name = 'bulk_art_song_ids[]';
+                inp.value = cb.value;
+                container.appendChild(inp);
+              });
+
+              // Reset file input and preview container
+              const fileInput = document.getElementById('bulk-artwork-file-input');
+              if (fileInput) fileInput.value = '';
+              const previewWrap = document.getElementById('bulk-art-preview-wrap');
+              if (previewWrap) previewWrap.classList.add('d-none');
+
+              document.getElementById('bulk-art-target-summary').textContent = `${checked.length} tracks will receive this artwork`;
+              new bootstrap.Modal(document.getElementById('admin-bulk-artwork-modal')).show();
             }
   
             function openAdminMultiEditModal() {
@@ -56609,7 +57017,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.5';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.6';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -81957,6 +82365,70 @@ function sanitize_for_path($string) {
   return romanize_string($string);
 }
 
+function find_folder_artwork($path) {
+  if (empty($path)) return null;
+  $dir = is_dir($path) ? $path : dirname($path);
+  if (!is_dir($dir) || !is_readable($dir)) return null;
+
+  $base_no_ext = is_file($path) ? pathinfo($path, PATHINFO_FILENAME) : '';
+  $entries = @scandir($dir);
+  if (!$entries) return null;
+
+  $patterns = ['cover', 'folder', 'front', 'album', 'artwork', 'art', 'default'];
+  if ($base_no_ext !== '') {
+    array_unshift($patterns, preg_quote($base_no_ext, '/'));
+  }
+
+  $regex = '/^(' . implode('|', $patterns) . ')\.(jpe?g|png|webp)$/i';
+
+  foreach ($entries as $entry) {
+    if ($entry === '.' || $entry === '..') continue;
+    if (preg_match($regex, $entry)) {
+      $full = $dir . '/' . $entry;
+      if (is_file($full) && @filesize($full) > 0) return $full;
+    }
+  }
+
+  $parent_dir = dirname($dir);
+  if (preg_match('/^(cd|disc|disk)\s*\d+$/i', basename($dir)) && is_dir($parent_dir) && is_readable($parent_dir)) {
+    $parent_entries = @scandir($parent_dir);
+    if ($parent_entries) {
+      foreach ($parent_entries as $entry) {
+        if ($entry === '.' || $entry === '..') continue;
+        if (preg_match('/^(cover|folder|front|album|artwork)\.(jpe?g|png|webp)$/i', $entry)) {
+          $full = $parent_dir . '/' . $entry;
+          if (is_file($full) && @filesize($full) > 0) return $full;
+        }
+      }
+    }
+  }
+
+  $any_images = [];
+  foreach ($entries as $entry) {
+    if (preg_match('/\.(jpe?g|png|webp)$/i', $entry)) {
+      $full = $dir . '/' . $entry;
+      if (is_file($full) && @filesize($full) > 0) $any_images[] = $full;
+    }
+  }
+  if (count($any_images) === 1) return $any_images[0];
+
+  return null;
+}
+
+function find_cached_artwork($type, $key) {
+  if (empty($key)) return null;
+  $slug = sanitize_for_path($key);
+  if ($slug === '' && !is_numeric($key)) return null;
+  $searchKey = $slug ?: (string)$key;
+  $covers_dir = MUSIC_DIR . '/covers/' . $type;
+  if (!is_dir($covers_dir)) return null;
+  foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
+    $p = $covers_dir . '/' . $searchKey . '.' . $ext;
+    if (file_exists($p) && filesize($p) > 0) return $p;
+  }
+  return null;
+}
+
 function get_upload_limit() {
   $db = get_db();
   $max_mb = (int)($db->query("SELECT value FROM site_settings WHERE key = 'songs_max_size_mb'")->fetchColumn() ?: 50);
@@ -83455,6 +83927,94 @@ if (isset($_GET['action'])) {
       header('Content-Type: image/svg+xml');
       echo '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400"><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="' . $c1 . '" /><stop offset="50%" stop-color="' . $c2 . '" /><stop offset="100%" stop-color="' . $c3 . '" /></linearGradient></defs><rect width="1200" height="400" fill="url(#grad)"/></svg>';
       exit;
+
+    case 'upload_album_artwork':
+      if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Login required.']); }
+      $album = trim(htmlspecialchars($_POST['album'] ?? '', ENT_QUOTES, 'UTF-8'));
+      if (empty($album)) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Album name required.']); }
+
+      $stmt_check = $db->prepare("SELECT COUNT(*) FROM music WHERE album = ? AND (user_id = ? OR ? = 1)");
+      $stmt_check->execute([$album, $user_id, $is_admin]);
+      if ((int)$stmt_check->fetchColumn() === 0) {
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Permission denied.']);
+      }
+
+      if (isset($_FILES['artwork']) && $_FILES['artwork']['error'] === UPLOAD_ERR_OK) {
+        $raw = file_get_contents($_FILES['artwork']['tmp_name']);
+        $webp_data = process_image_to_webp($raw);
+        $jpeg_data = process_image_to_jpeg($raw);
+        if ($webp_data) {
+          $covers_albums_dir = MUSIC_DIR . '/covers/albums';
+          if (!is_dir($covers_albums_dir)) @mkdir($covers_albums_dir, 0755, true);
+          $slug = sanitize_for_path($album);
+          if ($slug !== '' && $jpeg_data) {
+            @file_put_contents($covers_albums_dir . '/' . $slug . '.jpg', $jpeg_data);
+          }
+
+          $now = time();
+          $db->prepare("UPDATE music SET image = ?, last_modified = ? WHERE album = ?")->execute([$webp_data, $now, $album]);
+
+          $stmt_songs = $db->prepare("SELECT id FROM music WHERE album = ?");
+          $stmt_songs->execute([$album]);
+          while ($sid = $stmt_songs->fetchColumn()) {
+            $shard = substr(md5((string)$sid), 0, 2);
+            $thumb_dir = MUSIC_DIR . '/thumbnails/' . $shard;
+            if (is_dir($thumb_dir)) {
+              foreach (glob($thumb_dir . '/small_' . $sid . '_*.webp') as $f) { @unlink($f); }
+            }
+          }
+
+          send_json(['status' => 'success', 'message' => 'Album artwork updated successfully!']);
+        }
+      }
+      http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid image file.']);
+      break;
+
+    case 'upload_artist_artwork':
+      if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Login required.']); }
+      $artist = trim(htmlspecialchars($_POST['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
+      $target_uid = (int)($_POST['user_id'] ?? 0);
+      if (empty($artist)) { http_response_code(400); send_json(['status' => 'error', 'message' => 'Artist name required.']); }
+
+      $is_allowed = ($is_admin == 1 || $is_super_admin == 1);
+      if (!$is_allowed && $target_uid > 0 && $target_uid === $user_id) $is_allowed = true;
+      if (!$is_allowed) {
+        $stmt_u = $db->prepare("SELECT id FROM users WHERE id = ? AND artist = ? COLLATE NOCASE");
+        $stmt_u->execute([$user_id, $artist]);
+        if ($stmt_u->fetchColumn()) $is_allowed = true;
+      }
+      if (!$is_allowed) {
+        http_response_code(403); send_json(['status' => 'error', 'message' => 'Permission denied.']);
+      }
+
+      if (isset($_FILES['artwork']) && $_FILES['artwork']['error'] === UPLOAD_ERR_OK) {
+        $raw = file_get_contents($_FILES['artwork']['tmp_name']);
+        $webp_data = process_image_to_webp($raw, 400, 80, true);
+        $jpeg_data = process_image_to_jpeg($raw, 400, 80, true);
+        if ($webp_data) {
+          $covers_artists_dir = MUSIC_DIR . '/covers/artists';
+          if (!is_dir($covers_artists_dir)) @mkdir($covers_artists_dir, 0755, true);
+          $slug = sanitize_for_path($artist);
+          if ($slug !== '' && $jpeg_data) {
+            @file_put_contents($covers_artists_dir . '/' . $slug . '.jpg', $jpeg_data);
+          }
+
+          if ($target_uid > 0) {
+            $db->prepare("UPDATE users SET profile_picture = ?, profile_picture_type = 'image/webp' WHERE id = ?")->execute([$webp_data, $target_uid]);
+          } else {
+            $stmt_find_user = $db->prepare("SELECT id FROM users WHERE artist = ? COLLATE NOCASE");
+            $stmt_find_user->execute([$artist]);
+            $found_uid = $stmt_find_user->fetchColumn();
+            if ($found_uid) {
+              $db->prepare("UPDATE users SET profile_picture = ?, profile_picture_type = 'image/webp' WHERE id = ?")->execute([$webp_data, $found_uid]);
+            }
+          }
+
+          send_json(['status' => 'success', 'message' => 'Artist image updated successfully!']);
+        }
+      }
+      http_response_code(400); send_json(['status' => 'error', 'message' => 'Invalid image file.']);
+      break;
 
     case 'upload_profile_picture':
       if (!$user_id) { http_response_code(403); send_json(['status' => 'error', 'message' => 'Not logged in.']); }
@@ -87726,7 +88286,7 @@ if (isset($_GET['action'])) {
     case 'get_albums':
       $sort_key = $_GET['sort'] ?? 'album_asc';
       
-      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, m.last_modified, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY m.id DESC");
+      $stmt = $db->prepare("SELECT m.album, m.artist, m.user_id, m.id, m.year, m.last_modified, CASE WHEN m.image IS NOT NULL AND length(m.image) > 0 THEN 1 ELSE 0 END as has_img, COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as pc FROM music m WHERE m.album != '' AND m.album != 'Unknown Album' AND m.album IS NOT NULL AND (m.is_private = 0 OR m.user_id = ? OR match_artist(m.artist, (SELECT artist FROM users WHERE id = ?)) = 1 OR {$is_super_admin} = 1) ORDER BY m.id DESC");
       $stmt->execute([$user_id]);
       $rows = $stmt->fetchAll();
       
@@ -87744,6 +88304,7 @@ if (isset($_GET['action'])) {
                 'artist' => $p,
                 'user_id' => $row['user_id'],
                 'id' => $row['id'],
+                'has_img' => $row['has_img'],
                 'image_v' => $row['last_modified'],
                 'year' => $row['year'],
                 'song_count' => 1,
@@ -87752,6 +88313,11 @@ if (isset($_GET['action'])) {
             } else {
               $albums[$key]['song_count']++;
               $albums[$key]['total_plays'] += $row['pc'];
+              if (empty($albums[$key]['has_img']) && !empty($row['has_img'])) {
+                $albums[$key]['id'] = $row['id'];
+                $albums[$key]['image_v'] = $row['last_modified'];
+                $albums[$key]['has_img'] = 1;
+              }
             }
           }
         }
@@ -88535,9 +89101,64 @@ if (isset($_GET['action'])) {
       $id = intval($_GET['id'] ?? 0);
       $size = $_GET['size'] ?? 'large';
       
-      $stmt = $db->prepare("SELECT image, title, artist, last_modified FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT id, file, image, title, artist, album, last_modified FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $row = $stmt->fetch();
+
+      // On-demand automatic artwork discovery if database has no image
+      if ($row && empty($row['image'])) {
+        $raw_found_data = null;
+
+        if (!empty($row['album'])) {
+          $album_cov = find_cached_artwork('albums', $row['album']);
+          if ($album_cov) $raw_found_data = @file_get_contents($album_cov);
+        }
+        if (!$raw_found_data) {
+          $song_cov = find_cached_artwork('songs', $row['id']);
+          if ($song_cov) $raw_found_data = @file_get_contents($song_cov);
+        }
+
+        if (!$raw_found_data && !empty($row['file'])) {
+          $fpath = $row['file'];
+          if (!file_exists($fpath)) {
+            $candidates = [
+              MUSIC_DIR . '/' . ltrim($fpath, '/'),
+              MUSIC_DIR . '/uploads/' . basename(dirname(dirname($fpath))) . '/' . basename(dirname($fpath)) . '/' . basename($fpath),
+              MUSIC_DIR . '/uploads/' . basename(dirname($fpath)) . '/' . basename($fpath),
+              MUSIC_DIR . '/uploads/' . basename($fpath)
+            ];
+            foreach ($candidates as $cand) {
+              if (file_exists($cand) && is_file($cand)) { $fpath = $cand; break; }
+            }
+          }
+
+          if (file_exists($fpath)) {
+            $folder_img = find_folder_artwork($fpath);
+            if ($folder_img) {
+              $raw_found_data = @file_get_contents($folder_img);
+            } elseif (class_exists('getID3')) {
+              $gID3 = new getID3;
+              $gID3->setOption(['encoding' => 'UTF-8']);
+              $info = $gID3->analyze($fpath);
+              getid3_lib::CopyTagsToComments($info);
+              $raw_found_data = $info['comments']['picture'][0]['data'] ?? null;
+            }
+          }
+        }
+
+        if ($raw_found_data) {
+          $webp_data = process_image_to_webp($raw_found_data);
+          if ($webp_data) {
+            $row['image'] = $webp_data;
+            try {
+              $db->prepare("UPDATE music SET image = ? WHERE id = ?")->execute([$webp_data, $row['id']]);
+              if (!empty($row['album']) && strtolower($row['album']) !== 'unknown album') {
+                $db->prepare("UPDATE music SET image = ? WHERE album = ? AND (image IS NULL OR image = '')")->execute([$webp_data, $row['album']]);
+              }
+            } catch (\Throwable $e) {}
+          }
+        }
+      }
       
       if ($row && $row['image']) {
         if ($size === 'small') {
@@ -91955,15 +92576,9 @@ function perform_full_scan($db) {
           
           $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
           if (!$raw_image_data) {
-            $dir = pathinfo($filePath, PATHINFO_DIRNAME);
-            $filename = pathinfo($filePath, PATHINFO_FILENAME);
-            $possible_covers = [$filename . '.jpg', $filename . '.png', 'cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'artwork.jpg'];
-            foreach ($possible_covers as $cfile) {
-              $cpath = $dir . '/' . $cfile;
-              if (file_exists($cpath)) {
-                $raw_image_data = @file_get_contents($cpath);
-                if ($raw_image_data) break;
-              }
+            $found_art = find_folder_artwork($filePath);
+            if ($found_art) {
+              $raw_image_data = @file_get_contents($found_art);
             }
           }
           $webp_image_data = process_image_to_webp($raw_image_data);
@@ -92079,7 +92694,7 @@ function perform_cover_scan($db) {
   $getID3->setOption(['encoding' => 'UTF-8']);
   $getID3->option_tags_html = false;
 
-  $stmt = $db->query("SELECT id, file, title FROM music WHERE image IS NULL");
+  $stmt = $db->query("SELECT id, file, title, album FROM music WHERE image IS NULL OR length(image) < 100");
   $songs_to_process = $stmt->fetchAll();
   $total = count($songs_to_process);
 
@@ -92121,16 +92736,9 @@ function perform_cover_scan($db) {
         $raw_image_data = $info['comments']['picture'][0]['data'] ?? null;
 
         if (!$raw_image_data) {
-          $file_info = pathinfo($filePath);
-          $dir = $file_info['dirname'];
-          $filename = $file_info['filename'];
-          $neighbors = [$filename . '.jpg', $filename . '.png', 'cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'artwork.jpg'];
-          foreach ($neighbors as $nfile) {
-            $npath = $dir . '/' . $nfile;
-            if (file_exists($npath)) {
-              $raw_image_data = @file_get_contents($npath);
-              if ($raw_image_data) break;
-            }
+          $found_art = find_folder_artwork($filePath);
+          if ($found_art) {
+            $raw_image_data = @file_get_contents($found_art);
           }
         }
 
@@ -96698,7 +97306,7 @@ function perform_cover_scan($db) {
       }
 
       .rg-search-bar {
-        padding: 12px 16px;
+        padding: 8px 16px 6px 16px;
         background-color: var(--rg-bg);
         flex-shrink: 0;
       }
@@ -103741,6 +104349,26 @@ function perform_cover_scan($db) {
                 <div id="metadata-progress" class="progress-bar progress-bar-striped progress-bar-animated bg-danger" role="progressbar" style="width: 0%;">0%</div>
               </div>
             </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="custom-artwork-upload-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background-color: var(--ytm-surface); border: 1px solid #404040; border-radius: 16px;">
+          <div class="modal-header border-0 pb-2">
+            <h5 class="modal-title text-white fw-bold" id="custom-artwork-modal-title"><i class="bi bi-image text-danger me-2"></i>Change Artwork</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-4 text-center">
+            <input type="hidden" id="custom-artwork-type" value="album">
+            <input type="hidden" id="custom-artwork-target" value="">
+            <input type="hidden" id="custom-artwork-userid" value="">
+            <div style="max-width: 200px; margin: 0 auto;" class="mb-3">
+              <img id="custom-artwork-preview" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" style="display: block; width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px; border: 2px solid var(--ytm-surface-2);" alt="Preview">
+            </div>
+            <input type="file" id="custom-artwork-file" class="form-control form-control-sm bg-dark text-white border-secondary mb-3" accept="image/png, image/jpeg, image/webp">
+            <button type="button" class="btn btn-danger w-100 fw-bold rounded-pill py-2" id="custom-artwork-save-btn">Save Artwork</button>
           </div>
         </div>
       </div>
@@ -112682,6 +113310,24 @@ SOFTWARE.</div>
             document.title = `${details.name} - PHP Music`;
           }
 
+          let uploadAlbumArtBtnHTML = "";
+          if (type === "album" && currentUser && (currentUser.id == details.user_id || currentUser.is_admin == 1 || currentUser.status === "super_admin")) {
+            uploadAlbumArtBtnHTML = `
+              <button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary upload-album-art-btn" data-album="${encodeURIComponent(details.name)}" data-artist="${encodeURIComponent(currentView.artist_name || details.artist || '')}" title="Change Album Artwork" style="font-size: 0.85rem; height: 38px;">
+                <i class="bi bi-image"></i> <span class="d-none d-md-inline">Change Artwork</span>
+              </button>
+            `;
+          }
+
+          let uploadArtistArtBtnHTML = "";
+          if (type === "artist" && currentUser && (currentUser.id == details.user_id || currentUser.is_admin == 1 || currentUser.status === "super_admin")) {
+            uploadArtistArtBtnHTML = `
+              <button class="btn btn-outline-light d-inline-flex align-items-center justify-content-center gap-2 rounded-pill px-3 py-1 fw-bold border-secondary upload-artist-art-btn" data-artist="${encodeURIComponent(details.name)}" data-userid="${details.user_id || ''}" title="Change Artist Picture" style="font-size: 0.85rem; height: 38px;">
+                <i class="bi bi-person-bounding-box"></i> <span class="d-none d-md-inline">Change Picture</span>
+              </button>
+            `;
+          }
+
           if (type !== "profile") {
             let shareArtistName = currentView.artist_name || "";
             if (!shareArtistName && songsList && songsList.length > 0) {
@@ -112781,6 +113427,8 @@ SOFTWARE.</div>
                     ${blockButtonHTML}
                     ${reportButtonHTML}
                     ${copyButtonHTML}
+                    ${uploadAlbumArtBtnHTML}
+                    ${uploadArtistArtBtnHTML}
                     ${shareButtonHTML}
                     ${downloadButtonHTML}
                     ${downloadExportPlaylistZipButtonHTML}
@@ -115288,7 +115936,6 @@ SOFTWARE.</div>
 
           if (
             currentView.type === "get_inbox" ||
-            currentView.type === "rhythm_game" ||
             currentView.type === "photo_editor"
           ) {
             if (pageHeaderEl) pageHeaderEl.classList.add("d-none");
@@ -115307,10 +115954,33 @@ SOFTWARE.</div>
               mainContentEl.style.display = "flex";
               mainContentEl.style.flexDirection = "column";
             }
+          } else if (currentView.type === "rhythm_game") {
+            if (pageHeaderEl) {
+              pageHeaderEl.classList.add("d-none", "d-md-flex");
+              pageHeaderEl.style.padding = "0.4rem 1.5rem";
+            }
+            const mobHeaderEl = document.querySelector(".mobile-header");
+            if (mobHeaderEl) mobHeaderEl.classList.remove("d-none");
+            contentArea.style.padding = "0";
+            contentArea.style.margin = "0";
+            contentArea.style.width = "100%";
+            contentArea.style.maxWidth = "100%";
+            contentArea.style.height = "calc(100vh - 75px)";
+            contentArea.style.display = "flex";
+            contentArea.style.flexDirection = "column";
+            if (mainContentEl) {
+              mainContentEl.style.height = "100%";
+              mainContentEl.style.overflow = "hidden";
+              mainContentEl.style.display = "flex";
+              mainContentEl.style.flexDirection = "column";
+            }
           } else {
             const mobHeaderEl = document.querySelector(".mobile-header");
             if (mobHeaderEl) mobHeaderEl.classList.remove("d-none");
-            if (pageHeaderEl) pageHeaderEl.classList.remove("d-none");
+            if (pageHeaderEl) {
+              pageHeaderEl.classList.remove("d-none", "d-md-flex");
+              pageHeaderEl.style.padding = "";
+            }
             contentArea.style.padding = "";
             contentArea.style.margin = "";
             contentArea.style.width = "";
@@ -115404,7 +116074,7 @@ SOFTWARE.</div>
     
           switch (currentView.type) {
             case "rhythm_game":
-              updateContentTitle("Rhythm Game", !!currentUser);
+              updateContentTitle("Rhythm Game", false);
               if (currentUser) {
                 if (currentUser.rhythm_strikes > 0) {
                   contentArea.innerHTML = `<div class="text-center p-5 text-danger"><i class="bi bi-exclamation-triangle-fill d-block fs-1 mb-3"></i><h4>Game Access Suspended</h4><p class="text-secondary mt-2">You have been banned from the Rhythm Game for suspicious activity (Strike ${currentUser.rhythm_strikes}/3).<br>Submit an appeal in Settings to restore access.</p></div>`;
@@ -127250,6 +127920,33 @@ SOFTWARE.</div>
             buildAndShowPlaylistContextMenu(playlistMoreBtn, playlistData);
             return;
           }
+          const uploadAlbumArtBtn = target.closest(".upload-album-art-btn");
+          if (uploadAlbumArtBtn) {
+            e.stopPropagation();
+            const albumName = decodeURIComponent(uploadAlbumArtBtn.dataset.album);
+            document.getElementById("custom-artwork-type").value = "album";
+            document.getElementById("custom-artwork-target").value = albumName;
+            document.getElementById("custom-artwork-modal-title").innerHTML = '<i class="bi bi-image text-danger me-2"></i>Change Album Artwork';
+            document.getElementById("custom-artwork-preview").src = "?action=get_image&id=" + (currentSong ? currentSong.id : 0);
+            document.getElementById("custom-artwork-file").value = "";
+            bootstrap.Modal.getOrCreateInstance(document.getElementById("custom-artwork-upload-modal")).show();
+            return;
+          }
+
+          const uploadArtistArtBtn = target.closest(".upload-artist-art-btn");
+          if (uploadArtistArtBtn) {
+            e.stopPropagation();
+            const artistName = decodeURIComponent(uploadArtistArtBtn.dataset.artist);
+            const userId = uploadArtistArtBtn.dataset.userid || "";
+            document.getElementById("custom-artwork-type").value = "artist";
+            document.getElementById("custom-artwork-target").value = artistName;
+            document.getElementById("custom-artwork-userid").value = userId;
+            document.getElementById("custom-artwork-modal-title").innerHTML = '<i class="bi bi-person-bounding-box text-danger me-2"></i>Change Artist Picture';
+            document.getElementById("custom-artwork-preview").src = userId ? `?action=get_profile_picture&id=${userId}` : "?action=get_app_icon";
+            document.getElementById("custom-artwork-file").value = "";
+            bootstrap.Modal.getOrCreateInstance(document.getElementById("custom-artwork-upload-modal")).show();
+            return;
+          }
           const shareBtn = target.closest(".share-view-btn");
           if (shareBtn) {
             e.stopPropagation();
@@ -130393,6 +131090,81 @@ SOFTWARE.</div>
                 }
               }
               bootstrap.Modal.getOrCreateInstance(reqModalEl).show();
+            }
+          });
+        }
+
+        let customArtworkCropper = null;
+        const customArtFileInput = document.getElementById("custom-artwork-file");
+        if (customArtFileInput) {
+          customArtFileInput.addEventListener("change", function() {
+            if (this.files && this.files[0]) {
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                const preview = document.getElementById("custom-artwork-preview");
+                preview.src = ev.target.result;
+                if (customArtworkCropper) customArtworkCropper.destroy();
+                customArtworkCropper = new Cropper(preview, {
+                  aspectRatio: 1,
+                  viewMode: 1,
+                  autoCropArea: 1,
+                  dragMode: "move",
+                  background: false,
+                });
+              };
+              reader.readAsDataURL(this.files[0]);
+            }
+          });
+        }
+
+        const customArtSaveBtn = document.getElementById("custom-artwork-save-btn");
+        if (customArtSaveBtn) {
+          customArtSaveBtn.addEventListener("click", async () => {
+            const type = document.getElementById("custom-artwork-type").value;
+            const targetVal = document.getElementById("custom-artwork-target").value;
+            const userId = document.getElementById("custom-artwork-userid").value;
+            const fileInput = document.getElementById("custom-artwork-file");
+
+            if (!customArtworkCropper && (!fileInput.files || fileInput.files.length === 0)) {
+              return showToast("Please select an image file.", "error");
+            }
+
+            customArtSaveBtn.disabled = true;
+            customArtSaveBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+
+            const doUpload = async (blob) => {
+              const fd = new FormData();
+              fd.append("artwork", blob, "artwork.jpg");
+              if (type === "album") {
+                fd.append("album", targetVal);
+              } else {
+                fd.append("artist", targetVal);
+                if (userId) fd.append("user_id", userId);
+              }
+
+              const action = type === "album" ? "upload_album_artwork" : "upload_artist_artwork";
+              const res = await fetch(`?action=${action}`, { method: "POST", body: fd }).then(r => r.json());
+              customArtSaveBtn.disabled = false;
+              customArtSaveBtn.textContent = "Save Artwork";
+
+              if (res && res.status === "success") {
+                if (customArtworkCropper) {
+                  customArtworkCropper.destroy();
+                  customArtworkCropper = null;
+                }
+                bootstrap.Modal.getInstance(document.getElementById("custom-artwork-upload-modal"))?.hide();
+                showToast(res.message, "success");
+                requestCache.clear();
+                loadView(currentView);
+              } else {
+                showToast(res?.message || "Upload failed.", "error");
+              }
+            };
+
+            if (customArtworkCropper) {
+              customArtworkCropper.getCroppedCanvas({ width: 600, height: 600 }).toBlob(doUpload, "image/jpeg", 0.85);
+            } else {
+              doUpload(fileInput.files[0]);
             }
           });
         }
