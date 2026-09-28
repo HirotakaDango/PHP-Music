@@ -1498,6 +1498,3165 @@ if (isset($_GET['access']) && $_GET['access'] === 'news') {
   exit;
 }
 
+// MANGA API (?access=public_manga)
+if (isset($_GET['access']) && ($_GET['access'] === 'profiletree' || $_GET['access'] === 'public_manga')) {
+  header('X-Frame-Options: SAMEORIGIN');
+  header('X-Content-Type-Options: nosniff');
+  header('Referrer-Policy: strict-origin-when-cross-origin');
+?>
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title id="site-title">PHPMusicPost &ndash; Manga Studio</title>
+    <link rel="icon" id="site-favicon" type="image/svg+xml" href="index.php?access=artwork&action=get_app_icon">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    
+    <style>
+      :root,
+      :root[data-theme="dark"] {
+        --bg-base: #050505;
+        --bg-surface: #0c0c10;
+        --bg-surface-elevated: #14141a;
+        --bg-surface-hover: #1c1c24;
+        --bg-surface-highest: #24242e;
+        --border-subtle: #202028;
+        --border-strong: #2e2e3a;
+        --border-accent: rgba(255, 0, 0, 0.45);
+        --text-primary: #ffffff;
+        --text-secondary: #a0a0b0;
+        --text-muted: #646476;
+        --accent: #ff0000;
+        --accent-hover: #d90000;
+        --accent-alpha: rgba(255, 0, 0, 0.18);
+        --r18: #ff0044;
+        --r18-alpha: rgba(255, 0, 68, 0.18);
+        --success: #10b981;
+        --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.6);
+        --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.8);
+        --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.95);
+        --hd-grid-gap: 14px;
+        --hd-card-radius: 14px;
+        --ease-m3: cubic-bezier(0.2, 0, 0, 1);
+      }
+
+      *, *::before, *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-strong) transparent;
+      }
+
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border-strong);
+        border-radius: 9999px;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+      html, body {
+        width: 100%;
+        height: 100dvh;
+        overflow: hidden;
+        background-color: var(--bg-base);
+        color: var(--text-primary);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.5;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      button, input, select, textarea {
+        font-family: inherit;
+        color: inherit;
+        border: none;
+        background: none;
+        outline: none;
+      }
+
+      button {
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      svg {
+        width: 20px;
+        height: 20px;
+        fill: currentColor;
+        flex-shrink: 0;
+      }
+
+      .app-header {
+        height: 56px;
+        background: var(--bg-surface);
+        border-bottom: 1px solid var(--border-subtle);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 calc(1.2rem + env(safe-area-inset-right, 0px)) 0 calc(1.2rem + env(safe-area-inset-left, 0px));
+        z-index: 100;
+        flex-shrink: 0;
+      }
+
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+      }
+
+      .brand-logo {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-weight: 800;
+        font-size: 1.15rem;
+        letter-spacing: -0.4px;
+        color: #ffffff;
+      }
+
+      .brand-logo img {
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+        object-fit: contain;
+      }
+
+      .brand-badge {
+        font-size: 0.65rem;
+        font-weight: 800;
+        background: var(--accent);
+        color: #ffffff;
+        padding: 2px 7px;
+        border-radius: 6px;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+      }
+
+      .btn-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        color: var(--text-secondary);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s, color 0.15s;
+      }
+
+      .btn-icon:hover {
+        background: var(--bg-surface-hover);
+        color: var(--text-primary);
+      }
+
+      .app-body {
+        display: flex;
+        flex: 1;
+        height: calc(100dvh - 56px);
+        max-height: calc(100dvh - 56px);
+        overflow: hidden;
+        position: relative;
+      }
+
+      .sidebar-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(4px);
+        z-index: 950;
+        display: none;
+        opacity: 0;
+        transition: opacity 0.25s var(--ease-m3);
+        pointer-events: none;
+      }
+
+      .sidebar-backdrop.active {
+        display: block !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+      }
+
+      .nav-sidebar {
+        width: 265px;
+        background: var(--bg-surface);
+        border-right: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+        flex-shrink: 0;
+        padding: 1rem 0.75rem calc(1rem + env(safe-area-inset-bottom, 0px)) calc(0.75rem + env(safe-area-inset-left, 0px));
+        gap: 0.3rem;
+        z-index: 90;
+      }
+
+      @media (min-width: 861px) {
+        #btn-toggle-menu { display: none !important; }
+        .nav-sidebar { transform: none !important; }
+      }
+
+      @media (max-width: 860px) {
+        #btn-toggle-menu { display: inline-flex; }
+        .nav-sidebar {
+          position: fixed;
+          top: 0;
+          bottom: 0;
+          left: 0;
+          width: 290px;
+          max-width: 85vw;
+          height: 100dvh;
+          transform: translateX(-100%);
+          box-shadow: var(--shadow-lg);
+          z-index: 1000;
+          transition: transform 0.25s var(--ease-m3);
+        }
+        .nav-sidebar.open { transform: translateX(0); }
+        .sidebar-mobile-header { display: flex !important; }
+      }
+
+      .sidebar-mobile-header {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.2rem 0.4rem 0.8rem 0.4rem;
+        border-bottom: 1px solid var(--border-subtle);
+        margin-bottom: 0.4rem;
+      }
+
+      .sidebar-search-wrap {
+        padding: 0 0.2rem 0.6rem 0.2rem;
+      }
+
+      .sidebar-search-box {
+        position: relative;
+        width: 100%;
+        height: 40px;
+        background: var(--bg-surface-elevated);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        padding: 0 0.95rem;
+        gap: 0.65rem;
+        transition: all 0.2s var(--ease-m3);
+      }
+
+      .sidebar-search-box:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-alpha);
+        background: var(--bg-surface-highest);
+      }
+
+      .sidebar-search-box input {
+        flex: 1;
+        height: 100%;
+        font-size: 0.85rem;
+        color: var(--text-primary);
+      }
+
+      .sidebar-search-box svg {
+        width: 16px;
+        height: 16px;
+        color: var(--text-muted);
+      }
+
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        padding: 0.65rem 1rem;
+        border-radius: 12px;
+        color: var(--text-secondary);
+        font-weight: 600;
+        font-size: 0.88rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .nav-item:hover {
+        background: var(--bg-surface-hover);
+        color: var(--text-primary);
+      }
+
+      .nav-item.active {
+        background: var(--accent-alpha);
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .nav-divider {
+        height: 1px;
+        background: var(--border-subtle);
+        margin: 0.5rem 0.4rem;
+      }
+
+      .nav-heading {
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        padding: 0.35rem 0.95rem;
+        letter-spacing: 0.6px;
+      }
+
+      .r18-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.5rem 0.85rem;
+        margin: 0.15rem 0.2rem;
+        border-radius: 12px;
+        background: var(--bg-surface-elevated);
+        border: 1px solid var(--border-subtle);
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+      }
+
+      .r18-switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+
+      .r18-switch input { opacity: 0; width: 0; height: 0; }
+      .r18-slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background-color: var(--border-strong);
+        border-radius: 20px;
+        transition: 0.2s;
+      }
+
+      .r18-slider::before {
+        position: absolute;
+        content: "";
+        height: 14px;
+        width: 14px;
+        left: 3px;
+        bottom: 3px;
+        background-color: #ffffff;
+        border-radius: 50%;
+        transition: 0.2s;
+      }
+
+      .r18-switch input:checked + .r18-slider { background-color: var(--r18); }
+      .r18-switch input:checked + .r18-slider::before { transform: translateX(16px); }
+
+      .safe-blur-target {
+        filter: blur(28px) brightness(0.65) !important;
+        transition: filter 0.3s var(--ease-m3) !important;
+      }
+      .safe-blur-revealed .safe-blur-target { filter: none !important; }
+      .safe-blur-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: rgba(8, 8, 12, 0.85);
+        backdrop-filter: blur(14px);
+        z-index: 6;
+        cursor: pointer;
+        padding: 0.75rem;
+        text-align: center;
+        color: #ffffff;
+        gap: 4px;
+        border-radius: inherit;
+      }
+      .safe-blur-revealed .safe-blur-overlay { display: none !important; }
+
+      .main-viewport {
+        flex: 1;
+        height: 100%;
+        overflow-y: auto;
+        overflow-x: hidden;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        background: var(--bg-base);
+        scroll-behavior: smooth;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: env(safe-area-inset-bottom, 24px);
+      }
+
+      .page-container {
+        width: 100%;
+        max-width: 1560px;
+        margin: 0 auto;
+        padding: 1.25rem 1.5rem;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+      }
+
+      @media (max-width: 768px) {
+        .page-container {
+          padding: 0.85rem 0.65rem;
+        }
+      }
+
+      .feed-header-wrap {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1.2rem;
+        gap: 1rem;
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .feed-header-title-block h1 {
+        font-size: clamp(1.3rem, 3vw, 1.6rem);
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        margin: 0;
+        color: var(--text-primary);
+      }
+
+      .feed-header-title-block p {
+        font-size: 0.82rem;
+        color: var(--text-muted);
+        margin-top: 0.2rem;
+      }
+
+      .active-filter-pills-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 0.55rem;
+      }
+
+      .active-filter-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--accent-alpha);
+        border: 1px solid var(--border-accent);
+        color: var(--accent);
+        padding: 3px 10px;
+        border-radius: 9999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .active-filter-pill:hover {
+        background: var(--accent);
+        color: #ffffff;
+      }
+
+      .clear-all-pill-btn {
+        display: inline-flex;
+        align-items: center;
+        background: transparent;
+        border: 1px dashed var(--border-strong);
+        color: var(--text-muted);
+        padding: 3px 9px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .clear-all-pill-btn:hover {
+        border-color: var(--text-primary);
+        color: var(--text-primary);
+      }
+
+      .feed-header-controls {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      @media (max-width: 768px) {
+        .feed-header-controls {
+          display: grid !important;
+          grid-template-columns: 1fr 1fr;
+          width: 100%;
+          gap: 0.5rem;
+        }
+        .feed-header-controls select {
+          width: 100%;
+        }
+      }
+
+      .custom-select {
+        background-color: var(--bg-surface-elevated);
+        border: 1px solid var(--border-subtle);
+        border-radius: 9999px;
+        padding: 0 2.2rem 0 1rem;
+        color: var(--text-primary);
+        cursor: pointer;
+        font-size: 0.82rem;
+        font-weight: 600;
+        height: 38px;
+        appearance: none;
+        -webkit-appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='%239ea0b8'%3E%3Cpath d='M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 12px center;
+        background-size: 14px;
+      }
+
+      .custom-select:focus { border-color: var(--accent); }
+
+      .btn-primary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--accent);
+        color: #ffffff;
+        padding: 0 1.25rem;
+        height: 40px;
+        border-radius: 9999px;
+        font-size: 0.86rem;
+        font-weight: 700;
+        gap: 0.5rem;
+        transition: background 0.15s, transform 0.1s;
+        box-shadow: 0 4px 14px var(--accent-alpha);
+        cursor: pointer;
+      }
+
+      .btn-primary:hover { background: var(--accent-hover); color: #ffffff; }
+      .btn-primary:active { transform: scale(0.97); }
+
+      .btn-subtle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg-surface-elevated);
+        color: var(--text-primary);
+        border: 1px solid var(--border-subtle);
+        padding: 0 1rem;
+        height: 38px;
+        border-radius: 9999px;
+        font-size: 0.84rem;
+        font-weight: 600;
+        gap: 0.45rem;
+        transition: background 0.15s, border-color 0.15s;
+        cursor: pointer;
+      }
+
+      .btn-subtle:hover {
+        background: var(--bg-surface-hover);
+        border-color: var(--border-strong);
+      }
+
+      .art-grid {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+        gap: var(--hd-grid-gap);
+      }
+
+      @media (max-width: 600px) {
+        .art-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          gap: 10px !important;
+        }
+      }
+
+      .art-card {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--hd-card-radius);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        cursor: pointer;
+        position: relative;
+        transition: transform 0.2s var(--ease-m3), border-color 0.2s var(--ease-m3), box-shadow 0.2s var(--ease-m3);
+        text-decoration: none;
+      }
+
+      .art-card:hover {
+        transform: translateY(-4px);
+        box-shadow: var(--shadow-md);
+        border-color: var(--border-accent);
+      }
+
+      .art-thumb-wrap {
+        width: 100%;
+        aspect-ratio: 9 / 14 !important;
+        position: relative;
+        overflow: hidden;
+        background: #08080a;
+        border-radius: calc(var(--hd-card-radius) - 1px) calc(var(--hd-card-radius) - 1px) 0 0;
+      }
+
+      .art-thumb-wrap img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        transition: transform 0.3s ease;
+      }
+
+      .art-card:hover .art-thumb-wrap img { transform: scale(1.04); }
+
+      .badge-flag {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: var(--r18);
+        color: #ffffff;
+        font-size: 0.65rem;
+        font-weight: 800;
+        padding: 0.2rem 0.5rem;
+        border-radius: 6px;
+        z-index: 2;
+      }
+
+      .badge-chapter-count {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: rgba(0, 0, 0, 0.78);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        color: #ffffff;
+        font-size: 0.68rem;
+        font-weight: 700;
+        padding: 2px 6.5px;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        z-index: 2;
+      }
+
+      .art-card-info {
+        padding: 0.8rem 0.9rem;
+        background: var(--bg-surface);
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .art-card-title {
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .art-card-author {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .art-card-stats {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.74rem;
+        color: var(--text-muted);
+        margin-top: 3px;
+        padding-top: 3px;
+      }
+
+      .popular-hero-banner {
+        position: relative;
+        border-radius: 20px;
+        overflow: hidden;
+        margin-bottom: 2.2rem;
+        padding: 1.8rem 2.4rem 1.4rem 2.4rem;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: #080c10;
+      }
+
+      .popular-hero-bg {
+        position: absolute;
+        inset: -30px;
+        background-size: cover;
+        background-position: center 25%;
+        filter: blur(48px) brightness(0.35);
+        transform: scale(1.15);
+        z-index: 1;
+        transition: background-image 0.4s ease;
+      }
+
+      .popular-hero-overlay {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(8, 14, 18, 0.5) 0%, rgba(5, 8, 10, 0.88) 100%);
+        z-index: 2;
+      }
+
+      .popular-hero-content {
+        position: relative;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+        gap: 1.1rem;
+      }
+
+      .popular-hero-header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .popular-hero-title-group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+      }
+
+      .popular-hero-title {
+        font-size: 1.65rem;
+        font-weight: 800;
+        color: #ffffff;
+        margin: 0;
+        letter-spacing: -0.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+      }
+
+      .popular-hero-sub {
+        font-size: 0.84rem;
+        color: rgba(255, 255, 255, 0.7);
+        margin: 0;
+        line-height: 1.5;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        max-width: 100%;
+      }
+
+      .popular-hero-nav-group {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.45rem;
+        flex-shrink: 0;
+      }
+
+      .popular-period-tabs {
+        display: inline-flex;
+        gap: 1.2rem;
+        align-items: center;
+        border-bottom: 2px solid rgba(255, 255, 255, 0.18);
+        padding: 0 0 3px 0;
+        margin: 0;
+        white-space: nowrap;
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .popular-period-tabs::-webkit-scrollbar { display: none; }
+
+      .period-tab-btn {
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: rgba(255, 255, 255, 0.65);
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+        padding: 0 2px 4px 2px;
+        margin-bottom: -5px;
+        transition: color 0.15s ease, border-color 0.15s ease;
+        text-transform: lowercase;
+        white-space: nowrap;
+      }
+
+      .period-tab-btn:hover { color: #ffffff; }
+      .period-tab-btn.active {
+        color: #ffffff;
+        border-bottom: 2px solid var(--accent);
+      }
+
+      .popular-view-more {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: rgba(255, 255, 255, 0.78);
+        font-size: 0.85rem;
+        font-weight: 600;
+        transition: color 0.15s ease, transform 0.15s ease;
+      }
+
+      .popular-view-more:hover {
+        color: #ffffff;
+        transform: translateX(2px);
+      }
+
+      .popular-view-more svg {
+        width: 15px;
+        height: 15px;
+      }
+
+      .spotlight-wrapper {
+        position: relative;
+        margin: 0.4rem 0 0.1rem 0;
+        width: 100%;
+      }
+
+      .spotlight-carousel {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+        border-radius: 18px;
+        background: rgba(18, 22, 28, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 32px rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(20px);
+      }
+
+      .spotlight-slides {
+        display: flex;
+        transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+      }
+
+      .spotlight-slide {
+        min-width: 100%;
+        display: flex;
+        align-items: center;
+        padding: 1.6rem 2.2rem;
+        gap: 2rem;
+        cursor: pointer;
+      }
+
+      .spotlight-cover-wrap {
+        position: relative;
+        width: 140px;
+        aspect-ratio: 9 / 14;
+        border-radius: 14px;
+        overflow: hidden;
+        flex-shrink: 0;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.7);
+        background: #08080a;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+
+      .spotlight-cover-wrap img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .spotlight-rank-badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: var(--accent);
+        color: #ffffff;
+        font-size: 0.72rem;
+        font-weight: 800;
+        padding: 2px 7px;
+        border-radius: 6px;
+        z-index: 2;
+      }
+
+      .spotlight-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .spotlight-title {
+        font-size: 1.65rem;
+        font-weight: 800;
+        color: #ffffff;
+        margin: 0;
+        line-height: 1.25;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .spotlight-author-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.88rem;
+        color: rgba(255, 255, 255, 0.75);
+      }
+
+      .spotlight-meta-row {
+        display: flex;
+        align-items: center;
+        gap: 1.2rem;
+        font-size: 0.82rem;
+        color: rgba(255, 255, 255, 0.6);
+        margin-top: 0.4rem;
+      }
+
+      .spotlight-controls {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        transform: translateY(-50%);
+        display: flex;
+        justify-content: space-between;
+        pointer-events: none;
+        z-index: 10;
+      }
+
+      .spotlight-btn {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: rgba(18, 20, 24, 0.95);
+        color: #ffffff;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        cursor: pointer;
+        pointer-events: auto;
+        transition: all 0.2s ease;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+      }
+
+      .spotlight-btn:hover {
+        background: var(--accent);
+        border-color: var(--accent);
+        transform: scale(1.08);
+        color: #ffffff;
+      }
+
+      .spotlight-btn.left { margin-left: -22px; }
+      .spotlight-btn.right { margin-right: -22px; }
+
+      .popular-hero-bottom-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        position: relative;
+        margin-top: 0.4rem;
+        width: 100%;
+      }
+
+      .spotlight-dots {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        flex: 1;
+      }
+
+      .spotlight-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.22);
+        cursor: pointer;
+        transition: all 0.25s ease;
+      }
+
+      .spotlight-dot.active {
+        background: var(--accent);
+        width: 22px;
+        border-radius: 4px;
+      }
+
+      .popular-hero-attribution {
+        position: absolute;
+        right: 0;
+        font-size: 0.78rem;
+        color: rgba(255, 255, 255, 0.5);
+        white-space: nowrap;
+      }
+
+      @media (max-width: 860px) {
+        .popular-hero-banner {
+          padding: 1.2rem 1.1rem 1rem 1.1rem;
+          border-radius: 16px;
+        }
+        .popular-hero-header-row {
+          flex-direction: column;
+          gap: 0.8rem;
+        }
+        .popular-hero-nav-group {
+          align-items: flex-start;
+          margin-left: 0;
+          width: 100%;
+        }
+        .popular-period-tabs {
+          width: 100%;
+        }
+        .spotlight-slide {
+          flex-direction: column;
+          text-align: center;
+          padding: 1.4rem 1.1rem;
+          gap: 1.1rem;
+        }
+        .spotlight-cover-wrap {
+          width: 140px;
+          margin: 0 auto;
+        }
+        .spotlight-author-row { justify-content: center; }
+        .spotlight-meta-row { justify-content: center; }
+        .spotlight-btn { width: 38px; height: 38px; }
+        .spotlight-btn.left { margin-left: -12px; }
+        .spotlight-btn.right { margin-right: -12px; }
+        .popular-hero-bottom-row {
+          flex-direction: column;
+          gap: 0.6rem;
+        }
+        .popular-hero-attribution { position: static; }
+      }
+
+      .spotify-series-wrap {
+        border-radius: 20px;
+        overflow: hidden;
+        background: linear-gradient(180deg, var(--bg-surface-elevated) 0%, var(--bg-surface) 340px, var(--bg-base) 100%);
+        margin-bottom: 2rem;
+        width: 100%;
+      }
+
+      .manga-hero-container {
+        position: relative;
+        padding: 2.2rem;
+        width: 100%;
+        overflow: hidden;
+      }
+
+      .manga-hero-backdrop {
+        position: absolute;
+        inset: -20px;
+        background-size: cover;
+        background-position: center;
+        filter: blur(52px) brightness(0.24);
+        transform: scale(1.15);
+        pointer-events: none;
+      }
+
+      .manga-hero-content {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        gap: 2.2rem;
+        align-items: flex-end;
+        width: 100%;
+      }
+
+      .manga-cover-card {
+        width: 220px;
+        aspect-ratio: 9 / 14;
+        border-radius: 16px;
+        overflow: hidden;
+        background: #000;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.85);
+        flex-shrink: 0;
+        position: relative;
+      }
+
+      .manga-cover-card img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .manga-hero-details {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        width: 100%;
+      }
+
+      .manga-hero-title {
+        font-size: clamp(1.4rem, 4vw, 2.3rem);
+        font-weight: 800;
+        line-height: 1.2;
+        letter-spacing: -0.5px;
+        color: var(--text-primary);
+        word-break: break-word;
+        overflow-wrap: break-word;
+      }
+
+      .manga-hero-actions {
+        display: flex;
+        gap: 0.8rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 0.4rem;
+      }
+
+      @media (max-width: 860px) {
+        .manga-hero-container {
+          padding: 1.5rem 1rem !important;
+        }
+        .manga-hero-content {
+          flex-direction: column !important;
+          align-items: center !important;
+          text-align: center !important;
+          gap: 1.4rem !important;
+        }
+        .manga-cover-card {
+          width: 180px !important;
+          max-width: 60vw !important;
+          margin: 0 auto !important;
+        }
+        .manga-hero-details {
+          align-items: center !important;
+          text-align: center !important;
+        }
+        .manga-hero-actions {
+          justify-content: center !important;
+          width: 100% !important;
+        }
+        .tag-cloud {
+          justify-content: center !important;
+        }
+      }
+
+      .manga-chapter-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.85rem 1.1rem;
+        border-radius: 12px;
+        transition: background 0.15s ease;
+        cursor: pointer;
+        text-decoration: none;
+        color: var(--text-primary);
+        width: 100%;
+      }
+
+      .manga-chapter-row:hover {
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .tag-cloud {
+        display: flex;
+        gap: 0.45rem;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .tag-pill {
+        background: var(--bg-surface-elevated);
+        border: 1px solid var(--border-subtle);
+        padding: 0.3rem 0.8rem;
+        border-radius: 9999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        transition: all 0.15s ease;
+      }
+
+      .tag-pill:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+        background: var(--accent-alpha);
+      }
+
+      body.manga-cinema-active {
+        overflow: hidden !important;
+      }
+
+      body.manga-cinema-active .app-header,
+      body.manga-cinema-active .nav-sidebar,
+      body.manga-cinema-active .sidebar-backdrop {
+        display: none !important;
+      }
+
+      .manga-cinema-overlay {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        background: #000000;
+        z-index: 99999;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        user-select: none;
+      }
+
+      .manga-cinema-topbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 52px;
+        background: #000000;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 0.85rem;
+        z-index: 100;
+        transition: transform 0.25s var(--ease-m3);
+      }
+
+      .manga-cinema-topbar.hidden {
+        transform: translateY(-100%);
+        pointer-events: none;
+      }
+
+      .reader-btn-square {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        background: #141418;
+        border: 1px solid #24242e;
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.85rem;
+        font-weight: 700;
+        transition: background 0.15s, border-color 0.15s;
+        cursor: pointer;
+      }
+
+      .reader-btn-square:hover {
+        background: #202028;
+        border-color: #383846;
+      }
+
+      .reader-btn-square.red-menu-btn {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #ffffff;
+      }
+
+      .reader-btn-square.red-menu-btn:hover {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+
+      .reader-chapter-pill {
+        height: 34px;
+        padding: 0 0.8rem;
+        border-radius: 12px;
+        background: var(--accent);
+        color: #ffffff;
+        font-weight: 800;
+        font-size: 0.84rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        letter-spacing: 0.3px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+
+      .reader-chapter-pill:hover {
+        background: var(--accent-hover);
+      }
+
+      .reader-nav-pill {
+        display: inline-flex;
+        align-items: center;
+        background: #121216;
+        border: 1px solid #262630;
+        padding: 2px 6px;
+        border-radius: 9999px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+        gap: 3px;
+      }
+
+      .reader-nav-pill .pill-arrow-btn {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-secondary);
+        transition: background 0.15s, color 0.15s;
+      }
+
+      .reader-nav-pill .pill-arrow-btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: #ffffff;
+      }
+
+      .reader-nav-pill .pill-counter {
+        padding: 0 0.5rem;
+        font-family: 'Inter', -apple-system, sans-serif;
+        font-size: 0.92rem;
+        font-weight: 700;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .reader-nav-pill .pill-counter .curr-page {
+        color: var(--accent);
+        font-weight: 800;
+      }
+
+      .reader-nav-pill .pill-counter .sep {
+        color: #555566;
+        font-weight: 600;
+      }
+
+      .reader-nav-pill .pill-counter .total-pages {
+        color: #ffffff;
+      }
+
+      .cinema-viewport {
+        position: absolute;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        padding: 56px 0.75rem 88px 0.75rem;
+        box-sizing: border-box;
+        touch-action: none;
+      }
+
+      .cinema-viewport img {
+        max-width: calc(100vw - 1rem);
+        max-height: calc(100dvh - 146px);
+        width: auto;
+        height: auto;
+        object-fit: contain !important;
+        display: block;
+        margin: auto;
+        box-shadow: 0 10px 36px rgba(0, 0, 0, 0.9);
+        transition: max-height 0.25s var(--ease-m3);
+      }
+
+      .manga-cinema-overlay.hud-hidden .cinema-viewport img {
+        max-height: 100dvh;
+        max-width: 100vw;
+      }
+
+      .manga-cinema-bottombar {
+        position: fixed;
+        bottom: 14px;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 100;
+        pointer-events: none;
+        transition: transform 0.25s var(--ease-m3);
+      }
+
+      .manga-cinema-bottombar.hidden {
+        transform: translateY(140%);
+      }
+
+      .reader-carousel {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        overflow-x: auto;
+        scrollbar-width: none;
+        max-width: 90vw;
+        padding: 6px 12px;
+        pointer-events: auto;
+        scroll-behavior: smooth;
+      }
+
+      .reader-carousel::-webkit-scrollbar { display: none; }
+
+      .reader-carousel-item {
+        width: 44px;
+        height: 60px;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #08080c;
+        border: 1.5px solid #202028;
+        flex-shrink: 0;
+        cursor: pointer;
+        position: relative;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+      }
+
+      .reader-carousel-item:hover {
+        border-color: #444455;
+      }
+
+      .reader-carousel-item.active {
+        border: 2px solid var(--accent) !important;
+        box-shadow: 0 0 12px var(--accent-alpha);
+        transform: scale(1.05);
+      }
+
+      .reader-carousel-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .reader-carousel-item .thumb-page-badge {
+        position: absolute;
+        bottom: 3px;
+        right: 3px;
+        background: rgba(0, 0, 0, 0.85);
+        color: #ffffff;
+        font-size: 0.68rem;
+        font-weight: 800;
+        padding: 1px 5px;
+        border-radius: 4px;
+        line-height: 1.2;
+      }
+
+      .webtoon-viewport {
+        position: absolute;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        background: #000000;
+        scroll-behavior: smooth;
+        padding-top: 52px;
+        transition: padding-top 0.25s var(--ease-m3);
+      }
+
+      .manga-cinema-overlay.hud-hidden .webtoon-viewport {
+        padding-top: 0;
+      }
+
+      .webtoon-stream {
+        width: 100%;
+        max-width: 860px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        line-height: 0;
+      }
+
+      .webtoon-page-item {
+        width: 100%;
+        display: block;
+        position: relative;
+        background: #08080a;
+      }
+
+      .webtoon-page-item img {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      .webtoon-chapter-nav-banner {
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        padding: 1.5rem 1rem;
+        line-height: 1.5;
+      }
+
+      .directory-card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+        gap: 1rem;
+      }
+
+      @media (max-width: 600px) {
+        .directory-card-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          gap: 10px !important;
+        }
+      }
+
+      .dir-bg-card {
+        position: relative;
+        height: 120px;
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid var(--border-subtle);
+        background: var(--bg-surface-elevated);
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        padding: 0.9rem;
+        transition: transform 0.2s var(--ease-m3), border-color 0.2s var(--ease-m3);
+        text-decoration: none;
+      }
+
+      .dir-bg-card:hover {
+        transform: translateY(-3px);
+        border-color: var(--accent);
+      }
+
+      .dir-bg-card img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        filter: brightness(0.42);
+        transition: transform 0.3s ease, filter 0.3s ease;
+        z-index: 1;
+      }
+
+      .dir-bg-card:hover img {
+        transform: scale(1.06);
+        filter: brightness(0.55);
+      }
+
+      .dir-bg-overlay {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(0,0,0,0.1) 0%, rgba(5,5,8,0.88) 100%);
+        z-index: 2;
+      }
+
+      .dir-bg-info {
+        position: relative;
+        z-index: 3;
+      }
+
+      .dir-bg-title {
+        font-weight: 700;
+        font-size: 0.95rem;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .dir-bg-count {
+        font-size: 0.74rem;
+        color: rgba(255, 255, 255, 0.7);
+      }
+
+      .custom-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.82);
+        backdrop-filter: blur(8px);
+        z-index: 100000;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+      }
+
+      .custom-modal-backdrop.active { display: flex !important; }
+
+      .custom-modal {
+        background: var(--bg-surface);
+        border: 1px solid var(--border-strong);
+        border-radius: 24px;
+        width: 100%;
+        max-width: 580px;
+        max-height: 85vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: var(--shadow-lg);
+        overflow: hidden;
+      }
+
+      .custom-modal-header {
+        padding: 1.1rem 1.4rem;
+        border-bottom: 1px solid var(--border-subtle);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-weight: 800;
+        font-size: 1.1rem;
+      }
+
+      .custom-modal-body {
+        padding: 1.4rem;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .custom-modal-footer {
+        padding: 0.9rem 1.4rem;
+        border-top: 1px solid var(--border-subtle);
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.6rem;
+        background: var(--bg-surface-elevated);
+      }
+
+      .toast-pill {
+        position: fixed;
+        bottom: calc(1.5rem + env(safe-area-inset-bottom, 0));
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--bg-surface-elevated);
+        color: #ffffff;
+        border: 1px solid var(--border-strong);
+        padding: 0.65rem 1.3rem;
+        border-radius: 9999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        box-shadow: var(--shadow-md);
+        z-index: 100001;
+        pointer-events: none;
+      }
+
+      .spinner {
+        width: 34px;
+        height: 34px;
+        border: 3px solid var(--border-subtle);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        display: block;
+        margin: auto;
+        align-self: center;
+        transform-origin: center;
+      }
+
+      @keyframes spin { 100% { transform: rotate(360deg); } }
+
+      .center-msg {
+        text-align: center;
+        padding: 4rem 1rem;
+        color: var(--text-muted);
+        font-size: 0.95rem;
+        margin: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-left">
+        <button class="btn-icon" id="btn-toggle-menu" onclick="app.toggleSidebar()" title="Toggle Navigation">
+          <i class="bi bi-list fs-5"></i>
+        </button>
+        <a href="#/" class="brand-logo">
+          <img id="site-brand-icon" src="index.php?access=artwork&action=get_app_icon" alt="Logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-block';">
+          <i class="bi bi-book-half" id="site-brand-icon-fallback" style="color:var(--accent); display:none;"></i>
+          <span>PHPMusicPost</span>
+          <span class="brand-badge">Manga</span>
+        </a>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="app.closeSidebar()"></div>
+
+      <aside class="nav-sidebar" id="app-sidebar">
+        <div class="sidebar-mobile-header">
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <i class="bi bi-book-half" style="color:var(--accent); font-size:1.3rem;"></i>
+            <span style="font-weight:800; font-size:1.05rem;">Manga Studio</span>
+          </div>
+          <button class="btn-icon" onclick="app.closeSidebar()"><i class="bi bi-x-lg"></i></button>
+        </div>
+
+        <div class="sidebar-search-wrap">
+          <form class="sidebar-search-box" onsubmit="event.preventDefault(); app.onSearchSubmit();">
+            <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input type="search" id="sidebar-search-input" placeholder="Search manga, parody..." autocomplete="off">
+          </form>
+        </div>
+
+        <div class="nav-item active" data-nav="/"><i class="bi bi-grid-fill"></i> <span>Manga Series</span></div>
+        <div class="nav-item" data-nav="/rankings"><i class="bi bi-trophy-fill"></i> <span>Top Rankings</span></div>
+
+        <div class="r18-toggle-row">
+          <span>Allow R-18</span>
+          <label class="r18-switch">
+            <input type="checkbox" id="sidebar-r18-toggle" onchange="app.toggleR18(this.checked)">
+            <span class="r18-slider"></span>
+          </label>
+        </div>
+
+        <div class="r18-toggle-row">
+          <span>Safe Blur</span>
+          <label class="r18-switch">
+            <input type="checkbox" id="sidebar-blur-toggle" onchange="app.toggleSafeBlur(this.checked)">
+            <span class="r18-slider"></span>
+          </label>
+        </div>
+
+        <div class="nav-divider"></div>
+        <div class="nav-heading">Directories (Manga Only)</div>
+        <div class="nav-item" data-nav="/series"><i class="bi bi-journal-bookmark-fill"></i> <span>Series &amp; Parodies</span></div>
+        <div class="nav-item" data-nav="/characters"><i class="bi bi-people-fill"></i> <span>Characters</span></div>
+        <div class="nav-item" data-nav="/tags"><i class="bi bi-tags-fill"></i> <span>Tags Archive</span></div>
+        <div class="nav-item" data-nav="/artists"><i class="bi bi-person-circle"></i> <span>Authors &amp; Circles</span></div>
+
+        <div class="nav-divider"></div>
+        <div class="nav-item" onclick="app.showSettingsModal()"><i class="bi bi-gear-fill"></i> <span>Studio Settings</span></div>
+        <a id="link-back-music" href="/" class="nav-item" style="color:var(--text-secondary);"><i class="bi bi-arrow-left-circle-fill"></i> <span>Back to PHPMusic</span></a>
+      </aside>
+
+      <main class="main-viewport" id="viewport">
+        <div class="page-container" id="page-container"></div>
+      </main>
+    </div>
+
+    <div class="custom-modal-backdrop" id="custom-modal-backdrop" onclick="if(event.target===this) app.closeModal()">
+      <div class="custom-modal" id="custom-modal-dialog"></div>
+    </div>
+
+    <div id="toast-slot"></div>
+
+    <script>
+      (function() {
+        "use strict";
+
+        class PHPMusicPostMangaClient {
+          constructor() {
+            this.r18Enabled = localStorage.getItem('pm_r18') !== '0';
+            this.safeBlurEnabled = localStorage.getItem('pm_safeblur') !== '0';
+            this.hudHidden = localStorage.getItem('pm_hud_hidden') === '1';
+            this.pageSize = 24;
+
+            this.apiBase = this.getInitialApiEndpoint();
+            this.apiConnected = false;
+            this.currentSpotlightIndex = 0;
+
+            this._mangaMetaCache = null;
+            this._mangaMetaCacheTime = 0;
+
+            this.initSidebarToggles();
+            this.bindGlobalEvents();
+            this.probeApiEndpoint();
+          }
+
+          getDefaultSiteUrl() {
+            if (window.location.protocol === 'file:') return 'http://localhost';
+            const origin = window.location.origin;
+            const folder = window.location.pathname.replace(/\/[^/]*$/, '').replace(/\/+$/, '');
+            return `${origin}${folder}`;
+          }
+
+          getInitialApiEndpoint() {
+            return this.getCleanDisplayUrl(localStorage.getItem('pm_api_endpoint') || this.getDefaultSiteUrl());
+          }
+
+          getCleanDisplayUrl(url) {
+            if (!url) return '';
+            return url.trim()
+              .replace(/\/index\.php\?access=(?:artwork|profiletree|public_manga)$/i, '')
+              .replace(/\?access=(?:artwork|profiletree|public_manga)$/i, '')
+              .replace(/\/?index\.php\/?$/i, '')
+              .replace(/\/+$/, '');
+          }
+
+          buildApiUrl(action, params = {}, baseOverride = null) {
+            let base = (baseOverride || this.apiBase || this.getDefaultSiteUrl() || '').trim();
+            if (!base) base = '.';
+            base = this.getCleanDisplayUrl(base);
+
+            let endpoint = base;
+            if (!endpoint.includes('access=artwork')) {
+              if (endpoint.endsWith('.php')) {
+                endpoint += '?access=artwork';
+              } else {
+                endpoint += '/index.php?access=artwork';
+              }
+            }
+
+            const sep = endpoint.includes('?') ? '&' : '?';
+            let url = `${endpoint}${sep}action=${encodeURIComponent(action)}`;
+            const qs = new URLSearchParams(params).toString();
+            if (qs) url += `&${qs}`;
+            return url;
+          }
+
+          initSidebarToggles() {
+            const r18Tog = document.getElementById('sidebar-r18-toggle');
+            if (r18Tog) r18Tog.checked = this.r18Enabled;
+            const blurTog = document.getElementById('sidebar-blur-toggle');
+            if (blurTog) blurTog.checked = this.safeBlurEnabled;
+          }
+
+          bindGlobalEvents() {
+            window.addEventListener('hashchange', () => this.handleRoute());
+
+            document.querySelectorAll('.nav-item[data-nav]').forEach(el => {
+              el.onclick = () => {
+                this.nav('#' + el.dataset.nav);
+                this.closeSidebar();
+              };
+            });
+
+            window.addEventListener('keydown', (e) => {
+              if (e.key === 'Escape') {
+                if (document.getElementById('custom-modal-backdrop')?.classList.contains('active')) {
+                  this.closeModal();
+                  return;
+                }
+              }
+
+              const isReading = window.location.hash.includes('/read/chapter/');
+              if (isReading) {
+                if (e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  document.getElementById('manga-prev-page-link')?.click();
+                } else if (e.key === 'ArrowRight') {
+                  e.preventDefault();
+                  document.getElementById('manga-next-page-link')?.click();
+                } else if (e.key.toLowerCase() === 'f') {
+                  e.preventDefault();
+                  this.toggleFullscreen();
+                } else if (e.key === 'Escape') {
+                  document.getElementById('manga-series-back-btn')?.click();
+                }
+              }
+            });
+          }
+
+          onSearchSubmit() {
+            const input = document.getElementById('sidebar-search-input');
+            const q = input ? input.value.trim() : '';
+            this.closeSidebar();
+            if (q) {
+              this.nav(`#/?q=${encodeURIComponent(q)}`);
+            } else {
+              this.nav('#/');
+            }
+          }
+
+          clearAllFilters() {
+            const input = document.getElementById('sidebar-search-input');
+            if (input) input.value = '';
+            this.nav('#/');
+          }
+
+          removeFilterParam(paramKey) {
+            const [base, queryStr] = (window.location.hash || '#/').split('?');
+            const p = new URLSearchParams(queryStr || '');
+            p.delete(paramKey);
+            p.delete('page');
+            const qs = p.toString();
+            this.nav(qs ? `${base}?${qs}` : base);
+          }
+
+          async probeApiEndpoint() {
+            const defaultUrl = this.getDefaultSiteUrl();
+            const stored = this.apiBase;
+
+            const candidates = Array.from(new Set([
+              stored,
+              defaultUrl,
+              window.location.origin,
+              '.'
+            ])).filter(Boolean);
+
+            for (const ep of candidates) {
+              const ok = await this.testEndpoint(ep);
+              if (ok) {
+                this.apiBase = this.getCleanDisplayUrl(ep);
+                this.apiConnected = true;
+                localStorage.setItem('pm_api_endpoint', this.apiBase);
+                this.updateAppIcon();
+                this.updateBackLink();
+                this.handleRoute();
+                return;
+              }
+            }
+
+            this.apiConnected = false;
+            this.updateAppIcon();
+            this.updateBackLink();
+            this.handleRoute();
+          }
+
+          updateAppIcon() {
+            const iconUrl = this.buildApiUrl('get_app_icon');
+            const favicon = document.getElementById('site-favicon');
+            if (favicon) favicon.href = iconUrl;
+            const brandImg = document.getElementById('site-brand-icon');
+            if (brandImg) {
+              brandImg.src = iconUrl;
+              brandImg.style.display = 'inline-block';
+            }
+          }
+
+          updateBackLink() {
+            const backLink = document.getElementById('link-back-music');
+            if (backLink) {
+              backLink.href = '/';
+            }
+          }
+
+          async testEndpoint(endpoint) {
+            try {
+              const testUrl = this.buildApiUrl('manga_series_list', { limit: 1 }, endpoint);
+              const res = await fetch(testUrl, { headers: { 'Accept': 'application/json' } });
+              if (!res.ok) return false;
+              const text = await res.text();
+              const data = JSON.parse(text);
+              return data && (Array.isArray(data.series) || data.total !== undefined);
+            } catch(e) {
+              return false;
+            }
+          }
+
+          async api(action, params = {}) {
+            const url = this.buildApiUrl(action, params);
+            try {
+              const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+              if (!res.ok) return null;
+              const text = await res.text();
+              return JSON.parse(text);
+            } catch (err) {
+              console.warn(`[PHPMusicPost Manga] Action '${action}' failed:`, err);
+              return null;
+            }
+          }
+
+          getThumb(fileName) {
+            if (!fileName) return '';
+            if (fileName.startsWith('?') || fileName.startsWith('http') || fileName.startsWith('data:')) return fileName;
+            return this.buildApiUrl('thumb', { f: fileName });
+          }
+
+          getRaw(fileName) {
+            if (!fileName) return '';
+            if (fileName.startsWith('?') || fileName.startsWith('http') || fileName.startsWith('data:')) return fileName;
+            return this.buildApiUrl('raw', { f: fileName });
+          }
+
+          getOriginalPhpMusicPostUrl(seriesTitle, authorId) {
+            const ep = this.buildApiUrl('manga_series_get', {}).split('&action=')[0];
+            return `${ep}#/manga/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}`;
+          }
+
+          escape(str) {
+            if (!str) return '';
+            return String(str)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+          }
+
+          toast(msg) {
+            const slot = document.getElementById('toast-slot');
+            const el = document.createElement('div');
+            el.className = 'toast-pill';
+            el.innerText = msg;
+            slot.appendChild(el);
+            setTimeout(() => el.remove(), 2600);
+          }
+
+          nav(hash) {
+            window.location.hash = hash;
+          }
+
+          toggleSidebar() {
+            const sb = document.getElementById('app-sidebar');
+            const bd = document.getElementById('sidebar-backdrop');
+            const isOpen = sb.classList.toggle('open');
+            bd.classList.toggle('active', isOpen);
+          }
+
+          closeSidebar() {
+            document.getElementById('app-sidebar').classList.remove('open');
+            document.getElementById('sidebar-backdrop').classList.remove('active');
+          }
+
+          toggleR18(enabled) {
+            this.r18Enabled = !!enabled;
+            localStorage.setItem('pm_r18', this.r18Enabled ? '1' : '0');
+            this.toast(this.r18Enabled ? 'R-18 Enabled' : 'R-18 Disabled');
+            this._mangaMetaCache = null;
+            this.handleRoute();
+          }
+
+          toggleSafeBlur(enabled) {
+            this.safeBlurEnabled = !!enabled;
+            localStorage.setItem('pm_safeblur', this.safeBlurEnabled ? '1' : '0');
+            this.toast(this.safeBlurEnabled ? 'Safe Blur ON' : 'Safe Blur OFF');
+            this.handleRoute();
+          }
+
+          showModal(htmlContent) {
+            const bd = document.getElementById('custom-modal-backdrop');
+            const dlg = document.getElementById('custom-modal-dialog');
+            if (dlg) dlg.innerHTML = htmlContent;
+            if (bd) bd.classList.add('active');
+          }
+
+          closeModal() {
+            const bd = document.getElementById('custom-modal-backdrop');
+            if (bd) bd.classList.remove('active');
+          }
+
+          updateParam(key, val) {
+            const [base, queryStr] = (window.location.hash || '#/').split('?');
+            const p = new URLSearchParams(queryStr || '');
+            p.set(key, val);
+            if (key !== 'page') p.delete('page');
+            this.nav(`${base}?${p.toString()}`);
+          }
+
+          toggleFullscreen() {
+            if (!document.fullscreenElement) {
+              document.documentElement.requestFullscreen().catch(() => {});
+            } else {
+              document.exitFullscreen().catch(() => {});
+            }
+          }
+
+          async getMangaCatalogMetadata(forceRefresh = false) {
+            if (!forceRefresh && this._mangaMetaCache && (Date.now() - this._mangaMetaCacheTime < 60000)) {
+              return this._mangaMetaCache;
+            }
+
+            const rating = this.r18Enabled ? 'all' : 'safe';
+            
+            const firstPage = await this.api('artworks_list', {
+              feed: 'manga',
+              rating: rating,
+              limit: 200,
+              page: 1
+            });
+
+            let allManga = (firstPage && Array.isArray(firstPage.artworks)) ? [...firstPage.artworks] : [];
+            const totalPages = (firstPage && firstPage.pages) ? Number(firstPage.pages) : 1;
+
+            if (totalPages > 1) {
+              const fetchPromises = [];
+              for (let p = 2; p <= Math.min(totalPages, 5); p++) {
+                fetchPromises.push(this.api('artworks_list', {
+                  feed: 'manga',
+                  rating: rating,
+                  limit: 200,
+                  page: p
+                }));
+              }
+              const extraPages = await Promise.all(fetchPromises);
+              for (const ep of extraPages) {
+                if (ep && Array.isArray(ep.artworks)) {
+                  allManga.push(...ep.artworks);
+                }
+              }
+            }
+
+            const seriesRes = await this.api('manga_series_list', {
+              rating: rating,
+              limit: 200,
+              page: 1
+            });
+            const allSeriesList = (seriesRes && Array.isArray(seriesRes.series)) ? seriesRes.series : [];
+
+            const tagCounts = new Map();
+            const tagCovers = new Map();
+
+            const charCounts = new Map();
+            const charCovers = new Map();
+
+            const seriesCounts = new Map();
+            const seriesCovers = new Map();
+
+            const artistCounts = new Map();
+            const artistAvatars = new Map();
+            const artistIds = new Map();
+
+            for (const s of allSeriesList) {
+              const title = (s.series_title || '').trim();
+              if (title) {
+                seriesCounts.set(title, (seriesCounts.get(title) || 0) + (Number(s.total_chapters) || 1));
+                if (!seriesCovers.has(title) && s.cover_file) {
+                  seriesCovers.set(title, s.cover_file);
+                }
+              }
+              const author = (s.artist_name || '').trim();
+              if (author) {
+                artistCounts.set(author, (artistCounts.get(author) || 0) + (Number(s.total_chapters) || 1));
+                if (s.user_id && !artistIds.has(author)) {
+                  artistIds.set(author, s.user_id);
+                }
+              }
+            }
+
+            for (const m of allManga) {
+              const cover = m.cover_file || '';
+
+              if (m.tags) {
+                const tags = m.tags.split(/[,，、]+/).map(t => t.trim().replace(/^#/, '')).filter(Boolean);
+                for (const t of tags) {
+                  tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+                  if (!tagCovers.has(t) && cover) tagCovers.set(t, cover);
+                }
+              }
+
+              if (m.characters) {
+                const chars = m.characters.split(/[,，、]+/).map(c => c.trim()).filter(Boolean);
+                for (const c of chars) {
+                  charCounts.set(c, (charCounts.get(c) || 0) + 1);
+                  if (!charCovers.has(c) && cover) charCovers.set(c, cover);
+                }
+              }
+
+              if (m.parodies) {
+                const parodies = m.parodies.split(/[,，、]+/).map(p => p.trim()).filter(Boolean);
+                for (const p of parodies) {
+                  seriesCounts.set(p, (seriesCounts.get(p) || 0) + 1);
+                  if (!seriesCovers.has(p) && cover) seriesCovers.set(p, cover);
+                }
+              }
+
+              if (m.tools) {
+                const circles = m.tools.split(/[,，、]+/).map(tl => tl.trim()).filter(Boolean);
+                for (const circle of circles) {
+                  if (!artistCounts.has(circle)) {
+                    artistCounts.set(circle, 1);
+                    if (cover) artistAvatars.set(circle, cover);
+                  }
+                }
+              }
+
+              const author = (m.artist_name || '').trim();
+              if (author) {
+                if (!artistIds.has(author) && m.user_id) artistIds.set(author, m.user_id);
+                if (m.avatar && !artistAvatars.has(author)) artistAvatars.set(author, m.avatar);
+                else if (cover && !artistAvatars.has(author)) artistAvatars.set(author, cover);
+              }
+            }
+
+            const tags = Array.from(tagCounts.entries())
+              .map(([name, count]) => ({ name, count, cover: tagCovers.get(name) || '', param: 'tag' }))
+              .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+            const characters = Array.from(charCounts.entries())
+              .map(([name, count]) => ({ name, count, cover: charCovers.get(name) || '', param: 'character' }))
+              .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+            const series = Array.from(seriesCounts.entries())
+              .map(([name, count]) => ({ name, count, cover: seriesCovers.get(name) || '', param: 'parody' }))
+              .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+            const artists = Array.from(artistCounts.entries())
+              .map(([name, count]) => ({
+                name,
+                count,
+                cover: artistAvatars.get(name) || '',
+                id: artistIds.get(name) || 0,
+                param: 'artist'
+              }))
+              .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+            this._mangaMetaCache = { tags, characters, series, artists };
+            this._mangaMetaCacheTime = Date.now();
+            return this._mangaMetaCache;
+          }
+
+          async loadPopularHero(mountId = 'popular-hero-mount', period = 'day') {
+            const mount = document.getElementById(mountId);
+            if (!mount) return;
+
+            try {
+              const res = await this.api('manga_series_list', {
+                sort: 'popular',
+                period: period,
+                limit: 10,
+                rating: this.r18Enabled ? 'all' : 'safe'
+              });
+
+              const series = res && Array.isArray(res.series) ? res.series : [];
+              if (!series.length) {
+                mount.innerHTML = '';
+                return;
+              }
+
+              const topWork = series[0];
+              const topArtist = topWork.artist_name || 'Artist';
+              const topBgUrl = topWork.cover_file ? this.getRaw(topWork.cover_file) : '';
+
+              const periodLabels = {
+                day: 'this day',
+                week: 'this week',
+                month: 'this month',
+                year: 'this year',
+                all: 'all time'
+              };
+
+              const heroTitle = 'Popular Manga';
+              const subText = `These series are displayed based on view counts from ${periodLabels[period] || 'this day'}.`;
+              const viewMoreUrl = `#/rankings?period=${period === 'all' ? 'all_time' : period}`;
+
+              this.currentSpotlightIndex = 0;
+              const coversArr = series.map(a => a.cover_file ? this.getRaw(a.cover_file) : '');
+
+              const slidesHtml = series.map((art, idx) => {
+                const thumbUrl = this.getThumb(art.cover_file);
+                const isR18 = art.rating === 'r18';
+                const rankNum = idx + 1;
+
+                return `
+                  <div class="spotlight-slide" onclick="app.nav('#/series/${encodeURIComponent(art.series_title)}/userid/${art.user_id}')">
+                    <div class="spotlight-cover-wrap">
+                      <span class="spotlight-rank-badge">No. ${rankNum}</span>
+                      <img src="${thumbUrl}" alt="${this.escape(art.series_title)}" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                    </div>
+                    <div class="spotlight-info">
+                      <h3 class="spotlight-title" title="${this.escape(art.series_title)}">${this.escape(art.series_title)}</h3>
+                      <div class="spotlight-author-row">
+                        <span>By <strong>${this.escape(art.artist_name || 'Author')}</strong></span>
+                        <span>&bull;</span>
+                        <span>Manga</span>
+                        ${isR18 ? '<span style="background:var(--r18); color:#fff; font-size:0.62rem; padding:1px 5px; border-radius:4px; font-weight:800; margin-left:4px;">R-18</span>' : ''}
+                      </div>
+                      <div class="spotlight-meta-row">
+                        <span><i class="bi bi-eye"></i> ${Number(art.total_views || 0).toLocaleString()} views</span>
+                        <span><i class="bi bi-heart-fill" style="color:var(--accent);"></i> ${Number(art.total_likes || 0).toLocaleString()} likes</span>
+                        <span><i class="bi bi-book"></i> ${art.total_chapters || 1} Chapters</span>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join('');
+
+              const dotsHtml = series.map((_, idx) => `
+                <div class="spotlight-dot ${idx === 0 ? 'active' : ''}" onclick="event.stopPropagation(); app.goToSpotlight(${idx}, ${series.length})"></div>
+              `).join('');
+
+              mount.innerHTML = `
+                <div class="popular-hero-banner">
+                  <div class="popular-hero-bg" id="popular-hero-bg" style="background-image: url('${topBgUrl}');"></div>
+                  <div class="popular-hero-overlay"></div>
+                  
+                  <div class="popular-hero-content">
+                    <div class="popular-hero-header-row">
+                      <div class="popular-hero-title-group">
+                        <h2 class="popular-hero-title">${this.escape(heroTitle)}</h2>
+                        <p class="popular-hero-sub">${this.escape(subText)}</p>
+                      </div>
+
+                      <div class="popular-hero-nav-group">
+                        <div class="popular-period-tabs">
+                          <button type="button" class="period-tab-btn ${period === 'day' ? 'active' : ''}" onclick="app.switchPopularPeriod('day')">this day</button>
+                          <button type="button" class="period-tab-btn ${period === 'week' ? 'active' : ''}" onclick="app.switchPopularPeriod('week')">this week</button>
+                          <button type="button" class="period-tab-btn ${period === 'month' ? 'active' : ''}" onclick="app.switchPopularPeriod('month')">this month</button>
+                          <button type="button" class="period-tab-btn ${period === 'year' ? 'active' : ''}" onclick="app.switchPopularPeriod('year')">this year</button>
+                          <button type="button" class="period-tab-btn ${period === 'all' ? 'active' : ''}" onclick="app.switchPopularPeriod('all')">all time</button>
+                        </div>
+                        <a href="${viewMoreUrl}" class="popular-view-more">
+                          <span>view more</span>
+                          <svg viewBox="0 0 24 24"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+                        </a>
+                      </div>
+                    </div>
+
+                    <div class="spotlight-wrapper">
+                      <div class="spotlight-carousel">
+                        <div class="spotlight-slides" id="spotlight-track" data-covers="${encodeURIComponent(JSON.stringify(coversArr))}">
+                          ${slidesHtml}
+                        </div>
+                      </div>
+                      <div class="spotlight-controls">
+                        <div class="spotlight-btn left" onclick="event.stopPropagation(); app.goToSpotlight(app.currentSpotlightIndex - 1, ${series.length})" title="Previous">
+                          <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                        </div>
+                        <div class="spotlight-btn right" onclick="event.stopPropagation(); app.goToSpotlight(app.currentSpotlightIndex + 1, ${series.length})" title="Next">
+                          <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="popular-hero-bottom-row">
+                      <div class="spotlight-dots">
+                        ${dotsHtml}
+                      </div>
+                      <div class="popular-hero-attribution">
+                        image by <a href="#/?q=${encodeURIComponent(topArtist)}">${this.escape(topArtist)}</a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              `;
+            } catch(e) {
+              console.error('loadPopularHero failed:', e);
+              mount.innerHTML = '';
+            }
+          }
+
+          switchPopularPeriod(period) {
+            this.loadPopularHero('popular-hero-mount', period);
+          }
+
+          goToSpotlight(index, total) {
+            if (index < 0) index = total - 1;
+            if (index >= total) index = 0;
+            this.currentSpotlightIndex = index;
+            const track = document.getElementById('spotlight-track');
+            if (track) {
+              track.style.transform = `translateX(-${index * 100}%)`;
+              try {
+                const covers = JSON.parse(decodeURIComponent(track.dataset.covers || '[]'));
+                const bg = document.getElementById('popular-hero-bg');
+                if (bg && covers[index]) {
+                  bg.style.backgroundImage = `url('${covers[index]}')`;
+                }
+              } catch(e) {}
+            }
+            document.querySelectorAll('.spotlight-dot').forEach((d, i) => {
+              d.classList.toggle('active', i === index);
+            });
+          }
+
+          async handleRoute() {
+            this.closeSidebar();
+            this.closeModal();
+
+            const rawHash = window.location.hash || '#/';
+            const [routePath, queryStr] = rawHash.replace(/^#/, '').split('?');
+            const params = new URLSearchParams(queryStr || '');
+
+            const isReader = routePath.includes('/read/chapter/');
+            document.body.classList.toggle('manga-cinema-active', isReader);
+
+            document.querySelectorAll('.nav-item').forEach(el => {
+              el.classList.toggle('active', el.dataset.nav === routePath);
+            });
+
+            if (routePath === '' || routePath === '/') {
+              await this.renderCatalog(params);
+            } else if (routePath === '/rankings') {
+              await this.renderRankings(params);
+            } else if (routePath.startsWith('/series/')) {
+              if (routePath.includes('/read/chapter/')) {
+                const parts = routePath.split('/');
+                const sTitle = decodeURIComponent(parts[parts.indexOf('series') + 1] || '');
+                const uid = parseInt(parts[parts.indexOf('userid') + 1] || '0', 10);
+                const chNum = parseFloat(parts[parts.indexOf('chapter') + 1] || '1');
+                const pNum = parseInt(parts[parts.indexOf('page') + 1] || '1', 10);
+                await this.renderReader({ series: sTitle, uid, chapter: chNum }, pNum);
+              } else if (routePath.includes('/userid/')) {
+                const parts = routePath.split('/');
+                const sTitle = decodeURIComponent(parts[parts.indexOf('series') + 1] || '');
+                const uid = parseInt(parts[parts.indexOf('userid') + 1] || '0', 10);
+                await this.renderSeriesOverview(sTitle, uid);
+              }
+            } else if (routePath === '/series') {
+              await this.renderDirectory('series', 'Series &amp; Parodies');
+            } else if (routePath === '/characters') {
+              await this.renderDirectory('characters', 'Characters');
+            } else if (routePath === '/tags') {
+              await this.renderDirectory('tags', 'Tags Archive');
+            } else if (routePath === '/artists') {
+              await this.renderDirectory('artists', 'Authors &amp; Circles');
+            }
+
+            document.getElementById('viewport').scrollTop = 0;
+          }
+
+          async renderCatalog(params) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            const q = params.get('q') || params.get('search') || '';
+            const tag = params.get('tag') || '';
+            const character = params.get('character') || '';
+            const parody = params.get('parody') || '';
+            const seriesParam = params.get('series') || '';
+            const artist = params.get('artist') || '';
+            const group = params.get('group') || '';
+            const sort = params.get('sort') || 'updated';
+            const page = Math.max(1, parseInt(params.get('page') || '1', 10));
+            const ratingParam = params.get('rating') || (this.r18Enabled ? 'all' : 'safe');
+
+            const searchInput = document.getElementById('sidebar-search-input');
+            if (searchInput) searchInput.value = q;
+
+            const activeFilterPills = [];
+            if (q) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('q')" title="Remove search filter">
+                  <span>Search: <strong>${this.escape(q)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (tag) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('tag')" title="Remove tag filter">
+                  <span>Tag: <strong>#${this.escape(tag)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (character) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('character')" title="Remove character filter">
+                  <span>Character: <strong>${this.escape(character)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (parody) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('parody')" title="Remove parody filter">
+                  <span>Parody: <strong>${this.escape(parody)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (seriesParam) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('series')" title="Remove series filter">
+                  <span>Series: <strong>${this.escape(seriesParam)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (artist) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('artist')" title="Remove artist filter">
+                  <span>Artist: <strong>${this.escape(artist)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+            if (group) {
+              activeFilterPills.push(`
+                <span class="active-filter-pill" onclick="app.removeFilterParam('group')" title="Remove group filter">
+                  <span>Group: <strong>${this.escape(group)}</strong></span>
+                  <i class="bi bi-x-lg"></i>
+                </span>
+              `);
+            }
+
+            document.title = activeFilterPills.length ? 'Filtered Manga \u2013 PHPMusicPost' : 'Discover Manga Series \u2013 PHPMusicPost';
+
+            const res = await this.api('manga_series_list', {
+              q: q || (artist ? artist : ''),
+              sort,
+              page,
+              rating: ratingParam,
+              limit: this.pageSize,
+              tag: tag,
+              character: character,
+              parody: parody || seriesParam,
+              source_url: group
+            });
+
+            const series = res && Array.isArray(res.series) ? res.series : [];
+            const total = res && res.total ? res.total : series.length;
+            const totalPages = res && res.pages ? res.pages : Math.max(1, Math.ceil(total / this.pageSize));
+
+            const isFiltered = activeFilterPills.length > 0;
+            const showHero = !isFiltered && page === 1;
+
+            let html = `
+              ${showHero ? `<div id="popular-hero-mount"><div class="spinner" style="width:24px;height:24px;margin:2rem auto;"></div></div>` : ''}
+
+              <div class="feed-header-wrap">
+                <div class="feed-header-title-block">
+                  <h1>Discover Manga Series</h1>
+                  <p>${total} series available in library</p>
+
+                  ${isFiltered ? `
+                    <div class="active-filter-pills-row">
+                      ${activeFilterPills.join('')}
+                      <button type="button" class="clear-all-pill-btn" onclick="app.clearAllFilters()" title="Reset all filters">
+                        Clear all
+                      </button>
+                    </div>
+                  ` : ''}
+                </div>
+
+                <div class="feed-header-controls">
+                  <select class="custom-select" onchange="app.updateParam('rating', this.value)" title="Age Rating">
+                    <option value="all" ${ratingParam === 'all' ? 'selected' : ''}>All Ratings (Safe + R-18)</option>
+                    <option value="safe" ${ratingParam === 'safe' ? 'selected' : ''}>All Ages (Safe Only)</option>
+                    <option value="r18" ${ratingParam === 'r18' ? 'selected' : ''}>R-18 Only</option>
+                  </select>
+                  <select class="custom-select" onchange="app.updateParam('sort', this.value)">
+                    <option value="updated" ${sort === 'updated' ? 'selected' : ''}>Latest Updated</option>
+                    <option value="popular" ${sort === 'popular' ? 'selected' : ''}>Most Popular</option>
+                    <option value="chapters" ${sort === 'chapters' ? 'selected' : ''}>Most Chapters</option>
+                    <option value="title" ${sort === 'title' ? 'selected' : ''}>Title (A-Z)</option>
+                  </select>
+                </div>
+              </div>
+            `;
+
+            if (!series.length) {
+              html += `
+                <div class="center-msg">
+                  <i class="bi bi-journal-x fs-1 text-muted d-block mb-3"></i>
+                  No manga series found.<br>
+                  <small style="color:var(--text-muted);">Try adjusting the rating or clearing filters.</small>
+                </div>
+              `;
+            } else {
+              html += `<div class="art-grid">`;
+              series.forEach(item => {
+                const cover = this.getThumb(item.cover_file);
+                const target = `#/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}`;
+                const isR18 = item.rating === 'r18';
+                const isBlur = isR18 && this.safeBlurEnabled;
+
+                html += `
+                  <a href="${target}" class="art-card">
+                    <div class="art-thumb-wrap position-relative">
+                      ${isBlur ? `
+                        <div class="safe-blur-overlay" onclick="event.preventDefault(); event.stopPropagation(); this.parentElement.classList.toggle('safe-blur-revealed');">
+                          <i class="bi bi-eye-slash-fill fs-5"></i>
+                          <span style="font-size:0.7rem; font-weight:800;">R-18 WORK</span>
+                        </div>
+                      ` : ''}
+                      <img src="${cover}" class="${isBlur ? 'safe-blur-target' : ''}" alt="${this.escape(item.series_title)}" loading="lazy" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                      ${isR18 ? '<span class="badge-flag">R-18</span>' : ''}
+                      <span class="badge-chapter-count"><i class="bi bi-book"></i> ${item.total_chapters} Ch.</span>
+                    </div>
+
+                    <div class="art-card-info">
+                      <div class="art-card-title" title="${this.escape(item.series_title)}">${this.escape(item.series_title)}</div>
+                      <div class="art-card-author">By ${this.escape(item.artist_name || 'Author')}</div>
+                      <div class="art-card-stats">
+                        <span>${Number(item.total_views || 0).toLocaleString()} views</span>
+                        <span>${Number(item.total_likes || 0).toLocaleString()} likes</span>
+                      </div>
+                    </div>
+                  </a>
+                `;
+              });
+              html += `</div>`;
+
+              if (totalPages > 1) {
+                html += `
+                  <div style="display:flex; justify-content:center; align-items:center; gap:0.5rem; margin-top:2.5rem;">
+                    <button class="btn-subtle" ${page <= 1 ? 'disabled style="opacity:0.4;"' : ''} onclick="app.updateParam('page', ${page - 1})">&laquo; Prev</button>
+                    <span style="font-weight:700; font-size:0.85rem; padding:0 0.8rem; font-family:'JetBrains Mono',monospace;">Page ${page} / ${totalPages}</span>
+                    <button class="btn-subtle" ${page >= totalPages ? 'disabled style="opacity:0.4;"' : ''} onclick="app.updateParam('page', ${page + 1})">Next &raquo;</button>
+                  </div>
+                `;
+              }
+            }
+
+            container.innerHTML = html;
+
+            if (showHero) {
+              setTimeout(() => this.loadPopularHero('popular-hero-mount', 'day'), 10);
+            }
+          }
+
+          async renderRankings(params) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+            const period = params.get('period') || 'day';
+
+            const res = await this.api('manga_series_list', {
+              sort: 'popular',
+              rating: this.r18Enabled ? 'all' : 'safe',
+              limit: 20
+            });
+
+            const series = res && Array.isArray(res.series) ? res.series : [];
+            if (!series.length) {
+              container.innerHTML = '<div class="center-msg">No ranking records available.</div>';
+              return;
+            }
+
+            let html = `
+              <div id="popular-hero-mount"></div>
+
+              <div class="art-grid">
+                ${series.map((item, idx) => `
+                  <a href="#/series/${encodeURIComponent(item.series_title)}/userid/${item.user_id}" class="art-card">
+                    <div class="art-thumb-wrap">
+                      <img src="${this.getThumb(item.cover_file)}" alt="" loading="lazy" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                      <span class="badge-flag" style="background:var(--accent); color:#fff;">#${idx + 1}</span>
+                      <span class="badge-chapter-count">${item.total_chapters} Ch.</span>
+                    </div>
+                    <div class="art-card-info">
+                      <div class="art-card-title">${this.escape(item.series_title)}</div>
+                      <div class="art-card-author">${this.escape(item.artist_name || 'Author')}</div>
+                      <div class="art-card-stats">
+                        <span>${Number(item.total_views || 0).toLocaleString()} views</span>
+                      </div>
+                    </div>
+                  </a>
+                `).join('')}
+              </div>
+            `;
+
+            container.innerHTML = html;
+            setTimeout(() => this.loadPopularHero('popular-hero-mount', period), 10);
+          }
+
+          async renderSeriesOverview(seriesTitle, authorId) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            const res = await this.api('manga_series_get', { series: seriesTitle, uid: authorId });
+            if (!res || !res.series_title) {
+              container.innerHTML = '<div class="center-msg">Series not found.</div>';
+              return;
+            }
+
+            const cover = this.getThumb(res.cover_file);
+            const firstChNum = res.chapters?.[0]?.chapter_number || 1;
+            const firstReadUrl = `#/series/${encodeURIComponent(res.series_title)}/userid/${res.author.id}/read/chapter/${firstChNum}/page/1`;
+            const originalPhpMusicPostUrl = this.getOriginalPhpMusicPostUrl(res.series_title, res.author.id);
+
+            let html = `
+              <div style="max-width: 1200px; margin: 0 auto; width: 100%;">
+                <div class="spotify-series-wrap">
+                  <div class="manga-hero-container">
+                    <div class="manga-hero-backdrop" style="background-image: url('${cover}');"></div>
+                    <div class="manga-hero-content">
+                      <div class="manga-cover-card">
+                        <img src="${cover}" alt="" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                      </div>
+                      <div class="manga-hero-details">
+                        <div style="font-size:0.75rem; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--accent);">Manga Series</div>
+                        <h1 class="manga-hero-title">${this.escape(res.series_title)}</h1>
+                        <div style="display:flex; align-items:center; gap:0.6rem; font-size:0.9rem; flex-wrap:wrap;">
+                          <span style="font-weight:700;">By ${this.escape(res.author.artist)}</span>
+                          <span>&bull; ${res.total_chapters} Chapters</span>
+                          <span>&bull; ${res.total_pages} Pages</span>
+                        </div>
+
+                        ${res.description ? `
+                          <div style="font-size:0.88rem; color:var(--text-secondary); line-height:1.55; max-width:760px; max-height:120px; overflow-y:auto; padding:0.6rem 0.9rem; background:rgba(0,0,0,0.3); border-radius:10px;">
+                            ${this.escape(res.description)}
+                          </div>
+                        ` : ''}
+
+                        <div class="tag-cloud">
+                          ${res.rating === 'r18' ? '<span class="tag-pill" style="color:var(--r18); border-color:var(--r18-alpha);">R-18</span>' : ''}
+                          ${(res.tags || []).map(t => `<a href="#/?tag=${encodeURIComponent(t.name)}" class="tag-pill">#${this.escape(t.name)}</a>`).join('')}
+                        </div>
+
+                        <div class="manga-hero-actions">
+                          <a href="${firstReadUrl}" class="btn-primary">
+                            <i class="bi bi-book-half"></i> <span>Start Reading</span>
+                          </a>
+                          <a href="${originalPhpMusicPostUrl}" target="_blank" rel="noopener noreferrer" class="btn-subtle" title="Open original series on PHPMusicPost">
+                            <i class="bi bi-box-arrow-up-right"></i>
+                            <span>Go to Original PHPMusicPost Series</span>
+                          </a>
+                          <button type="button" class="btn-subtle" onclick="app.copyShareUrl('${this.escape(res.series_title)}')">
+                            <i class="bi bi-share-fill"></i> <span>Share</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="padding: 1.5rem 2rem 2rem 2rem;">
+                    <h3 style="font-size:1.15rem; font-weight:800; margin-bottom:1rem; border-bottom:1px solid var(--border-subtle); padding-bottom:0.75rem;">
+                      Chapters (${res.total_chapters})
+                    </h3>
+
+                    <div style="display:flex; flex-direction:column; gap:0.4rem;">
+                      ${(res.chapters || []).map(ch => {
+                        const chUrl = `#/series/${encodeURIComponent(res.series_title)}/userid/${res.author.id}/read/chapter/${ch.chapter_number || 1}/page/1`;
+                        return `
+                          <a href="${chUrl}" class="manga-chapter-row">
+                            <div style="display:flex; align-items:center; gap:0.8rem;">
+                              <span style="font-weight:700; color:var(--accent);">Ch. ${ch.chapter_number || 1}</span>
+                              <span style="font-weight:600;">${this.escape(ch.title)}</span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:1.2rem; font-size:0.8rem; color:var(--text-muted);">
+                              <span>${ch.page_count} Pages</span>
+                              <span class="btn-subtle" style="height:32px; font-size:0.78rem; pointer-events:none;">Read</span>
+                            </div>
+                          </a>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            `;
+
+            container.innerHTML = html;
+          }
+
+          async renderReader(target, page = 1) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+
+            const res = await this.api('manga_chapter_get', target);
+            if (!res || !res.chapter) {
+              container.innerHTML = '<div class="center-msg">Chapter content not found.</div>';
+              return;
+            }
+
+            const ch = res.chapter;
+            const pages = ch.pages || [];
+            const totalPages = Math.max(1, pages.length);
+            const currPage = Math.min(Math.max(1, page), totalPages);
+            const seriesTitle = res.series_title;
+            const authorId = ch.user_id;
+            const chNum = ch.chapter_number || 1;
+            const readMode = localStorage.getItem('pm_read_mode') || 'single';
+
+            const makeUrl = (c, p) => `#/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}/read/chapter/${c}/page/${p}`;
+            const seriesBackUrl = `#/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}`;
+
+            const prevUrl = currPage > 1 ? makeUrl(chNum, currPage - 1) : (res.prev_chapter ? makeUrl(res.prev_chapter.chapter_number, res.prev_chapter.page_count || 1) : seriesBackUrl);
+            const nextUrl = currPage < totalPages ? makeUrl(chNum, currPage + 1) : (res.next_chapter ? makeUrl(res.next_chapter.chapter_number, 1) : seriesBackUrl);
+
+            const activeFile = pages[currPage - 1]?.file_name || '';
+            const rawSrc = this.getRaw(activeFile);
+            const isHiddenClass = this.hudHidden ? 'hidden' : '';
+
+            let html = `
+              <div class="manga-cinema-overlay ${this.hudHidden ? 'hud-hidden' : ''}" id="cinema-overlay">
+                <div class="manga-cinema-topbar ${isHiddenClass}" id="cinema-topbar">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <a href="${seriesBackUrl}" class="reader-btn-square" id="manga-series-back-btn" title="Back to Series">
+                      <i class="bi bi-chevron-left"></i>
+                    </a>
+                    <button type="button" class="reader-chapter-pill" onclick="app.showChaptersModal(${ch.id}, '${this.escape(seriesTitle)}', ${authorId})">
+                      Ch. ${chNum}
+                    </button>
+                  </div>
+
+                  <div class="reader-nav-pill">
+                    <a href="${prevUrl}" class="pill-arrow-btn" id="manga-prev-page-link" title="Previous Page">
+                      <i class="bi bi-chevron-left"></i>
+                    </a>
+                    <div class="pill-counter" onclick="app.showPageJumpModal(${chNum}, ${totalPages}, '${this.escape(seriesTitle)}', ${authorId})">
+                      <span class="curr-page" id="reader-curr-page">${currPage}</span>
+                      <span class="sep">/</span>
+                      <span class="total-pages">${totalPages}</span>
+                    </div>
+                    <a href="${nextUrl}" class="pill-arrow-btn" id="manga-next-page-link" title="Next Page">
+                      <i class="bi bi-chevron-right"></i>
+                    </a>
+                  </div>
+
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <button type="button" class="reader-btn-square" onclick="app.toggleReadMode(${ch.id}, ${currPage})" title="Toggle Single/Webtoon">
+                      ${readMode === 'webtoon' ? 'W' : 'S'}
+                    </button>
+                    <button type="button" class="reader-btn-square red-menu-btn" onclick="app.showChaptersModal(${ch.id}, '${this.escape(seriesTitle)}', ${authorId})" title="Chapters List">
+                      <i class="bi bi-list fs-5"></i>
+                    </button>
+                  </div>
+                </div>
+
+                ${readMode === 'webtoon' ? `
+                  <div class="webtoon-viewport" id="webtoon-viewport">
+                    <div class="webtoon-stream" id="webtoon-stream">
+                      ${res.prev_chapter ? `
+                        <div class="webtoon-chapter-nav-banner">
+                          <a href="${makeUrl(res.prev_chapter.chapter_number, 1)}" class="btn-subtle">
+                            &larr; Previous Chapter (Ch. ${res.prev_chapter.chapter_number})
+                          </a>
+                        </div>
+                      ` : ''}
+
+                      ${pages.map((p, idx) => {
+                        const pNum = idx + 1;
+                        return `
+                          <div class="webtoon-page-item" data-page="${pNum}">
+                            <img src="${this.getRaw(p.file_name)}" alt="Page ${pNum}" loading="${pNum <= 3 ? 'eager' : 'lazy'}" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                          </div>
+                        `;
+                      }).join('')}
+
+                      <div class="webtoon-chapter-nav-banner" style="margin: 2rem 0 6rem 0;">
+                        ${res.next_chapter ? `
+                          <a href="${makeUrl(res.next_chapter.chapter_number, 1)}" class="btn-primary" style="height:44px; padding:0 1.6rem; font-size:0.95rem;">
+                            Next Chapter (Ch. ${res.next_chapter.chapter_number}) &rarr;
+                          </a>
+                        ` : `
+                          <div style="color:var(--text-muted); font-size:0.9rem; text-align:center;">
+                            End of Chapter ${chNum} &bull; No more chapters
+                          </div>
+                        `}
+                      </div>
+                    </div>
+                  </div>
+                ` : `
+                  <div class="cinema-viewport">
+                    <a href="${prevUrl}" style="position:absolute; top:0; left:0; width:35%; height:100%; z-index:5;" onclick="event.stopPropagation()"></a>
+                    <div style="position:absolute; top:0; left:35%; width:30%; height:100%; z-index:5; cursor:pointer;" onclick="app.toggleCinemaHud()"></div>
+                    <a href="${nextUrl}" style="position:absolute; top:0; right:0; width:35%; height:100%; z-index:5;" onclick="event.stopPropagation()"></a>
+                    <img src="${rawSrc}" alt="Page ${currPage}" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                  </div>
+
+                  <div class="manga-cinema-bottombar ${isHiddenClass}" id="cinema-bottombar">
+                    <div class="reader-carousel" id="manga-thumb-carousel">
+                      ${pages.map((p, idx) => {
+                        const pNum = idx + 1;
+                        const isActive = (pNum === currPage);
+                        return `
+                          <a href="${makeUrl(chNum, pNum)}" class="reader-carousel-item ${isActive ? 'active' : ''}" id="manga-thumb-${pNum}">
+                            <img src="${this.getThumb(p.file_name)}" alt="P.${pNum}" onerror="this.src=app.buildApiUrl('get_app_icon')">
+                            <span class="thumb-page-badge">${pNum}</span>
+                          </a>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+                `}
+              </div>
+            `;
+
+            container.innerHTML = html;
+
+            if (readMode === 'webtoon') {
+              this.initWebtoonScroll(pages.length);
+              if (currPage > 1) {
+                setTimeout(() => {
+                  const targetPage = document.querySelector(`.webtoon-page-item[data-page="${currPage}"]`);
+                  if (targetPage) targetPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 80);
+              }
+            } else {
+              setTimeout(() => {
+                const activeEl = document.getElementById(`manga-thumb-${currPage}`);
+                if (activeEl) {
+                  activeEl.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+                }
+              }, 60);
+            }
+          }
+
+          initWebtoonScroll(totalPages) {
+            const viewport = document.getElementById('webtoon-viewport');
+            if (!viewport) return;
+
+            let downX = 0, downY = 0, downT = 0;
+            viewport.onpointerdown = (e) => {
+              downX = e.clientX;
+              downY = e.clientY;
+              downT = Date.now();
+            };
+
+            viewport.onpointerup = (e) => {
+              if (e.target.closest('a, button, input, select')) return;
+              const dist = Math.hypot(e.clientX - downX, e.clientY - downY);
+              const dt = Date.now() - downT;
+              if (dist < 10 && dt < 300) {
+                this.toggleCinemaHud();
+              }
+            };
+
+            const items = viewport.querySelectorAll('.webtoon-page-item');
+            const observer = new IntersectionObserver((entries) => {
+              entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                  const pNum = entry.target.dataset.page;
+                  const label = document.getElementById('reader-curr-page');
+                  if (label && pNum) label.textContent = pNum;
+                }
+              });
+            }, {
+              root: viewport,
+              threshold: 0.4
+            });
+
+            items.forEach(el => observer.observe(el));
+          }
+
+          toggleReadMode(chapterId, currPage) {
+            const current = localStorage.getItem('pm_read_mode') || 'single';
+            const nextMode = current === 'single' ? 'webtoon' : 'single';
+            localStorage.setItem('pm_read_mode', nextMode);
+            this.toast(nextMode === 'webtoon' ? 'Switched to Webtoon Scroll' : 'Switched to Single Page');
+            this.handleRoute();
+          }
+
+          toggleCinemaHud() {
+            this.hudHidden = !this.hudHidden;
+            localStorage.setItem('pm_hud_hidden', this.hudHidden ? '1' : '0');
+            const topbar = document.getElementById('cinema-topbar');
+            const bottombar = document.getElementById('cinema-bottombar');
+            const overlay = document.getElementById('cinema-overlay');
+            topbar?.classList.toggle('hidden', this.hudHidden);
+            bottombar?.classList.toggle('hidden', this.hudHidden);
+            overlay?.classList.toggle('hud-hidden', this.hudHidden);
+          }
+
+          showPageJumpModal(chNum, totalPages, seriesTitle, authorId) {
+            const readMode = localStorage.getItem('pm_read_mode') || 'single';
+            let html = `
+              <div class="custom-modal-header">
+                <span>Jump to Page</span>
+                <button class="btn-icon" onclick="app.closeModal()"><i class="bi bi-x-lg"></i></button>
+              </div>
+              <div class="custom-modal-body" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(60px, 1fr)); gap:0.5rem;">
+                ${Array.from({ length: totalPages }, (_, i) => i + 1).map(p => `
+                  <button type="button" class="btn-subtle" style="height:40px; font-weight:700;" onclick="app.jumpToPage(${p}, ${readMode === 'webtoon'})">
+                    ${p}
+                  </button>
+                `).join('')}
+              </div>
+            `;
+            this.showModal(html);
+          }
+
+          jumpToPage(p, isWebtoon) {
+            this.closeModal();
+            if (isWebtoon) {
+              const el = document.querySelector(`.webtoon-page-item[data-page="${p}"]`);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } else {
+              const [base, queryStr] = (window.location.hash || '#/').split('?');
+              const parts = base.split('/');
+              const pIdx = parts.indexOf('page');
+              if (pIdx >= 0) {
+                parts[pIdx + 1] = p;
+                this.nav(parts.join('/') + (queryStr ? '?' + queryStr : ''));
+              }
+            }
+          }
+
+          async showChaptersModal(currentChId, seriesTitle, authorId) {
+            const res = await this.api('manga_series_get', { series: seriesTitle, uid: authorId });
+            const chapters = res?.chapters || [];
+
+            let html = `
+              <div class="custom-modal-header">
+                <span>All Chapters</span>
+                <button class="btn-icon" onclick="app.closeModal()"><i class="bi bi-x-lg"></i></button>
+              </div>
+              <div class="custom-modal-body" style="max-height:60vh;">
+                ${chapters.map(ch => `
+                  <a href="#/series/${encodeURIComponent(seriesTitle)}/userid/${authorId}/read/chapter/${ch.chapter_number || 1}/page/1" class="btn-subtle" style="width:100%; justify-content:space-between; margin-bottom:0.4rem; padding:0.75rem 1rem; border-radius:12px; ${ch.id == currentChId ? 'border-color:var(--accent); color:var(--accent);' : ''}" onclick="app.closeModal()">
+                    <span>Ch. ${ch.chapter_number || 1}: ${this.escape(ch.title)}</span>
+                    <span style="font-size:0.75rem; opacity:0.6;">${ch.page_count}p</span>
+                  </a>
+                `).join('')}
+              </div>
+            `;
+            this.showModal(html);
+          }
+
+          async renderDirectory(type, title) {
+            const container = document.getElementById('page-container');
+            container.innerHTML = '<div class="spinner"></div>';
+            document.title = `${title} (Manga Only) \u2013 PHPMusicPost Manga`;
+
+            const meta = await this.getMangaCatalogMetadata();
+            const items = (meta && meta[type]) ? meta[type] : [];
+
+            if (!items.length) {
+              container.innerHTML = `
+                <div class="feed-header-wrap">
+                  <div class="feed-header-title-block">
+                    <h1>${title}</h1>
+                    <p>Manga Studio Archive</p>
+                  </div>
+                </div>
+                <div class="center-msg">
+                  <i class="bi bi-journal-x fs-1 text-muted d-block mb-3"></i>
+                  No manga ${title.toLowerCase()} cataloged yet.<br>
+                  <small style="color:var(--text-muted);">Only Manga series items are displayed here.</small>
+                </div>
+              `;
+              return;
+            }
+
+            let html = `
+              <div class="feed-header-wrap">
+                <div class="feed-header-title-block">
+                  <h1>${title}</h1>
+                  <p>${items.length} manga categories available</p>
+                </div>
+                <div class="feed-header-controls">
+                  <div class="sidebar-search-box" style="height:38px; width:220px; border-radius:9999px;">
+                    <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                    <input type="search" placeholder="Filter ${title.toLowerCase()}..." oninput="app.filterDirectory(this.value, '.dir-bg-card')">
+                  </div>
+                  <select class="custom-select" onchange="app.sortDirectory('#directory-grid', '.dir-bg-card', this.value)">
+                    <option value="count_desc">Most Works</option>
+                    <option value="count_asc">Least Works</option>
+                    <option value="name_asc">Name (A-Z)</option>
+                    <option value="name_desc">Name (Z-A)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="directory-card-grid" id="directory-grid">
+                ${items.map(it => {
+                  const coverUrl = it.cover ? this.getThumb(it.cover) : '';
+                  return `
+                    <a href="#/?${it.param}=${encodeURIComponent(it.name)}" class="dir-bg-card" data-name="${this.escape(it.name).toLowerCase()}" data-count="${it.count}">
+                      ${coverUrl ? `<img src="${coverUrl}" alt="${this.escape(it.name)}" loading="lazy" onerror="this.src=app.buildApiUrl('get_app_icon')">` : ''}
+                      <div class="dir-bg-overlay"></div>
+                      <div class="dir-bg-info">
+                        <div class="dir-bg-title">${type === 'tags' ? '#' : ''}${this.escape(it.name)}</div>
+                        <div class="dir-bg-count">${it.count} Manga ${it.count === 1 ? 'Work' : 'Works'}</div>
+                      </div>
+                    </a>
+                  `;
+                }).join('')}
+              </div>
+            `;
+
+            container.innerHTML = html;
+          }
+
+          filterDirectory(val, selector) {
+            const q = (val || '').toLowerCase().trim();
+            document.querySelectorAll(selector).forEach(el => {
+              const name = el.dataset.name || '';
+              el.style.display = (!q || name.includes(q)) ? '' : 'none';
+            });
+          }
+
+          sortDirectory(containerSelector, itemSelector, sortBy) {
+            const parent = document.querySelector(containerSelector);
+            if (!parent) return;
+            const items = Array.from(parent.querySelectorAll(itemSelector));
+            items.sort((a, b) => {
+              const countA = parseInt(a.dataset.count || '0', 10);
+              const countB = parseInt(b.dataset.count || '0', 10);
+              const nameA = a.dataset.name || '';
+              const nameB = b.dataset.name || '';
+              if (sortBy === 'count_desc') return countB - countA || nameA.localeCompare(nameB);
+              if (sortBy === 'count_asc') return countA - countB || nameA.localeCompare(nameB);
+              if (sortBy === 'name_asc') return nameA.localeCompare(nameB);
+              if (sortBy === 'name_desc') return nameB.localeCompare(nameA);
+              return 0;
+            });
+            items.forEach(el => parent.appendChild(el));
+          }
+
+          showSettingsModal() {
+            const defaultCleanUrl = this.getCleanDisplayUrl(this.getDefaultSiteUrl());
+            const currentCleanUrl = this.getCleanDisplayUrl(this.apiBase);
+
+            const html = `
+              <div class="custom-modal-header">
+                <span>Studio &amp; API Settings</span>
+                <button class="btn-icon" onclick="app.closeModal()"><i class="bi bi-x-lg"></i></button>
+              </div>
+              <div class="custom-modal-body">
+                <div style="font-size:0.84rem; color:var(--text-secondary); line-height:1.5;">
+                  Configure the connection to your PHPMusic backend. Simply provide the website address (e.g. <code>https://phpmusic.rf.gd</code>) without typing extra path parameters.
+                </div>
+
+                <div style="background:var(--bg-surface-elevated); padding:0.85rem 1rem; border-radius:14px; border:1px solid var(--border-subtle); display:flex; flex-direction:column; gap:0.4rem;">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700; font-size:0.82rem;">Current Default URL:</span>
+                    <button type="button" class="btn-subtle" style="height:26px; font-size:0.72rem; padding:0 8px;" onclick="app.fillDefaultApiUrl('${this.escape(defaultCleanUrl)}')">Use Default</button>
+                  </div>
+                  <code style="font-size:0.76rem; color:var(--accent); word-break:break-all;">${this.escape(defaultCleanUrl)}</code>
+                </div>
+
+                <div>
+                  <label style="display:block; font-size:0.8rem; font-weight:700; color:var(--text-secondary); text-transform:uppercase; margin-bottom:0.4rem;">
+                    Site Base URL:
+                  </label>
+                  <input type="text" id="custom-api-input" value="${this.escape(currentCleanUrl)}" style="width:100%; height:40px; background:var(--bg-surface-elevated); border:1px solid var(--border-strong); border-radius:10px; padding:0 1rem; font-family:'JetBrains Mono',monospace; font-size:0.84rem; color:#fff;" placeholder="https://phpmusic.rf.gd">
+                </div>
+
+                <div id="test-connection-status" style="font-size:0.82rem; min-height:22px;"></div>
+              </div>
+              <div class="custom-modal-footer">
+                <button type="button" class="btn-subtle" onclick="app.testModalEndpoint()">Test Connection</button>
+                <button type="button" class="btn-primary" onclick="app.saveCustomEndpoint()">Save &amp; Connect</button>
+              </div>
+            `;
+            this.showModal(html);
+          }
+
+          fillDefaultApiUrl(url) {
+            const input = document.getElementById('custom-api-input');
+            if (input) input.value = url;
+            this.toast('Filled with default address');
+          }
+
+          async testModalEndpoint() {
+            const input = document.getElementById('custom-api-input');
+            const status = document.getElementById('test-connection-status');
+            if (!input || !status) return;
+
+            const url = this.getCleanDisplayUrl(input.value);
+            status.innerHTML = `<span style="color:var(--text-muted);"><i class="bi bi-arrow-repeat spin"></i> Testing connection to ${this.escape(url)}...</span>`;
+
+            const startTime = performance.now();
+            const ok = await this.testEndpoint(url);
+            const duration = Math.round(performance.now() - startTime);
+
+            if (ok) {
+              status.innerHTML = `<span style="color:var(--success); font-weight:700;"><i class="bi bi-check-circle-fill"></i> Successfully connected! (${duration}ms)</span>`;
+            } else {
+              status.innerHTML = `<span style="color:var(--r18); font-weight:700;"><i class="bi bi-x-circle-fill"></i> Connection failed. Ensure the server address is reachable.</span>`;
+            }
+          }
+
+          saveCustomEndpoint() {
+            const input = document.getElementById('custom-api-input');
+            const val = input ? this.getCleanDisplayUrl(input.value) : '';
+            if (val) {
+              this.apiBase = val;
+              localStorage.setItem('pm_api_endpoint', val);
+              this._mangaMetaCache = null;
+              this.updateAppIcon();
+              this.updateBackLink();
+              this.closeModal();
+              this.toast('Saved! Connecting...');
+              this.probeApiEndpoint();
+            }
+          }
+
+          copyShareUrl(title) {
+            navigator.clipboard.writeText(window.location.href);
+            this.toast(`Link copied for "${title}"`);
+          }
+        }
+
+        window.app = new PHPMusicPostMangaClient();
+      })();
+    </script>
+  </body>
+</html>
+<?php
+  exit;
+}
+
 // PROFILETREE: INDEPENDENT CREATOR BIO & AUDIO SHOWCASE HUB (?access=profiletree)
 if (isset($_GET['access']) && $_GET['access'] === 'profiletree') {
   while (ob_get_level() > 0) {
@@ -6276,7 +9435,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.6');
+define('APP_VERSION', '13.7');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -47000,7 +50159,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.6'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.7'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -57017,7 +60176,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.6';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.7';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -100121,6 +103280,10 @@ function perform_cover_scan($db) {
           <a href="#" class="nav-link" data-view="phpboard_index">
             <i class="bi bi-chat-square-text-fill"></i>
             <span>Imageboard</span>
+          </a>
+          <a href="?access=public_manga" class="nav-link">
+            <i class="bi bi-book-half"></i>
+            <span>Manga</span>
           </a>
 
           <hr class="text-secondary">
