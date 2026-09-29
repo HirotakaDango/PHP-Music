@@ -9435,7 +9435,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.7');
+define('APP_VERSION', '13.8');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -50159,7 +50159,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.7'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.8'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -60176,7 +60176,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.7';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.8';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -84387,8 +84387,12 @@ try {
         $db_target->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         if (function_exists('init_db')) { init_db($db_target); }
 
-        $stmt = $db_target->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, status, profile_picture, profile_picture_type) VALUES (?, ?, ?, 'yes', 1, 'super_admin', ?, 'image/svg+xml')");
-        $stmt->execute([$email, $artist, $hash, $svg]);
+        $dates = trim(htmlspecialchars($data['dates'] ?? $data['age'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $gender = trim(htmlspecialchars($data['gender'] ?? '', ENT_QUOTES, 'UTF-8'));
+        $place = trim(htmlspecialchars($data['place'] ?? '', ENT_QUOTES, 'UTF-8'));
+
+        $stmt = $db_target->prepare("INSERT INTO users (email, artist, password_hash, verified, is_admin, status, profile_picture, profile_picture_type, dates, gender, place) VALUES (?, ?, ?, 'yes', 1, 'super_admin', ?, 'image/svg+xml', ?, ?, ?)");
+        $stmt->execute([$email, $artist, $hash, $svg, $dates, $gender, $place]);
 
         if ($db_filename !== 'music.db' && file_exists(__DIR__ . '/music.db')) {
           $old_cnt = (int)$db_setup->query("SELECT COUNT(*) FROM users")->fetchColumn();
@@ -84448,6 +84452,25 @@ try {
                 <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">SECURE PASSWORD</label>
                 <input type="password" id="setup-password" class="form-control" required minlength="6" placeholder="Minimum 6 characters">
               </div>
+              <div class="row g-2 mb-3">
+                <div class="col-6">
+                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">BIRTHDATE / AGE</label>
+                  <input type="date" id="setup-dates" class="form-control">
+                </div>
+                <div class="col-6">
+                  <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">GENDER</label>
+                  <select id="setup-gender" class="form-control">
+                    <option value="">Select gender</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="don't want to say">Don't want to say</option>
+                  </select>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label text-secondary small fw-bold" style="letter-spacing: 1px;">LOCATION / PLACE</label>
+                <input type="text" id="setup-place" class="form-control" placeholder="e.g. Jakarta, Indonesia">
+              </div>
               <div class="mb-4">
                 <label class="form-label text-secondary small fw-bold d-flex justify-content-between align-items-center" style="letter-spacing: 1px;">
                   <span>DATABASE FILENAME</span>
@@ -84479,6 +84502,9 @@ try {
                     artist: document.getElementById('setup-artist').value,
                     email: document.getElementById('setup-email').value,
                     password: document.getElementById('setup-password').value,
+                    dates: document.getElementById('setup-dates')?.value.trim() || '',
+                    gender: document.getElementById('setup-gender')?.value || '',
+                    place: document.getElementById('setup-place')?.value.trim() || '',
                     db_name: document.getElementById('setup-dbname')?.value.trim() || ''
                   })
                 });
@@ -86547,6 +86573,139 @@ if (isset($_GET['action'])) {
       }
       break;
 
+    case 'get_minlisten_feed':
+      try {
+        $db->exec("CREATE TABLE IF NOT EXISTS minlisten_clips (
+          song_id INTEGER PRIMARY KEY,
+          start_time REAL DEFAULT 0,
+          duration REAL DEFAULT 60,
+          is_custom INTEGER DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (song_id) REFERENCES music(id) ON DELETE CASCADE
+        );");
+        $cols = $db->query("PRAGMA table_info(minlisten_clips)")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array('is_custom', $cols)) {
+          $db->exec("ALTER TABLE minlisten_clips ADD COLUMN is_custom INTEGER DEFAULT 0;");
+        }
+        if (!in_array('has_clone', $cols)) {
+          $db->exec("ALTER TABLE minlisten_clips ADD COLUMN has_clone INTEGER DEFAULT 0;");
+        }
+      } catch (\Throwable $e) {}
+
+      $mode = $_GET['mode'] ?? 'random';
+      $target_uid = isset($_GET['user_id']) ? (int)$_GET['user_id'] : 0;
+      $page = max(1, (int)($_GET['page'] ?? 1));
+      $limit = 10;
+      $offset = ($page - 1) * $limit;
+
+      $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.last_modified,
+        COALESCE(ml.start_time, 0) as clip_start,
+        MIN(COALESCE(ml.duration, 60), 60, CASE WHEN m.duration > 0 THEN m.duration ELSE 60 END) as clip_duration,
+        COALESCE(ml.is_custom, 0) as is_custom,
+        COALESCE(ml.has_clone, 0) as has_clone,
+        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+        CASE WHEN fol.following_id IS NOT NULL THEN 1 ELSE 0 END AS is_followed,
+        COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as play_count";
+
+      $where = ["m.banned = 0", "(m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)"];
+      $params = [$user_id ?? 0];
+
+      if ($mode === 'user' && $target_uid > 0) {
+        $where[] = "m.user_id = ?";
+        $params[] = $target_uid;
+        $order_by = "ORDER BY m.id DESC";
+      } else {
+        $order_by = "ORDER BY RANDOM()";
+      }
+
+      $sql = "
+        SELECT {$song_fields}
+        FROM music m
+        LEFT JOIN minlisten_clips ml ON m.id = ml.song_id
+        LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
+        LEFT JOIN follows fol ON m.user_id = fol.following_id AND fol.follower_id = ?
+        WHERE " . implode(' AND ', $where) . "
+        {$order_by}
+        LIMIT ? OFFSET ?
+      ";
+
+      $exec_params = array_merge([$user_id ?? 0, $user_id ?? 0], $params, [$limit, $offset]);
+      $stmt = $db->prepare($sql);
+      $stmt->execute($exec_params);
+      send_json($stmt->fetchAll());
+      break;
+
+    case 'save_minlisten_clip':
+      if (!$user_id) { http_response_code(403); exit; }
+      $data = json_decode(file_get_contents('php://input'), true);
+      $song_id = (int)($data['song_id'] ?? 0);
+      $start_time = max(0, (float)($data['start_time'] ?? 0));
+      $duration = min(60, max(5, (float)($data['duration'] ?? 60)));
+      $is_custom = isset($data['is_custom']) ? (int)$data['is_custom'] : 1;
+
+      $stmt = $db->prepare("SELECT user_id, duration, file FROM music WHERE id = ?");
+      $stmt->execute([$song_id]);
+      $song = $stmt->fetch();
+      if (!$song) {
+        http_response_code(404);
+        send_json(['status' => 'error', 'message' => 'Song not found']);
+      }
+
+      if ($is_custom === 0) {
+        $stmt_check = $db->prepare("SELECT is_custom FROM minlisten_clips WHERE song_id = ?");
+        $stmt_check->execute([$song_id]);
+        $existing_custom = $stmt_check->fetchColumn();
+        if ($existing_custom == 1) {
+          send_json(['status' => 'success', 'message' => 'Custom clip preserved']);
+        }
+      } else {
+        $is_owner = ($song['user_id'] == $user_id || $is_admin == 1 || $is_super_admin == 1);
+        if (!$is_owner) {
+          http_response_code(403);
+          send_json(['status' => 'error', 'message' => 'Only the owner or an admin can edit this clip']);
+        }
+      }
+
+      if ($song['duration'] > 0 && $start_time >= $song['duration']) {
+        $start_time = max(0, $song['duration'] - $duration);
+      }
+      
+      try {
+        $cols = $db->query("PRAGMA table_info(minlisten_clips)")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array('has_clone', $cols)) $db->exec("ALTER TABLE minlisten_clips ADD COLUMN has_clone INTEGER DEFAULT 0;");
+      } catch (\Throwable $e) {}
+
+      $has_clone = 0;
+      $ffmpeg_bin = get_ffmpeg_binary();
+      if ($ffmpeg_bin && $duration > 0 && file_exists($song['file'])) {
+        $clone_dir = MUSIC_DIR . '/minlisten_clones';
+        if (!is_dir($clone_dir)) @mkdir($clone_dir, 0755, true);
+        $clone_path = $clone_dir . '/' . $song_id . '.mp3';
+        $escFf = escapeshellarg($ffmpeg_bin);
+        $escIn = escapeshellarg($song['file']);
+        $escOut = escapeshellarg($clone_path);
+          
+        // Zero-delay streaming: Generate extremely lightweight 64k MP3 snippet
+        @exec("{$escFf} -y -i {$escIn} -ss {$start_time} -t {$duration} -c:a libmp3lame -b:a 64k {$escOut} 2>&1", $out, $ret);
+        if ($ret === 0 && file_exists($clone_path) && filesize($clone_path) > 0) {
+          $has_clone = 1;
+        }
+      }
+
+      $db->prepare("
+        INSERT INTO minlisten_clips (song_id, start_time, duration, is_custom, has_clone, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(song_id) DO UPDATE SET
+          start_time = excluded.start_time,
+          duration = excluded.duration,
+          is_custom = CASE WHEN excluded.is_custom = 1 THEN 1 ELSE minlisten_clips.is_custom END,
+          has_clone = excluded.has_clone,
+          updated_at = CURRENT_TIMESTAMP
+      ")->execute([$song_id, $start_time, $duration, $is_custom, $has_clone]);
+
+      send_json(['status' => 'success', 'message' => 'MinListen clip timeline saved!']);
+      break;
+
     case 'get_radio_tracks':
       $seed_id = intval($_GET['seed_id'] ?? 0);
       $stmt = $db->prepare("SELECT artist, genre FROM music WHERE id = ?");
@@ -86556,12 +86715,12 @@ if (isset($_GET['action'])) {
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
       if ($seed) {
-        $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? ORDER BY RANDOM() LIMIT 15");
-        $radio_stmt->execute([$user_id, $seed['genre'], $seed['artist'], $seed_id]);
+        $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE (m.genre = ? OR match_artist(m.artist, ?) = 1) AND m.id != ? AND m.banned = 0 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY RANDOM() LIMIT 15");
+        $radio_stmt->execute([$user_id, $seed['genre'], $seed['artist'], $seed_id, $user_id]);
         send_json($radio_stmt->fetchAll());
       } else {
-        $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? ORDER BY RANDOM() LIMIT 15");
-        $radio_stmt->execute([$user_id]);
+        $radio_stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.banned = 0 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1) ORDER BY RANDOM() LIMIT 15");
+        $radio_stmt->execute([$user_id, $user_id]);
         send_json($radio_stmt->fetchAll());
       }
       break;
@@ -86574,8 +86733,8 @@ if (isset($_GET['action'])) {
       $placeholders = implode(',', array_fill(0, count($ids), '?'));
       $song_fields = "m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified, CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite, (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count";
       
-      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders)");
-      $params = array_merge([$user_id], $ids);
+      $stmt = $db->prepare("SELECT {$song_fields} FROM music m LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ? WHERE m.id IN ($placeholders) AND m.banned = 0 AND (m.is_private = 0 OR m.user_id = ? OR {$is_super_admin} = 1)");
+      $params = array_merge([$user_id], $ids, [$user_id]);
       $stmt->execute($params);
       $results = $stmt->fetchAll();
       
@@ -87885,6 +88044,8 @@ if (isset($_GET['action'])) {
         }
         // Remove transcoded versions folder for this song
         delete_directory_recursive(MUSIC_DIR . '/transcode/' . $song_id);
+        // Remove MinListen lightweight clone file if it exists
+        @unlink(MUSIC_DIR . '/minlisten_clones/' . $song_id . '.mp3');
         record_activity_log("Deleted song ID #{$song_id}", null, $user_id);
         send_json(['status' => 'success', 'message' => 'Song deleted.']);
       } else {
@@ -87903,11 +88064,25 @@ if (isset($_GET['action'])) {
 
       $song_id = intval($_GET['id'] ?? 0);
       $requested_bitrate = isset($_GET['bitrate']) ? (int)$_GET['bitrate'] : 0;
-      $stmt = $db->prepare("SELECT file, title, artist FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT file, user_id, is_private, artist, title FROM music WHERE id = ?");
       $stmt->execute([$song_id]);
       $song = $stmt->fetch();
 
       if ($song) {
+        $is_collab = false;
+        if ($user_id) {
+          $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
+          $stmt_art->execute([$user_id]);
+          $u_art = $stmt_art->fetchColumn();
+          if ($u_art && $db->query("SELECT match_artist(" . $db->quote($song['artist']) . ", " . $db->quote($u_art) . ")")->fetchColumn() == 1) {
+            $is_collab = true;
+          }
+        }
+        if ($song['is_private'] == 1 && $song['user_id'] != $user_id && !$is_collab && $is_super_admin == 0) {
+          http_response_code(403);
+          exit;
+        }
+
         $file_path = resolve_song_file_by_bitrate($song_id, $song['file'], $requested_bitrate);
 
         if (file_exists($file_path)) {
@@ -92127,19 +92302,33 @@ if (isset($_GET['action'])) {
       
       if ($song_stream) {
         $file_path = resolve_song_file_by_bitrate($id, $song_stream['file'], $requested_bitrate);
+        if (isset($_GET['minlisten']) && $_GET['minlisten'] == '1') {
+          $clone_path = MUSIC_DIR . '/minlisten_clones/' . $id . '.mp3';
+          if (file_exists($clone_path)) {
+            $file_path = $clone_path;
+          }
+        }
 
         if (file_exists($file_path)) {
           $is_collab = false;
           if ($user_id) {
-             $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
-             $stmt_art->execute([$user_id]);
-             $u_art = $stmt_art->fetchColumn();
-             if ($u_art && $db->query("SELECT match_artist(".$db->quote($song_stream['artist']).", ".$db->quote($u_art).")")->fetchColumn() == 1) {
-                 $is_collab = true;
-             }
+            $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
+            $stmt_art->execute([$user_id]);
+            $u_art = $stmt_art->fetchColumn();
+            if ($u_art && $db->query("SELECT match_artist(" . $db->quote($song_stream['artist']) . ", " . $db->quote($u_art) . ")")->fetchColumn() == 1) {
+              $is_collab = true;
+            }
+            if (!$is_collab) {
+              $stmt_collab = $db->prepare("SELECT 1 FROM song_collaborators WHERE song_id = ? AND user_id = ?");
+              $stmt_collab->execute([$id, $user_id]);
+              if ($stmt_collab->fetchColumn()) {
+                $is_collab = true;
+              }
+            }
           }
-          if ($song_stream['is_private'] == 1 && $song_stream['user_id'] != $user_id && !$is_collab && $is_super_admin == 0) {
-            http_response_code(403); exit;
+          if ($song_stream['is_private'] == 1 && (empty($user_id) || $song_stream['user_id'] != $user_id) && !$is_collab && empty($is_super_admin)) {
+            http_response_code(403);
+            exit;
           }
           session_write_close();
           while (ob_get_level() > 0) { @ob_end_clean(); }
@@ -92207,10 +92396,33 @@ if (isset($_GET['action'])) {
 
     case 'download_cover':
       $id = intval($_GET['id'] ?? 0);
-      $stmt = $db->prepare("SELECT image, title, artist FROM music WHERE id = ?");
+      $stmt = $db->prepare("SELECT image, title, artist, user_id, is_private FROM music WHERE id = ?");
       $stmt->execute([$id]);
       $row = $stmt->fetch();
-      
+
+      if ($row) {
+        $is_collab = false;
+        if ($user_id) {
+          $stmt_art = $db->prepare("SELECT artist FROM users WHERE id = ?");
+          $stmt_art->execute([$user_id]);
+          $u_art = $stmt_art->fetchColumn();
+          if ($u_art && $db->query("SELECT match_artist(" . $db->quote($row['artist']) . ", " . $db->quote($u_art) . ")")->fetchColumn() == 1) {
+            $is_collab = true;
+          }
+          if (!$is_collab) {
+            $stmt_collab = $db->prepare("SELECT 1 FROM song_collaborators WHERE song_id = ? AND user_id = ?");
+            $stmt_collab->execute([$id, $user_id]);
+            if ($stmt_collab->fetchColumn()) {
+              $is_collab = true;
+            }
+          }
+        }
+        if ($row['is_private'] == 1 && (empty($user_id) || $row['user_id'] != $user_id) && !$is_collab && empty($is_super_admin)) {
+          http_response_code(403);
+          exit;
+        }
+      }
+
       $safeTitle = preg_replace('/[^a-zA-Z0-9_]/', '_', ($row['title'] ?? 'Unknown') . '_' . ($row['artist'] ?? 'Unknown'));
 
       if ($row && $row['image']) {
@@ -93159,25 +93371,30 @@ if (isset($_GET['action'])) {
       $song_id = intval($data['id'] ?? 0);
       $played_at_iso = $data['played_at'] ?? (new DateTime())->format(DateTime::ATOM);
       $playlist_public_id = $data['playlist_public_id'] ?? null;
+      $history_type = ($data['history_type'] ?? 'song') === 'minlisten' ? 'minlisten' : 'song';
+
+      try {
+        $cols = $db->query("PRAGMA table_info(history)")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array('history_type', $cols)) {
+          $db->exec("ALTER TABLE history ADD COLUMN history_type TEXT DEFAULT 'song';");
+        }
+      } catch (\Throwable $e) {}
     
       if ($song_id > 0) {
-        // MASS USE OPTIMIZATION: SQLite Write Retry Loop
-        $max_retries = 15; // Try up to 15 times before giving up
+        $max_retries = 15;
         for ($attempt = 0; $attempt < $max_retries; $attempt++) {
           try {
             $db->beginTransaction();
             
-            // 1. Update or Insert History safely without relying on a UNIQUE index
-            $stmt_check = $db->prepare("SELECT id FROM history WHERE user_id = ? AND song_id = ? LIMIT 1");
-            $stmt_check->execute([$user_id, $song_id]);
+            $stmt_check = $db->prepare("SELECT id FROM history WHERE user_id = ? AND song_id = ? AND history_type = ? LIMIT 1");
+            $stmt_check->execute([$user_id, $song_id, $history_type]);
             $hist_id = $stmt_check->fetchColumn();
             if ($hist_id) {
               $db->prepare("UPDATE history SET played_at = ? WHERE id = ?")->execute([$played_at_iso, $hist_id]);
             } else {
-              $db->prepare("INSERT INTO history (user_id, song_id, played_at) VALUES (?, ?, ?)")->execute([$user_id, $song_id, $played_at_iso]);
+              $db->prepare("INSERT INTO history (user_id, song_id, played_at, history_type) VALUES (?, ?, ?, ?)")->execute([$user_id, $song_id, $played_at_iso, $history_type]);
             }
       
-            // 2. Update or Insert Play Counts safely
             $stmt_pc = $db->prepare("SELECT play_count FROM play_counts WHERE user_id = ? AND song_id = ? LIMIT 1");
             $stmt_pc->execute([$user_id, $song_id]);
             $pc_exists = $stmt_pc->fetchColumn();
@@ -93187,25 +93404,25 @@ if (isset($_GET['action'])) {
               $db->prepare("INSERT INTO play_counts (user_id, song_id, play_count, last_played) VALUES (?, ?, 1, ?)")->execute([$user_id, $song_id, $played_at_iso]);
             }
             
-            $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, 'listened to', (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $song_id]);
+            $feed_action = ($history_type === 'minlisten') ? 'watched MinListen clip of' : 'listened to';
+            $db->prepare("INSERT INTO activity_feed (user_id, action, target_name) VALUES (?, ?, (SELECT title FROM music WHERE id = ?))")->execute([$user_id, $feed_action, $song_id]);
 
             if ($playlist_public_id) {
               $db->prepare("UPDATE playlists SET play_count = play_count + 1 WHERE public_id = ?")->execute([$playlist_public_id]);
             }
 
             $db->commit();
-            break; // Success, break out of the loop!
+            break;
             
           } catch (Exception $e) {
             if ($db->inTransaction()) {
               $db->rollBack();
             }
-            // If the database is locked by another user, sleep for 10-50 milliseconds and try again
             if (strpos(strtolower($e->getMessage()), 'locked') !== false || strpos(strtolower($e->getMessage()), 'busy') !== false) {
               usleep(rand(10000, 50000)); 
             } else {
               error_log('PHP Music log_play error: ' . $e->getMessage());
-              break; // Unrelated error, stop trying
+              break;
             }
           }
         }
@@ -93294,6 +93511,19 @@ if (isset($_GET['action'])) {
     
     case 'get_history':
       if (!$user_id) { send_json([]); }
+
+      try {
+        $cols = $db->query("PRAGMA table_info(history)")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array('history_type', $cols)) {
+          $db->exec("ALTER TABLE history ADD COLUMN history_type TEXT DEFAULT 'song';");
+        }
+      } catch (\Throwable $e) {}
+
+      $hist_type = ($_GET['history_type'] ?? 'song') === 'minlisten' ? 'minlisten' : 'song';
+      $type_where = ($hist_type === 'minlisten')
+        ? "AND h.history_type = 'minlisten'"
+        : "AND (h.history_type = 'song' OR h.history_type IS NULL)";
+
       $sort_key = $_GET['sort'] ?? 'history_desc';
       $sort_map = [
         'history_desc' => 'ORDER BY played_at DESC',
@@ -93307,11 +93537,14 @@ if (isset($_GET['action'])) {
       $stmt = $db->prepare("
         SELECT MAX(h.played_at) AS played_at, m.id, m.title, m.artist, m.album, m.genre, m.duration, m.user_id, m.is_private, m.is_collaborative, m.last_modified,
         CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+        COALESCE(ml.start_time, 0) AS clip_start,
+        COALESCE(ml.duration, 60) AS clip_duration,
         (SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id) as play_count
         FROM history h
         JOIN music m ON h.song_id = m.id
+        LEFT JOIN minlisten_clips ml ON m.id = ml.song_id
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
-        WHERE h.user_id = ?
+        WHERE h.user_id = ? {$type_where}
         GROUP BY m.id
         {$order_by}
         {$limit_clause}
@@ -100177,8 +100410,206 @@ function perform_cover_scan($db) {
         overflow: hidden !important;
       }
 
-      body.rg-session-active #player-bar {
+      body.rg-session-active #player-bar,
+      body.minlisten-active #player-bar {
         display: none !important;
+      }
+      body.minlisten-active .page-header {
+        display: none !important;
+      }
+      body.minlisten-active .mobile-header {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1060 !important;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent) !important;
+        border: none !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+      }
+      body.minlisten-active .mobile-header .search-bar {
+        background: rgba(255,255,255,0.15) !important;
+        border-color: rgba(255,255,255,0.2) !important;
+      }
+      body.minlisten-active #content-area,
+      body.minlisten-active #main-content {
+        padding: 0 !important;
+        margin: 0 !important;
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        overflow: hidden !important;
+      }
+      .minlisten-viewport {
+        height: 100dvh;
+        width: 100%;
+        overflow-y: scroll;
+        scroll-snap-type: y mandatory;
+        scrollbar-width: none;
+        background: #000;
+        position: relative;
+      }
+      .minlisten-viewport::-webkit-scrollbar {
+        display: none;
+      }
+      .minlisten-card {
+        height: 100dvh;
+        width: 100%;
+        scroll-snap-align: start;
+        scroll-snap-stop: always;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background: #000;
+      }
+      .minlisten-inner {
+        position: relative;
+        width: 100%;
+        max-width: 440px;
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 1rem 0.85rem;
+        z-index: 2;
+        box-sizing: border-box;
+      }
+      @media (min-width: 768px) {
+        .minlisten-card {
+          border-left: 1px solid rgba(255, 255, 255, 0.08);
+          border-right: 1px solid rgba(255, 255, 255, 0.08);
+          background: #050508;
+        }
+      }
+      .minlisten-bg-blur {
+        position: absolute;
+        inset: -40px;
+        background-size: cover;
+        background-position: center;
+        filter: blur(48px) brightness(0.28) saturate(1.3);
+        transform: scale(1.15);
+        z-index: 1;
+        pointer-events: none;
+      }
+      .minlisten-center-artwork {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(290px, 72vw);
+        aspect-ratio: 1 / 1;
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.1);
+        background: #111;
+        z-index: 2;
+        margin: 0;
+      }
+      .minlisten-center-artwork img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .minlisten-wave-canvas {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        height: 35vh;
+        pointer-events: none;
+        z-index: 1;
+        opacity: 0.8;
+      }
+      .minlisten-actions-rail {
+        position: absolute;
+        right: 10px;
+        bottom: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        z-index: 10;
+      }
+      .minlisten-action-unit {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0;
+      }
+      .minlisten-action-btn {
+        background: transparent !important;
+        border: none !important;
+        color: #ffffff !important;
+        box-shadow: none !important;
+        padding: 0;
+        width: 36px;
+        height: 36px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.3rem;
+        line-height: 1;
+        filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.9));
+        transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.15s ease;
+      }
+      .minlisten-action-btn:hover {
+        transform: scale(1.15);
+      }
+      .minlisten-action-label {
+        color: #ffffff;
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      }
+      .minlisten-bottom-info {
+        position: absolute;
+        bottom: 14px;
+        left: 12px;
+        right: 60px;
+        z-index: 10;
+        text-align: left;
+      }
+      .minlisten-avatar {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 2px solid #ffffff;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.7);
+        flex-shrink: 0;
+      }
+      .minlisten-progress-track {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background: rgba(255, 255, 255, 0.18);
+        z-index: 20;
+      }
+      .minlisten-progress-bar {
+        height: 100%;
+        width: 0%;
+        background: #ff0044;
+        transition: width 0.1s linear;
+      }
+      .minlisten-back-btn {
+        position: absolute;
+        top: 16px;
+        left: 14px;
+        background: transparent !important;
+        border: none !important;
+        color: #ffffff !important;
+        font-size: 1.35rem;
+        z-index: 25;
+        padding: 4px;
+        cursor: pointer;
+        filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
       }
 
       /* Responsive Artist Rhythm Page Layout */
@@ -103285,6 +103716,10 @@ function perform_cover_scan($db) {
             <i class="bi bi-book-half"></i>
             <span>Manga</span>
           </a>
+          <a href="#" class="nav-link" data-view="minlisten">
+            <i class="bi bi-play-btn-fill"></i>
+            <span>MinListen</span>
+          </a>
 
           <hr class="text-secondary">
           
@@ -103345,7 +103780,7 @@ function perform_cover_scan($db) {
               <span>My Drive</span>
             </a>
             <a href="?access=profiletree" class="nav-link" target="_blank">
-              <i class="bi bi-diagram-3-fill text-warning"></i>
+              <i class="bi bi-diagram-3-fill"></i>
               <span>PHPProfileTrees</span>
             </a>
             <a href="?access=artwork" class="nav-link">
@@ -107081,6 +107516,50 @@ function perform_cover_scan($db) {
         </div>
       </div>
     </div>
+    <!-- MinListen Clip Timeline Editor Modal -->
+    <div class="modal fade" id="minlisten-edit-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="background: rgba(20, 20, 25, 0.95); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 20px;">
+          <div class="modal-header border-0 pb-1">
+            <h6 class="modal-title fw-bold text-white d-flex align-items-center gap-2">
+              <i class="bi bi-scissors text-danger"></i>
+              <span>Edit MinListen Clip</span>
+            </h6>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-3">
+            <input type="hidden" id="ml-edit-song-id">
+            <p class="text-secondary small mb-3">Adjust clip starting point and duration (max 1 minute).</p>
+            <div class="w-100 rounded-3 mb-3" style="height: 36px; background: repeating-linear-gradient(90deg, #333, #333 2px, transparent 2px, transparent 6px); border: 1px solid #444; position: relative; overflow: hidden;">
+              <div id="ml-edit-timeline-highlight" style="position: absolute; top: 0; bottom: 0; background: rgba(255, 0, 68, 0.4); border-left: 2px solid #ff0044; border-right: 2px solid #ff0044; transition: all 0.1s linear;"></div>
+            </div>
+            <div class="mb-3">
+              <div class="d-flex justify-content-between text-secondary small fw-bold mb-1">
+                <span>START TIME</span>
+                <span id="ml-edit-start-label" class="text-white font-monospace">0s</span>
+              </div>
+              <input type="range" class="form-range" id="ml-edit-start" min="0" max="300" step="1" value="0">
+            </div>
+            <div class="mb-3">
+              <div class="d-flex justify-content-between text-secondary small fw-bold mb-1">
+                <span>CLIP DURATION</span>
+                <span id="ml-edit-dur-label" class="text-white font-monospace">30s</span>
+              </div>
+              <input type="range" class="form-range" id="ml-edit-dur" min="5" max="60" step="1" value="30">
+            </div>
+            <div class="d-flex gap-2 mt-4">
+              <button type="button" class="btn btn-outline-light rounded-pill flex-grow-1 fw-bold btn-sm py-2" id="ml-edit-preview-btn">
+                <i class="bi bi-play-fill"></i> Test
+              </button>
+              <button type="button" class="btn btn-danger rounded-pill flex-grow-1 fw-bold btn-sm py-2" id="ml-edit-save-btn">
+                Save Clip
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal fade" id="upload-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
         <div class="modal-content">
@@ -116709,6 +117188,9 @@ SOFTWARE.</div>
                     <li class="nav-item" role="presentation">
                       <button class="nav-link active" id="songs-tab" data-bs-toggle="tab" data-bs-target="#songs-pane" type="button" role="tab">All Songs</button>
                     </li>
+                    <li class="nav-item" role="presentation">
+                      <button class="nav-link" id="minlisten-tab" data-bs-toggle="tab" data-bs-target="#minlisten-pane" type="button" role="tab">MinListen</button>
+                    </li>
                     ${
                       isUser
                         ? `
@@ -116723,6 +117205,17 @@ SOFTWARE.</div>
                   </ul>
                   <div class="tab-content" id="artistTabsContent">
                     <div class="tab-pane fade show active" id="songs-pane" role="tabpanel"></div>
+                    <div class="tab-pane fade" id="minlisten-pane" role="tabpanel">
+                      <div class="d-flex justify-content-between align-items-center mb-3">
+                        <span class="text-secondary small fw-bold text-uppercase">MinListen Clips</span>
+                        <button type="button" class="btn btn-sm btn-danger rounded-pill px-3 fw-bold" onclick="window.loadView({ type: 'minlisten', param: 'user', filter_user_id: '${details.user_id}' })">
+                          <i class="bi bi-play-fill"></i> Watch All
+                        </button>
+                      </div>
+                      <div id="artist-minlisten-grid" class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-3">
+                        <div class="text-center p-4 text-secondary col-12"><div class="spinner-border spinner-border-sm text-danger me-2"></div>Loading clips...</div>
+                      </div>
+                    </div>
                     ${
                       isUser
                         ? `
@@ -116770,6 +117263,41 @@ SOFTWARE.</div>
             `;
             contentArea.insertAdjacentHTML("beforeend", tabsHTML);
             window.artistPlaylistsData = details.playlists || [];
+
+            // Fetch and render user's MinListen clips
+            setTimeout(async () => {
+              const mlGrid = document.getElementById("artist-minlisten-grid");
+              if (mlGrid) {
+                const mlClips = await fetchData(`?action=get_minlisten_feed&mode=user&user_id=${details.user_id}&page=1`, {}, true);
+                if (Array.isArray(mlClips) && mlClips.length > 0) {
+                  mlGrid.innerHTML = mlClips.map((c, i) => {
+                    const cover = `?action=get_image&id=${c.id}&v=${c.last_modified || 0}&size=small`;
+                    return `
+                      <div class="col">
+                        <div class="card bg-dark text-white border-secondary h-100 rounded-4 overflow-hidden position-relative shadow-sm" style="cursor: pointer; aspect-ratio: 9/16;" onclick="window.loadView({ type: 'minlisten', param: 'user', filter_user_id: '${details.user_id}', highlight: ${i} })">
+                          <img src="${cover}" class="w-100 h-100" style="object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                          <div class="position-absolute top-0 end-0 m-2 badge bg-dark bg-opacity-75 rounded-pill px-2 py-1 font-monospace" style="font-size: 0.72rem; backdrop-filter: blur(4px);">
+                            ${Math.round(c.clip_duration || 30)}s
+                          </div>
+                          <div class="position-absolute bottom-0 start-0 end-0 p-2" style="background: linear-gradient(to top, rgba(0,0,0,0.95), transparent);">
+                            <div class="fw-bold small text-truncate text-white">${escapeHTML(c.title)}</div>
+                            <div class="text-secondary small text-truncate" style="font-size: 0.7rem;">${escapeHTML(c.album || 'Single')}</div>
+                          </div>
+                        </div>
+                      </div>
+                    `;
+                  }).join("");
+                } else {
+                  mlGrid.innerHTML = '<div class="text-center p-4 text-secondary col-12">No MinListen clips for this artist.</div>';
+                }
+              }
+
+              // Auto-open MinListen tab if requested
+              if (currentView.activeTab === "minlisten-tab") {
+                const mlTab = document.getElementById("minlisten-tab");
+                if (mlTab) mlTab.click();
+              }
+            }, 100);
           }
         };
     
@@ -118991,6 +119519,20 @@ SOFTWARE.</div>
           if (localRhythmGame) {
             localRhythmGame.destroy();
           }
+
+          if (viewConfig.type !== "minlisten") {
+            document.body.classList.remove("minlisten-active");
+            if (window.mlAudio) {
+              window.mlAudio.pause();
+              window.mlAudio.src = "";
+            }
+            if (window.mlVisFrame) {
+              cancelAnimationFrame(window.mlVisFrame);
+            }
+            if (window.mlObserver) {
+              window.mlObserver.disconnect();
+            }
+          }
     
           if (pushHistory) {
             const isSameView =
@@ -119236,6 +119778,27 @@ SOFTWARE.</div>
           }
     
           switch (currentView.type) {
+            case "minlisten":
+              updateContentTitle("MinListen", false);
+              if (isPlaying && typeof togglePlayPause === "function") {
+                togglePlayPause();
+              }
+              if (playerBar) playerBar.classList.add("d-none");
+              document.body.classList.remove("player-visible");
+              document.body.classList.add("minlisten-active");
+
+              // Unlock audio and resume AudioContext immediately within the user's click gesture
+              if (typeof window.setupMinListenAudioGraph === "function") {
+                window.setupMinListenAudioGraph();
+                if (window.mlAudioCtx && window.mlAudioCtx.state === 'suspended') {
+                  window.mlAudioCtx.resume().catch(() => {});
+                }
+              }
+
+              window.initMinListenPage(currentView.param || 'random', currentView.filter_user_id || 0);
+              allContentloaded = true;
+              break;
+
             case "rhythm_game":
               updateContentTitle("Rhythm Game", false);
               if (currentUser) {
@@ -124003,29 +124566,80 @@ SOFTWARE.</div>
             case "get_history":
               updateContentTitle("History", !!currentUser);
               if (currentUser) {
+                const histTab = currentView.filter === "minlisten" ? "minlisten" : "song";
                 contentArea.innerHTML = `
-                        <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
-                          <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
-                            <div class="d-flex align-items-center gap-3">
-                              <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
-                                <i class="bi bi-clock-history text-secondary fs-3"></i>
+                  <div class="p-4 mx-md-3 mt-3 mb-4 rounded-4 shadow-sm" style="background: linear-gradient(145deg, var(--ytm-surface-2), #151515); border: 1px solid rgba(255,255,255,0.05);">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+                      <div class="d-flex align-items-center gap-3">
+                        <div class="d-flex align-items-center justify-content-center" style="width: 50px; height: 50px; min-width: 50px;">
+                          <i class="bi bi-clock-history text-secondary fs-3"></i>
+                        </div>
+                        <div>
+                          <h2 class="text-white fw-bold mb-1 fs-4">Playback History</h2>
+                          <p class="text-secondary small mb-0">Review your recently played tracks and MinListen clips.</p>
+                        </div>
+                      </div>
+                      <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" id="clear-history-btn" title="Clear History">
+                          <i class="bi bi-trash2"></i> Clear History
+                        </button>
+                      </div>
+                    </div>
+
+                    <ul class="nav nav-tabs border-0 d-flex gap-2 m-0" id="history-tabs-nav" style="border-bottom: none !important;">
+                      <li class="nav-item">
+                        <button type="button" class="nav-link ${histTab === 'song' ? 'active' : ''} fw-bold rounded-pill px-4 py-2" id="hist-nav-songs">
+                          Songs
+                        </button>
+                      </li>
+                      <li class="nav-item">
+                        <button type="button" class="nav-link ${histTab === 'minlisten' ? 'active' : ''} fw-bold rounded-pill px-4 py-2" id="hist-nav-minlisten">
+                          MinListen
+                        </button>
+                      </li>
+                    </ul>
+                  </div>
+                  <div id="history-content-pane"></div>
+                `;
+
+                document.getElementById("hist-nav-songs")?.addEventListener("click", () => {
+                  loadView({ type: "get_history", param: "", sort: "history_desc", filter_user_id: "", filter: "song" });
+                });
+                document.getElementById("hist-nav-minlisten")?.addEventListener("click", () => {
+                  loadView({ type: "get_history", param: "", sort: "history_desc", filter_user_id: "", filter: "minlisten" });
+                });
+
+                pageParams.set("history_type", histTab);
+                data = await fetchData(`?action=get_history&${pageParams.toString()}`);
+
+                if (histTab === "minlisten") {
+                  const pane = document.getElementById("history-content-pane");
+                  if (data && data.length > 0) {
+                    pane.innerHTML = `
+                      <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 g-3 mx-md-3">
+                        ${data.map((c, i) => `
+                          <div class="col">
+                            <div class="card bg-dark text-white border-secondary h-100 rounded-4 overflow-hidden position-relative shadow-sm" style="cursor: pointer; aspect-ratio: 9/16;" onclick="window.loadView({ type: 'minlisten', param: 'user', filter_user_id: '${c.user_id}', highlight: 0 })">
+                              <img src="?action=get_image&id=${c.id}&v=${c.last_modified || 0}&size=small" class="w-100 h-100" style="object-fit: cover;" onerror="this.src='?action=get_app_icon'">
+                              <div class="position-absolute top-0 end-0 m-2 badge bg-dark bg-opacity-75 rounded-pill px-2 py-1 font-monospace" style="font-size: 0.72rem; backdrop-filter: blur(4px);">
+                                ${Math.round(c.clip_duration || 30)}s
                               </div>
-                              <div>
-                                <h2 class="text-white fw-bold mb-1 fs-4">Playback History</h2>
-                                <p class="text-secondary small mb-0">Review and manage your recently played tracks.</p>
+                              <div class="position-absolute bottom-0 start-0 end-0 p-2" style="background: linear-gradient(to top, rgba(0,0,0,0.95), transparent);">
+                                <div class="fw-bold small text-truncate text-white">${escapeHTML(c.title)}</div>
+                                <div class="text-secondary small text-truncate" style="font-size: 0.7rem;">${escapeHTML(c.artist)}</div>
+                                <div class="text-secondary small mt-1" style="font-size: 0.68rem;"><i class="bi bi-clock"></i> ${timeAgo(c.played_at)}</div>
                               </div>
-                            </div>
-                            <div class="d-flex gap-2">
-                              <button class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-bold" id="clear-history-btn" title="Clear History">
-                                <i class="bi bi-trash2"></i> Clear History
-                              </button>
                             </div>
                           </div>
-                        </div>`;
-                data = await fetchData(
-                  `?action=get_history&${pageParams.toString()}`,
-                );
-                renderSongs(data, true);
+                        `).join('')}
+                      </div>
+                    `;
+                  } else {
+                    pane.innerHTML = '<div class="text-center p-5 text-secondary">No MinListen history recorded yet.</div>';
+                  }
+                } else {
+                  renderSongs(data, true);
+                }
               } else {
                 contentArea.innerHTML = `<div class="text-center p-5 text-secondary">Log in to see your history.</div>`;
               }
@@ -126480,7 +127094,7 @@ SOFTWARE.</div>
         };
         window.loadView = loadView; // Expose to global scope for inline onclick handlers
     
-        const logPlay = (songId) => {
+        const logPlay = (songId, historyType = 'song') => {
           if (!currentUser) return;
           const played_at_iso = new Date().toISOString();
           const url = "?action=log_play";
@@ -126488,6 +127102,7 @@ SOFTWARE.</div>
           const payload = {
             id: songId,
             played_at: played_at_iso,
+            history_type: historyType,
           };
           if (
             window.activeQueueContext &&
@@ -126736,6 +127351,19 @@ SOFTWARE.</div>
                 { src: absCoverUrl, sizes: "256x256", type: "image/webp" },
                 { src: absCoverUrl, sizes: "512x512", type: "image/webp" }
               ]
+            });
+            navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+
+            // Restore main player handlers
+            navigator.mediaSession.setActionHandler("play", togglePlayPause);
+            navigator.mediaSession.setActionHandler("pause", togglePlayPause);
+            navigator.mediaSession.setActionHandler("previoustrack", playPrev);
+            navigator.mediaSession.setActionHandler("nexttrack", playNext);
+            navigator.mediaSession.setActionHandler("seekbackward", () => {
+              audio.currentTime = Math.max(0, audio.currentTime - 10);
+            });
+            navigator.mediaSession.setActionHandler("seekforward", () => {
+              audio.currentTime = Math.min(audio.duration, audio.currentTime + 10);
             });
           }
 
@@ -142083,6 +142711,658 @@ SOFTWARE.</div>
           if (isPlaying) savePlaybackState();
         }, 5000);
     
+        window.mlAudio = null;
+        window.mlObserver = null;
+        window.mlVisFrame = 0;
+        window.mlVisTime = 0;
+        window.mlAudioCtx = null;
+        window.mlAnalyser = null;
+        window.mlWaveData = null;
+        window.mlSource = null;
+
+        window.setupMinListenAudioGraph = () => {
+          if (!window.mlAudio) {
+            window.mlAudio = new Audio();
+            window.mlAudio.crossOrigin = "anonymous";
+          }
+          if (!window.mlAudioCtx && (window.AudioContext || window.webkitAudioContext)) {
+            try {
+              const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+              window.mlAudioCtx = new AudioContextClass();
+              window.mlAnalyser = window.mlAudioCtx.createAnalyser();
+              window.mlAnalyser.fftSize = 64;
+              window.mlWaveData = new Uint8Array(window.mlAnalyser.frequencyBinCount);
+              if (!window.mlSource) {
+                window.mlSource = window.mlAudioCtx.createMediaElementSource(window.mlAudio);
+                window.mlSource.connect(window.mlAnalyser);
+                window.mlAnalyser.connect(window.mlAudioCtx.destination);
+              }
+            } catch (e) {
+              console.warn("MinListen Web Audio Graph init failed:", e);
+            }
+          }
+        };
+
+        window.drawMinListenWaveforms = () => {
+          cancelAnimationFrame(window.mlVisFrame);
+          window.mlVisTime += 1;
+          const activeCard = document.querySelector('.minlisten-card.is-active');
+
+          if (activeCard) {
+            const canvas = activeCard.querySelector('.minlisten-wave-canvas');
+            if (canvas) {
+              if (canvas.width !== canvas.offsetWidth || canvas.height !== canvas.offsetHeight) {
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+              }
+              const ctx = canvas.getContext('2d');
+              const w = canvas.width;
+              const h = canvas.height;
+              ctx.clearRect(0, 0, w, h);
+
+              const baseGrad = ctx.createLinearGradient(0, h * 0.5, 0, h);
+              baseGrad.addColorStop(0, "transparent");
+              baseGrad.addColorStop(1, "rgba(0, 0, 0, 0.7)");
+              ctx.fillStyle = baseGrad;
+              ctx.fillRect(0, h * 0.5, w, h * 0.5);
+
+              const isPlayingNow = window.mlAudio && !window.mlAudio.paused;
+              const points = 24;
+              const slice = (w + 100) / (points - 1);
+              const t = window.mlVisTime;
+
+              let rawData = [];
+              if (isPlayingNow && window.mlAnalyser) {
+                window.mlAnalyser.getByteFrequencyData(window.mlWaveData);
+                for (let i = 0; i < points; i++) rawData.push(window.mlWaveData[i] || 0);
+              } else {
+                for (let i = 0; i < points; i++) {
+                  rawData.push(Math.max(15, 65 + Math.sin(i * 0.12 + t * 0.035) * 45 + Math.cos(i * 0.07 - t * 0.02) * 20));
+                }
+              }
+
+              const drawWave = (amp, opacity, xOff, layerIdx) => {
+                ctx.beginPath();
+                ctx.moveTo(-50, h);
+
+                const waveBreathe = Math.sin(t * 0.012 * (layerIdx + 1) + layerIdx) * 0.15;
+                const amplitude = amp * (1.0 + waveBreathe);
+                const xOffset = xOff + Math.cos(t * 0.008 * (layerIdx + 1)) * 35;
+
+                let yStart = h - (rawData[0] / 255) * h * amplitude;
+                ctx.lineTo(-50, yStart);
+
+                for (let i = 0; i < points - 1; i++) {
+                  let xc = xOffset + slice * i;
+                  let yc = h - (rawData[i] / 255) * h * amplitude;
+                  let nextX = xOffset + slice * (i + 1);
+                  let nextY = h - (rawData[i + 1] / 255) * h * amplitude;
+                  ctx.quadraticCurveTo(xc, yc, (xc + nextX) / 2, (yc + nextY) / 2);
+                }
+
+                ctx.lineTo(w + 50, h);
+                ctx.closePath();
+
+                const { r, g, b } = (typeof cachedColor !== 'undefined' && cachedColor) ? cachedColor : { r: 255, g: 0, b: 68 };
+              const grad = ctx.createLinearGradient(0, h * 0.4, 0, h);
+              grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${opacity})`);
+              grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+                ctx.fillStyle = grad;
+                ctx.fill();
+              };
+
+              drawWave(0.50, 0.12, -40, 0);
+              drawWave(0.46, 0.18, 30, 1);
+              drawWave(0.42, 0.24, -20, 2);
+              drawWave(0.38, 0.30, 40, 3);
+              drawWave(0.34, 0.38, -10, 4);
+              drawWave(0.30, 0.48, 20, 5);
+              drawWave(0.25, 0.60, 0, 6);
+            }
+          }
+          window.mlVisFrame = requestAnimationFrame(window.drawMinListenWaveforms);
+        };
+
+        window.scanSongPeak = async (song) => {
+          if (song.is_custom == 1 || song._peakScanned) return parseFloat(song.clip_start) || 0;
+          song._peakScanned = true;
+          
+          const dur = parseFloat(song.duration) || 180;
+          const clipLen = Math.min(60, Math.max(15, Math.floor(song.clip_duration || 30)));
+          
+          if (dur <= clipLen) return 0;
+          
+          const pseudoRandom = Math.abs(Math.sin(song.id * 12.9898) * 43758.5453) % 1;
+          const bestStart = Math.floor(dur * (0.15 + (pseudoRandom * 0.5)));
+          
+          fetch('?action=save_minlisten_clip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              song_id: song.id,
+              start_time: bestStart,
+              duration: clipLen,
+              is_custom: 0
+            })
+          }).catch(() => {});
+
+          song.clip_start = bestStart;
+          return bestStart;
+        };
+
+        window.initMinListenPage = async (mode = 'random', targetUid = 0) => {
+          contentArea.innerHTML = `
+            <div class="minlisten-viewport" id="minlisten-viewport">
+              <div class="d-flex flex-column align-items-center justify-content-center w-100 position-absolute top-50 start-50 translate-middle text-secondary z-0">
+                <div class="spinner-border text-danger" style="width: 2.8rem; height: 2.8rem; border-width: 0.25em;"></div>
+                <div class="mt-3 small font-monospace text-white-50">Loading MinListen...</div>
+              </div>
+            </div>
+          `;
+
+          const viewport = document.getElementById('minlisten-viewport');
+          const data = await fetchData(`?action=get_minlisten_feed&mode=${mode}&user_id=${targetUid}&page=1`);
+
+          if (!data || data.length === 0) {
+            viewport.innerHTML = `
+              <div class="d-flex flex-column align-items-center justify-content-center h-100 text-secondary w-100" style="min-height: 100dvh;">
+                <i class="bi bi-play-btn fs-1 d-block mb-3 opacity-50"></i>
+                <div>No MinListen tracks available.</div>
+              </div>
+            `;
+            return;
+          }
+
+          viewport.innerHTML = data.map((song, idx) => {
+            const coverUrl = `?action=get_image&id=${song.id}&v=${song.last_modified || 0}`;
+            const avatarUrl = `?action=get_profile_picture&id=${song.user_id}`;
+            const isOwner = currentUser && (currentUser.id == song.user_id || currentUser.status === 'super_admin' || currentUser.is_admin == 1);
+
+            let calculatedStart = parseFloat(song.clip_start) || 0;
+            if (song.is_custom != 1 && calculatedStart === 0 && song.duration > 45) {
+              calculatedStart = Math.floor(song.duration * 0.32);
+            }
+
+            // Multiple artists / collaborator mechanism matching main player
+            const rawArtistStr = String(song.artist || '');
+            const cleanArtistStr = rawArtistStr.includes('(id:') ? rawArtistStr.replace(/\s*\(id:\d+\)/gi, '') : rawArtistStr;
+            const parsedArtists = cleanArtistStr.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== '');
+            const isMultiArtist = parsedArtists.length > 1;
+
+            return `
+              <div class="minlisten-card" data-index="${idx}" data-song-id="${song.id}" data-has-clone="${song.has_clone || 0}" data-start="${calculatedStart}" data-dur="${song.clip_duration}" data-total="${song.duration}" data-title="${escapeAttr(song.title)}" data-artist="${escapeAttr(cleanArtistStr)}" data-album="${escapeAttr(song.album || 'Single')}" data-cover="${coverUrl}">
+                <div class="minlisten-bg-blur" style="background-image: url('${coverUrl}'); will-change: transform; transform: translateZ(0);"></div>
+                <div class="minlisten-center-artwork">
+                  <img src="${coverUrl}" alt="${escapeAttr(song.title)}" onerror="this.src='?action=get_app_icon'">
+                  <!-- Gesture Autoplay Warning Overlay -->
+                  <div class="minlisten-play-prompt d-none position-absolute top-0 start-0 w-100 h-100 d-flex flex-column align-items-center justify-content-center bg-black bg-opacity-50 text-white" style="cursor: pointer; z-index: 10;">
+                    <i class="bi bi-play-circle-fill text-danger" style="font-size: 3.5rem; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.8));"></i>
+                    <span class="fw-bold small mt-2 bg-dark px-3 py-1 rounded-pill border border-secondary" style="font-size: 0.78rem;">Tap to Play</span>
+                  </div>
+                </div>
+
+                <canvas class="minlisten-wave-canvas"></canvas>
+
+                <div class="minlisten-actions-rail">
+                  <div class="minlisten-action-unit">
+                    <button type="button" class="minlisten-action-btn ml-btn-fav ${song.is_favorite == 1 ? 'text-danger' : ''}" data-id="${song.id}" title="Like">
+                      <i class="bi bi-heart${song.is_favorite == 1 ? '-fill text-danger' : ''}"></i>
+                    </button>
+                    <span class="minlisten-action-label">${formatSongCount(song.play_count || 0)}</span>
+                  </div>
+
+                  <div class="minlisten-action-unit">
+                    <button type="button" class="minlisten-action-btn ml-btn-comment" data-id="${song.id}" title="Comments">
+                      <i class="bi bi-chat-dots-fill"></i>
+                    </button>
+                    <span class="minlisten-action-label">Chat</span>
+                  </div>
+
+                  <div class="minlisten-action-unit">
+                    <button type="button" class="minlisten-action-btn ml-btn-share" data-id="${song.id}" data-title="${escapeAttr(song.title)}" title="Share">
+                      <i class="bi bi-share-fill"></i>
+                    </button>
+                    <span class="minlisten-action-label">Share</span>
+                  </div>
+
+                  ${isOwner ? `
+                    <div class="minlisten-action-unit">
+                      <button type="button" class="minlisten-action-btn ml-btn-edit" data-id="${song.id}" data-start="${calculatedStart}" data-dur="${song.clip_duration}" data-total="${song.duration}" title="Trim Clip">
+                        <i class="bi bi-scissors"></i>
+                      </button>
+                      <span class="minlisten-action-label">Trim</span>
+                    </div>
+                  ` : ''}
+
+                  <div class="minlisten-action-unit">
+                    <button type="button" class="minlisten-action-btn ml-btn-full" data-id="${song.id}" title="Play Full Track">
+                      <i class="bi bi-disc"></i>
+                    </button>
+                    <span class="minlisten-action-label">Full Song</span>
+                  </div>
+                </div>
+
+                <div class="minlisten-bottom-info" style="max-width: calc(100% - 75px);">
+                  <!-- DUAL ROW: Avatar + Column (Row 1: Artist Name Truncated, Row 2: Follow Button) -->
+                  <div class="d-flex align-items-center gap-2 mb-2">
+                    <div class="minlisten-avatar-wrap flex-shrink-0" data-userid="${song.user_id}" data-artist="${encodeURIComponent(cleanArtistStr)}" style="cursor: pointer;" title="View Profile">
+                      <img src="${avatarUrl}" class="minlisten-avatar" alt="Avatar" onerror="this.src='?action=get_app_icon'">
+                    </div>
+                    <div class="d-flex flex-column justify-content-center" style="min-width: 0; max-width: 100%;">
+                      <!-- ROW 1: Artist Name Truncated & Multi-User Support -->
+                      <div class="d-flex align-items-center gap-1 text-truncate">
+                        ${isMultiArtist ? '<i class="bi bi-people-fill text-info" style="font-size:0.75rem;"></i>' : ''}
+                        <span class="fw-bold text-white text-truncate hover-underline minlisten-artist-picker" data-userid="${song.user_id}" data-artist="${encodeURIComponent(cleanArtistStr)}" style="font-size: 0.95rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8); cursor: pointer;">
+                          ${escapeHTML(cleanArtistStr)}
+                        </span>
+                      </div>
+                      <!-- ROW 2: Follow Button -->
+                      ${currentUser && currentUser.id != song.user_id ? `
+                        <div class="mt-1 d-flex align-items-center">
+                          <button type="button" class="btn btn-sm ${song.is_followed == 1 ? 'btn-outline-light' : 'btn-danger'} rounded-pill px-3 py-0 fw-bold ml-btn-follow" data-user-id="${song.user_id}" style="font-size: 0.72rem; height: 22px; line-height: 1;">
+                            ${song.is_followed == 1 ? 'Following' : '+ Follow'}
+                          </button>
+                        </div>
+                      ` : ''}
+                    </div>
+                  </div>
+                  <!-- Track Title & Album Truncated -->
+                  <div class="d-flex align-items-center gap-2 text-white" style="font-size: 0.85rem; text-shadow: 0 1px 4px rgba(0,0,0,0.8); max-width: 100%;">
+                    <i class="bi bi-music-note-beamed flex-shrink-0"></i>
+                    <span class="text-truncate" style="max-width: 100%;">${escapeHTML(song.title)} &bull; ${escapeHTML(song.album || 'Single')}</span>
+                  </div>
+                </div>
+
+                <div class="minlisten-progress-track">
+                  <div class="minlisten-progress-bar ml-progress"></div>
+                </div>
+              </div>
+            `;
+          }).join('');
+
+          viewport.addEventListener('click', async (e) => {
+            const followBtn = e.target.closest('.ml-btn-follow');
+            if (followBtn) {
+              e.stopPropagation();
+              if (!currentUser) return showToast("Please log in to follow artists.", "error");
+              const uId = followBtn.dataset.userId;
+              const res = await fetchData("?action=toggle_follow", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ following_id: uId })
+              });
+              if (res && (res.status === "followed" || res.status === "unfollowed")) {
+                const isFollowing = res.status === "followed";
+                if (isFollowing && typeof window.triggerFollowEffect === "function") window.triggerFollowEffect(followBtn);
+                followBtn.textContent = isFollowing ? "Following" : "+ Follow";
+                followBtn.className = `btn btn-sm ${isFollowing ? 'btn-outline-light' : 'btn-danger'} rounded-pill px-3 py-0 fw-bold ml-btn-follow`;
+              }
+              return;
+            }
+
+            // Click on Avatar or Artist Name: Navigate directly to that user profile with MinListen tab active
+            const artistTarget = e.target.closest('.minlisten-avatar-wrap, .minlisten-artist-picker');
+            if (artistTarget) {
+              e.stopPropagation();
+              const rawArtist = decodeURIComponent(artistTarget.dataset.artist || "");
+              const uId = artistTarget.dataset.userid || "";
+              const artistsList = rawArtist.split(/\s*(?:;|\||\s+&\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+featuring\s+|\s*,\s*(?!(?:the|a|an|jr|sr)\b))\s*/i).filter(a => a && a.trim() !== "");
+
+              // If multiple collaborators, prompt with selection modal matching main app
+              if (artistsList.length > 1 && artistsModalBody) {
+                const modalTitle = artistsModalEl.querySelector(".modal-title");
+                if (modalTitle) modalTitle.textContent = "Select Artist Profile";
+                artistsModalBody.innerHTML = `
+                  <div class="list-group list-group-flush rounded">
+                    ${artistsList.map((a, idx) => `
+                      <button type="button" class="list-group-item list-group-item-action bg-transparent text-white border-secondary artist-modal-item py-3" data-artist="${encodeURIComponent(a)}" data-userid="${idx === 0 ? uId || "" : ""}">
+                        ${escapeHTML(a)}
+                      </button>
+                    `).join("")}
+                  </div>
+                `;
+                artistsModal.show();
+                return;
+              }
+
+              if (window.mlAudio) {
+                window.mlAudio.pause();
+                window.mlAudio.src = "";
+              }
+              document.body.classList.remove('minlisten-active');
+
+              loadView({
+                type: "artist_songs",
+                param: rawArtist,
+                sort: "album_asc",
+                filter_user_id: uId,
+                artist_name: "",
+                activeTab: "minlisten-tab"
+              });
+              return;
+            }
+
+            const favBtn = e.target.closest('.ml-btn-fav');
+            if (favBtn) {
+              e.stopPropagation();
+              toggleFavorite(parseInt(favBtn.dataset.id, 10));
+              const icon = favBtn.querySelector('i');
+              const wasActive = favBtn.classList.toggle('text-danger');
+              icon.className = wasActive ? 'bi bi-heart-fill' : 'bi bi-heart';
+              return;
+            }
+
+            const commentBtn = e.target.closest('.ml-btn-comment');
+            if (commentBtn) {
+              e.stopPropagation();
+              openCommentsModal(parseInt(commentBtn.dataset.id, 10));
+              return;
+            }
+
+            const shareBtn = e.target.closest('.ml-btn-share');
+            if (shareBtn) {
+              e.stopPropagation();
+              showShareModal('song', shareBtn.dataset.id, shareBtn.dataset.title);
+              return;
+            }
+
+            const fullBtn = e.target.closest('.ml-btn-full');
+            if (fullBtn) {
+              e.stopPropagation();
+              const songId = parseInt(fullBtn.dataset.id, 10);
+              if (window.mlAudio) {
+                window.mlAudio.pause();
+                window.mlAudio.src = "";
+              }
+              document.body.classList.remove('minlisten-active');
+              loadView({ type: 'get_songs', param: '', sort: 'id_desc', filter_user_id: '', highlight: songId });
+              setTimeout(() => setQueueAndPlay(songId), 300);
+              return;
+            }
+
+            const editBtn = e.target.closest('.ml-btn-edit');
+            if (editBtn) {
+              e.stopPropagation();
+              window.openMinListenEditModal(
+                parseInt(editBtn.dataset.id, 10),
+                parseFloat(editBtn.dataset.start),
+                parseFloat(editBtn.dataset.dur),
+                parseFloat(editBtn.dataset.total)
+              );
+              return;
+            }
+
+            if (window.mlAudio) {
+              if (window.mlAudio.paused) {
+                window.mlAudio.play().catch(() => {});
+                if ('mediaSession' in navigator) navigator.mediaSession.playbackState = "playing";
+              } else {
+                window.mlAudio.pause();
+                if ('mediaSession' in navigator) navigator.mediaSession.playbackState = "paused";
+              }
+            }
+          });
+
+          if (window.mlObserver) window.mlObserver.disconnect();
+          const cards = viewport.querySelectorAll('.minlisten-card');
+
+          // Force play immediately on initial card without requiring a tap
+          const initialIndex = currentView.highlight !== undefined ? currentView.highlight : 0;
+          if (cards[initialIndex]) {
+            const firstCard = cards[initialIndex];
+            firstCard.classList.add('is-active');
+            const songId = firstCard.dataset.songId;
+            const start = parseFloat(firstCard.dataset.start) || 0;
+            const dur = parseFloat(firstCard.dataset.dur) || 60;
+            window.playMinListenClip(songId, start, dur, firstCard);
+
+            if (currentView.highlight !== undefined) {
+              setTimeout(() => {
+                firstCard.scrollIntoView({ behavior: 'instant', block: 'start' });
+              }, 50);
+            }
+          }
+
+          window.mlObserver = new IntersectionObserver((entries) => {
+            for (let entry of entries) {
+              if (entry.isIntersecting) {
+                const targetCard = entry.target;
+                if (!targetCard.classList.contains('is-active')) {
+                  cards.forEach(c => c.classList.remove('is-active'));
+                  targetCard.classList.add('is-active');
+
+                  const songId = targetCard.dataset.songId;
+                  const start = parseFloat(targetCard.dataset.start) || 0;
+                  const dur = parseFloat(targetCard.dataset.dur) || 60;
+
+                  window.playMinListenClip(songId, start, dur, targetCard);
+                }
+              }
+            }
+          }, { root: viewport, threshold: 0.60 });
+
+          cards.forEach(c => window.mlObserver.observe(c));
+          window.drawMinListenWaveforms();
+        };
+
+        window.playMinListenClip = (songId, startTime, duration, cardEl) => {
+          window.setupMinListenAudioGraph();
+          const audio = window.mlAudio;
+          if (!audio) return;
+
+          const progBar = cardEl.querySelector('.ml-progress');
+          const playPrompt = cardEl.querySelector('.minlisten-play-prompt');
+          audio.pause();
+
+          // Log MinListen view and history after 3 seconds of active playback
+          if (cardEl._mlLogTimer) clearTimeout(cardEl._mlLogTimer);
+          cardEl._mlLogTimer = setTimeout(() => {
+            if (typeof logPlay === "function") {
+              logPlay(songId, "minlisten");
+            }
+          }, 3000);
+
+          const hasClone = cardEl.dataset.hasClone === "1";
+          const bitrateQuery = (typeof preferredBitrate !== 'undefined' && preferredBitrate && preferredBitrate !== 'auto') 
+            ? `&bitrate=${encodeURIComponent(preferredBitrate)}` 
+            : '';
+            
+          const targetSrc = hasClone 
+            ? `?action=get_stream&id=${songId}&minlisten=1` 
+            : `?action=get_stream&id=${songId}${bitrateQuery}#t=${startTime}`;
+
+          audio.onloadedmetadata = null;
+          audio.ontimeupdate = null;
+          audio.preload = "auto";
+          
+          // Extract dominant color from cover to match music player
+          const coverImg = cardEl.querySelector('.minlisten-center-artwork img');
+          if (coverImg && coverImg.complete) {
+            if (typeof getAverageColor === 'function') {
+              cachedColor = getAverageColor(coverImg);
+            }
+          } else if (coverImg) {
+            coverImg.onload = () => {
+              if (typeof getAverageColor === 'function') {
+                cachedColor = getAverageColor(coverImg);
+              }
+            };
+          }
+
+          // SYNC OS/LOCK SCREEN NOTIFICATION PANEL
+          if ('mediaSession' in navigator) {
+            const title = cardEl.dataset.title || "MinListen Clip";
+            const artist = cardEl.dataset.artist || "Unknown Artist";
+            const album = cardEl.dataset.album || "MinListen";
+            const absCover = new URL(cardEl.dataset.cover || `?action=get_image&id=${songId}`, window.location.href).href;
+
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: title,
+              artist: artist,
+              album: album,
+              artwork: [
+                { src: absCover, sizes: "192x192", type: "image/webp" },
+                { src: absCover, sizes: "512x512", type: "image/webp" }
+              ]
+            });
+            navigator.mediaSession.playbackState = "playing";
+
+            navigator.mediaSession.setActionHandler("play", () => {
+              if (window.mlAudio) window.mlAudio.play();
+              navigator.mediaSession.playbackState = "playing";
+            });
+            navigator.mediaSession.setActionHandler("pause", () => {
+              if (window.mlAudio) window.mlAudio.pause();
+              navigator.mediaSession.playbackState = "paused";
+            });
+            navigator.mediaSession.setActionHandler("nexttrack", () => {
+              const currentCard = document.querySelector('.minlisten-card.is-active');
+              if (currentCard && currentCard.nextElementSibling) {
+                currentCard.nextElementSibling.scrollIntoView({ behavior: 'smooth' });
+              }
+            });
+            navigator.mediaSession.setActionHandler("previoustrack", () => {
+              const currentCard = document.querySelector('.minlisten-card.is-active');
+              if (currentCard && currentCard.previousElementSibling) {
+                currentCard.previousElementSibling.scrollIntoView({ behavior: 'smooth' });
+              }
+            });
+          }
+
+          // ZERO-DELAY SEEK & PLAYBACK WITH AUTOPLAY WARNING PROMPT
+          const hidePrompt = () => {
+            if (playPrompt) {
+              playPrompt.classList.add('d-none');
+              playPrompt.classList.remove('d-flex');
+            }
+          };
+
+          const showPrompt = () => {
+            if (playPrompt) {
+              playPrompt.classList.remove('d-none');
+              playPrompt.classList.add('d-flex');
+              playPrompt.onclick = (e) => {
+                e.stopPropagation();
+                hidePrompt();
+                if (window.mlAudioCtx && window.mlAudioCtx.state === 'suspended') {
+                  window.mlAudioCtx.resume().catch(() => {});
+                }
+                audio.play().catch(() => {});
+              };
+            }
+          };
+
+          const seekAndStart = () => {
+            try {
+              audio.currentTime = hasClone ? 0 : startTime;
+            } catch (e) {}
+            if (window.mlAudioCtx && window.mlAudioCtx.state === 'suspended') {
+              window.mlAudioCtx.resume().catch(() => {});
+            }
+            audio.play()
+              .then(hidePrompt)
+              .catch((err) => {
+                showPrompt();
+              });
+          };
+
+          const srcCheck = hasClone ? `id=${songId}&minlisten=1` : `id=${songId}`;
+          if (!audio.src.includes(srcCheck)) {
+            audio.src = targetSrc;
+            audio.play()
+              .then(() => {
+                try { audio.currentTime = hasClone ? 0 : startTime; } catch(e) {}
+                hidePrompt();
+              })
+              .catch((err) => {
+                showPrompt();
+              });
+            audio.addEventListener('loadedmetadata', seekAndStart, { once: true });
+          } else {
+            seekAndStart();
+          }
+
+          audio.ontimeupdate = () => {
+            const currentOffset = audio.currentTime - startTime;
+            if (currentOffset >= duration || audio.currentTime < (startTime - 0.75)) {
+              audio.currentTime = startTime;
+              audio.play().catch(() => {});
+            }
+            const pct = Math.max(0, Math.min(100, (currentOffset / duration) * 100));
+            if (progBar) progBar.style.width = `${pct}%`;
+          };
+        };
+
+        window.openMinListenEditModal = (songId, currentStart, currentDur, totalDuration) => {
+          document.getElementById('ml-edit-song-id').value = songId;
+          const startSlider = document.getElementById('ml-edit-start');
+          const durSlider = document.getElementById('ml-edit-dur');
+          const startLabel = document.getElementById('ml-edit-start-label');
+          const durLabel = document.getElementById('ml-edit-dur-label');
+
+          const maxStart = Math.max(0, (totalDuration || 300) - 5);
+          startSlider.max = maxStart;
+          startSlider.value = currentStart;
+          durSlider.value = Math.min(60, currentDur);
+
+          startLabel.textContent = `${Math.round(currentStart)}s`;
+          durLabel.textContent = `${Math.round(durSlider.value)}s`;
+
+          const updateTimelineUI = () => {
+            startLabel.textContent = `${startSlider.value}s`;
+            durLabel.textContent = `${durSlider.value}s`;
+            const highlight = document.getElementById('ml-edit-timeline-highlight');
+            if (highlight) {
+              const totalDur = totalDuration || 300;
+              const leftPct = (parseFloat(startSlider.value) / totalDur) * 100;
+              const widthPct = (parseFloat(durSlider.value) / totalDur) * 100;
+              highlight.style.left = `${leftPct}%`;
+              highlight.style.width = `${widthPct}%`;
+            }
+          };
+          updateTimelineUI();
+
+          startSlider.oninput = updateTimelineUI;
+          durSlider.oninput = updateTimelineUI;
+
+          const previewBtn = document.getElementById('ml-edit-preview-btn');
+          previewBtn.onclick = () => {
+            window.setupMinListenAudioGraph();
+            const bitrateQuery = (typeof preferredBitrate !== 'undefined' && preferredBitrate && preferredBitrate !== 'auto') 
+              ? `&bitrate=${encodeURIComponent(preferredBitrate)}` 
+              : '';
+            window.mlAudio.src = `?action=get_stream&id=${songId}${bitrateQuery}`;
+            window.mlAudio.currentTime = parseFloat(startSlider.value);
+            window.mlAudio.play().catch(() => {});
+          };
+
+          const saveBtn = document.getElementById('ml-edit-save-btn');
+          saveBtn.onclick = async () => {
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            const res = await fetchData('?action=save_minlisten_clip', {
+              method: 'POST',
+              body: JSON.stringify({
+                song_id: songId,
+                start_time: parseFloat(startSlider.value),
+                duration: parseFloat(durSlider.value)
+              })
+            });
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Clip';
+
+            if (res && res.status === 'success') {
+              showToast(res.message, 'success');
+              bootstrap.Modal.getInstance(document.getElementById('minlisten-edit-modal')).hide();
+              loadView(currentView);
+            } else {
+              showToast(res?.message || 'Error saving clip', 'error');
+            }
+          };
+
+          bootstrap.Modal.getOrCreateInstance(document.getElementById('minlisten-edit-modal')).show();
+        };
+
         const init = async () => {
           // Fix: Prevent aggressive audio preloading from causing infinite network buffering spinners on an empty src
           audio.preload = "none";
