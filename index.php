@@ -1499,7 +1499,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'news') {
 }
 
 // MANGA API (?access=public_manga)
-if (isset($_GET['access']) && ($_GET['access'] === 'profiletree' || $_GET['access'] === 'public_manga')) {
+if (isset($_GET['access']) && $_GET['access'] === 'public_manga') {
   header('X-Frame-Options: SAMEORIGIN');
   header('X-Content-Type-Options: nosniff');
   header('Referrer-Policy: strict-origin-when-cross-origin');
@@ -9435,7 +9435,7 @@ if (!defined('DB_FILE')) {
   $active_db_name = (!empty($custom_db_cfg) && preg_match('/^[a-zA-Z0-9_\-\.]+\.(db|sqlite|sqlite3)$/i', $custom_db_cfg)) ? $custom_db_cfg : 'music.db';
   define('DB_FILE', __DIR__ . '/' . $active_db_name);
 }
-define('APP_VERSION', '13.8');
+define('APP_VERSION', '13.9');
 
 // Dynamically fetch custom page size limits and daily quotas from database
 $custom_page_size = 25;
@@ -44111,6 +44111,22 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
       exit;
     }
 
+    // BUMP SERVICE WORKER CACHE VERSION
+    if (isset($_POST['bump_sw_cache_version'])) {
+      $db = get_db();
+      $cur_ver = $db->query("SELECT value FROM site_settings WHERE key = 'pwa_sw_version'")->fetchColumn() ?: 'v31';
+      $num = (int)preg_replace('/[^0-9]/', '', (string)$cur_ver);
+      $new_ver = 'v' . ($num + 1);
+
+      $stmt = $db->prepare("INSERT INTO site_settings (key, value) VALUES ('pwa_sw_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      $stmt->execute([$new_ver]);
+
+      log_admin_activity($db, $_SESSION['admin_email'], "Bumped Service Worker cache version to {$new_ver}", 0);
+      $_SESSION['admin_flash_msg'] = "Service Worker cache version updated to {$new_ver}. Client browsers will invalidate old caches.";
+      header('Location: ?access=admin&page=pwa&tab=cache');
+      exit;
+    }
+
     // UPLOAD CUSTOM PWA APP ICON (Generates 512x512 and 192x192 PNGs)
     if (isset($_POST['upload_pwa_icon']) && !empty($_FILES['pwa_icon']['tmp_name'])) {
       $file = $_FILES['pwa_icon'];
@@ -49048,6 +49064,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // Seamless Admin Panel SPA Page Transition Router (Disabled for Drive)
             let adminNavSeq = 0;
+            let adminLoaderSafetyTimer = null;
 
             const showAdminLoader = () => {
               const overlay = document.getElementById('admin-loader-overlay');
@@ -49057,10 +49074,15 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                 requestAnimationFrame(() => {
                   overlay.style.opacity = '1';
                 });
+                clearTimeout(adminLoaderSafetyTimer);
+                adminLoaderSafetyTimer = setTimeout(() => {
+                  hideAdminLoader();
+                }, 6000);
               }
             };
 
             const hideAdminLoader = () => {
+              clearTimeout(adminLoaderSafetyTimer);
               const overlay = document.getElementById('admin-loader-overlay');
               if (overlay) {
                 overlay.style.opacity = '0';
@@ -49089,6 +49111,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
                 // If redirected to login page or container missing, perform clean window location transition
                 if (!newContent) {
+                  hideAdminLoader();
                   window.location.href = url;
                   return;
                 }
@@ -49161,11 +49184,13 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
               if (href.includes('access=admin') && !href.includes('logout=1') && link.target !== '_blank' && !link.hasAttribute('download')) {
                 e.preventDefault();
                 const adminSidebarEl = document.getElementById('admin-sidebar');
-                if (adminSidebarEl) {
-                  const bsOffcanvas = bootstrap.Offcanvas.getInstance(adminSidebarEl);
-                  if (bsOffcanvas) {
-                    bsOffcanvas.hide();
-                  }
+                if (adminSidebarEl && typeof bootstrap !== 'undefined' && bootstrap.Offcanvas) {
+                  try {
+                    const bsOffcanvas = bootstrap.Offcanvas.getInstance(adminSidebarEl);
+                    if (bsOffcanvas) {
+                      bsOffcanvas.hide();
+                    }
+                  } catch (e) {}
                 }
                 loadAdminPage(href, true);
               }
@@ -49781,7 +49806,10 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
         <?php elseif (($_GET['page'] ?? '') === 'error_logs'): ?>
           <?php
-            $log_path = ini_get('error_log') ?: (__DIR__ . '/php_error.log');
+            $raw_log_cfg = (string)ini_get('error_log');
+            $log_path = (!empty($raw_log_cfg) && $raw_log_cfg !== 'syslog' && file_exists($raw_log_cfg))
+              ? $raw_log_cfg
+              : (__DIR__ . '/php_error.log');
             $search_log = trim($_GET['search'] ?? '');
             $severity_filter = $_GET['severity'] ?? '';
 
@@ -50159,7 +50187,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     <span class="text-secondary small fw-bold text-uppercase">App Version</span>
                     <span class="text-info"><i class="bi bi-cpu-fill fs-5"></i></span>
                   </div>
-                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.8'; ?></div>
+                  <div class="fs-4 fw-bold text-white">v<?php echo defined('APP_VERSION') ? APP_VERSION : '13.9'; ?></div>
                   <small class="text-secondary">Core engine release</small>
                 </div>
               </div>
@@ -52498,6 +52526,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'user_drive_management'): ?>
           <?php
             $db = get_db();
+            try {
+              $u_cols = $db->query("PRAGMA table_info(users)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('drive_quota', $u_cols)) {
+                $db->exec("ALTER TABLE users ADD COLUMN drive_quota INTEGER DEFAULT 2147483648;");
+              }
+              if (!in_array('banned', $u_cols)) {
+                $db->exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;");
+              }
+              if (!in_array('status', $u_cols)) {
+                $db->exec("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'user';");
+              }
+            } catch (\Throwable $e) {}
             $active_quota_tab = $_GET['tab'] ?? 'directory';
             $udm_search = trim($_GET['search'] ?? '');
             $udm_sort = $_GET['sort'] ?? 'quota_desc';
@@ -53050,6 +53090,20 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'reports'): ?>
           <?php 
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS user_reports (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  reporter_id INTEGER,
+                  reported_id INTEGER,
+                  reason TEXT,
+                  status TEXT DEFAULT 'pending',
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+                  FOREIGN KEY (reported_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+              ");
+            } catch (\Throwable $e) {}
             $active_report_tab = $_GET['tab'] ?? 'pending';
             $rep_search = trim($_GET['search'] ?? '');
             $rep_sort = $_GET['sort'] ?? 'newest';
@@ -53859,6 +53913,18 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'appeals'): ?>
           <?php 
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS ban_appeals (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  appeal_text TEXT,
+                  status TEXT DEFAULT 'pending',
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+              ");
+            } catch (\Throwable $e) {}
             $active_appeal_tab = $_GET['tab'] ?? 'pending';
             $app_search = trim($_GET['search'] ?? '');
             $app_sort = $_GET['sort'] ?? 'newest';
@@ -54063,6 +54129,24 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'songs'): ?>
           <?php 
             $db = get_db();
+            try {
+              $m_cols = $db->query("PRAGMA table_info(music)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('banned', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN banned INTEGER DEFAULT 0;");
+              if (!in_array('is_private', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN is_private INTEGER DEFAULT 0;");
+              if (!in_array('is_collaborative', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN is_collaborative INTEGER DEFAULT 1;");
+              if (!in_array('bitrate', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER DEFAULT 0;");
+              if (!in_array('lyrics', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN lyrics TEXT;");
+              if (!in_array('replaygain', $m_cols)) $db->exec("ALTER TABLE music ADD COLUMN replaygain REAL DEFAULT 0;");
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS play_counts (
+                  user_id INTEGER NOT NULL,
+                  song_id INTEGER NOT NULL,
+                  play_count INTEGER DEFAULT 1,
+                  last_played TEXT,
+                  PRIMARY KEY (user_id, song_id)
+                );
+              ");
+            } catch (\Throwable $e) {}
             $active_song_tab = $_GET['tab'] ?? 'catalog';
             $search_songs = trim($_GET['search'] ?? ''); 
             $sort_songs = $_GET['sort'] ?? 'newest';
@@ -54869,6 +54953,12 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'bitrate_management'): ?>
           <?php
             $db = get_db();
+            try {
+              $m_cols = $db->query("PRAGMA table_info(music)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('bitrate', $m_cols)) {
+                $db->exec("ALTER TABLE music ADD COLUMN bitrate INTEGER DEFAULT 0;");
+              }
+            } catch (\Throwable $e) {}
             $ffmpeg_bin = get_ffmpeg_binary();
             $has_ffmpeg = (bool)$ffmpeg_bin;
 
@@ -55320,6 +55410,71 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'artworks'): ?>
           <?php
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS artworks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  title TEXT NOT NULL,
+                  description TEXT DEFAULT '',
+                  tags TEXT DEFAULT '',
+                  parodies TEXT DEFAULT '',
+                  characters TEXT DEFAULT '',
+                  type TEXT DEFAULT 'illust',
+                  rating TEXT DEFAULT 'all',
+                  is_ai INTEGER DEFAULT 0,
+                  phash TEXT DEFAULT '',
+                  view_count INTEGER DEFAULT 0,
+                  like_count INTEGER DEFAULT 0,
+                  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS artwork_images (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  artwork_id INTEGER NOT NULL,
+                  file_name TEXT NOT NULL,
+                  sort_order INTEGER DEFAULT 0,
+                  file_size INTEGER DEFAULT 0,
+                  width INTEGER DEFAULT 0,
+                  height INTEGER DEFAULT 0,
+                  mime_type TEXT DEFAULT 'image/webp',
+                  phash TEXT DEFAULT '',
+                  FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS tags (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  artwork_id INTEGER NOT NULL,
+                  tag_name TEXT NOT NULL,
+                  FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS likes (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  artwork_id INTEGER NOT NULL,
+                  user_id INTEGER NOT NULL,
+                  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  UNIQUE(artwork_id, user_id),
+                  FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS comments (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  artwork_id INTEGER NOT NULL,
+                  user_id INTEGER NOT NULL,
+                  parent_id INTEGER DEFAULT NULL,
+                  comment TEXT NOT NULL,
+                  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_artworks_user ON artworks(user_id);
+                CREATE INDEX IF NOT EXISTS idx_artworks_type_rating ON artworks(type, rating);
+                CREATE INDEX IF NOT EXISTS idx_artwork_images_art ON artwork_images(artwork_id);
+              ");
+              foreach ([MUSIC_DIR . '/uploads/artworks', MUSIC_DIR . '/uploads/artworks/thumbs', MUSIC_DIR . '/phpmusicpost/artworks', MUSIC_DIR . '/phpmusicpost/artworks/thumbs'] as $dir) {
+                if (!is_dir($dir)) @mkdir($dir, 0755, true);
+              }
+            } catch (\Throwable $e) {}
             $active_art_tab = $_GET['tab'] ?? 'gallery';
             $search_artworks = trim($_GET['search'] ?? '');
             $sort_artworks = $_GET['sort'] ?? 'newest';
@@ -56264,6 +56419,27 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'news_management'): ?>
           <?php
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS news_articles (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  title TEXT NOT NULL,
+                  slug TEXT UNIQUE,
+                  category TEXT DEFAULT 'Announcements',
+                  summary TEXT,
+                  content TEXT NOT NULL,
+                  cover_image TEXT,
+                  author_id INTEGER DEFAULT 0,
+                  is_pinned INTEGER DEFAULT 0,
+                  status TEXT DEFAULT 'published',
+                  views INTEGER DEFAULT 0,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_news_status ON news_articles(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_news_pinned ON news_articles(is_pinned, created_at);
+              ");
+            } catch (\Throwable $e) {}
             $nm_search = trim($_GET['search'] ?? '');
             $nm_cat = trim($_GET['cat'] ?? '');
             $nm_status = trim($_GET['status'] ?? '');
@@ -57452,6 +57628,35 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'phpboard'): ?>
           <?php
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS phpboard_threads (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  channel TEXT NOT NULL,
+                  user_id INTEGER DEFAULT NULL,
+                  artist_name TEXT DEFAULT NULL,
+                  password_hash TEXT DEFAULT NULL,
+                  subject TEXT,
+                  comment TEXT NOT NULL,
+                  image TEXT,
+                  image_orig_name TEXT,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  last_reply_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS phpboard_replies (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  thread_id INTEGER NOT NULL,
+                  user_id INTEGER DEFAULT NULL,
+                  artist_name TEXT DEFAULT NULL,
+                  password_hash TEXT DEFAULT NULL,
+                  comment TEXT NOT NULL,
+                  image TEXT,
+                  image_orig_name TEXT,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (thread_id) REFERENCES phpboard_threads(id) ON DELETE CASCADE
+                );
+              ");
+            } catch (\Throwable $e) {}
             $board_data = get_phpboard_channels_data($db);
             $pb_tab = $_GET['tab'] ?? 'channels';
             $pb_search = trim($_GET['search'] ?? '');
@@ -58034,6 +58239,30 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'comments'): ?>
           <?php
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS comments (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  artwork_id INTEGER NOT NULL,
+                  user_id INTEGER NOT NULL,
+                  parent_id INTEGER DEFAULT NULL,
+                  comment TEXT NOT NULL,
+                  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                  FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE,
+                  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS artworks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  title TEXT NOT NULL,
+                  description TEXT DEFAULT '',
+                  tags TEXT DEFAULT '',
+                  type TEXT DEFAULT 'illust',
+                  rating TEXT DEFAULT 'all',
+                  created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                );
+              ");
+            } catch (\Throwable $e) {}
             $cm_tab = $_GET['tab'] ?? 'artworks';
             $cm_search = trim($_GET['search'] ?? '');
             $cm_sort = $_GET['sort'] ?? 'newest';
@@ -58273,6 +58502,19 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php elseif (($_GET['page'] ?? '') === 'logs'): ?>
           <?php 
             $db = get_db();
+            try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS admin_logs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  admin_email TEXT,
+                  action TEXT,
+                  target_user_id INTEGER DEFAULT 0,
+                  target_email TEXT DEFAULT '',
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_admin_logs_created ON admin_logs(created_at);
+              ");
+            } catch (\Throwable $e) {}
             $active_log_tab = $_GET['tab'] ?? 'logs';
             $log_search = trim($_GET['search'] ?? '');
             $log_sort = $_GET['sort'] ?? 'newest';
@@ -59271,8 +59513,23 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           <?php
             $db = get_db();
 
-            // Ensure api_logs and quota columns are guaranteed on GET requests
+            // Ensure api_keys, api_logs, and quota columns are guaranteed on GET requests
             try {
+              $db->exec("
+                CREATE TABLE IF NOT EXISTS api_keys (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER DEFAULT 0,
+                  token TEXT UNIQUE,
+                  name TEXT,
+                  status TEXT DEFAULT 'active',
+                  uses INTEGER DEFAULT 0,
+                  reset_month TEXT,
+                  expires_at DATETIME,
+                  quota_limit INTEGER DEFAULT 1000,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+              ");
               $api_cols = $db->query("PRAGMA table_info(api_keys);")->fetchAll(PDO::FETCH_COLUMN, 1);
               if (!in_array('quota_limit', $api_cols)) {
                 $db->exec("ALTER TABLE api_keys ADD COLUMN quota_limit INTEGER DEFAULT 1000;");
@@ -60176,7 +60433,7 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
 
             // 1. Memory-Safe Local Codebase Checksum Calculation
             $local_size = @filesize(__FILE__) ?: 0;
-            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.8';
+            $local_version = defined('APP_VERSION') ? APP_VERSION : '13.9';
             $local_hash = @hash_file('sha256', __FILE__) ?: '';
             $local_md5 = @hash_file('md5', __FILE__) ?: '';
             $local_crc = @hash_file('crc32b', __FILE__) ? strtoupper(hash_file('crc32b', __FILE__)) : '—';
@@ -83082,6 +83339,21 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         <?php else: ?>
           <?php
             $db = get_db();
+            try {
+              $u_cols = $db->query("PRAGMA table_info(users)")->fetchAll(PDO::FETCH_COLUMN, 1);
+              if (!in_array('twitter', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN twitter TEXT DEFAULT '';");
+              if (!in_array('website', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN website TEXT DEFAULT '';");
+              if (!in_array('last_active', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN last_active DATETIME DEFAULT CURRENT_TIMESTAMP;");
+              if (!in_array('bio', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT '';");
+              if (!in_array('dates', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN dates TEXT DEFAULT '';");
+              if (!in_array('gender', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT '';");
+              if (!in_array('place', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN place TEXT DEFAULT '';");
+              if (!in_array('drive_quota', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN drive_quota INTEGER DEFAULT 2147483648;");
+              if (!in_array('rhythm_strikes', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN rhythm_strikes INTEGER DEFAULT 0;");
+              if (!in_array('status', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'user';");
+              if (!in_array('settings', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN settings TEXT DEFAULT '';");
+              if (!in_array('created_at', $u_cols)) $db->exec("ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP;");
+            } catch (\Throwable $e) {}
             $active_user_tab = $_GET['tab'] ?? 'directory';
             $search = trim($_GET['search'] ?? ''); 
             $sort_admin = $_GET['sort'] ?? ($active_user_tab === 'verification' ? 'pending' : 'newest');
@@ -83496,6 +83768,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                                       <button type="button" class="dropdown-item item-info" onclick="viewRhythmHistory(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
                                         <i class="bi bi-controller text-info"></i> View Rhythm History
                                       </button>
+                                      <button type="button" class="dropdown-item item-info" onclick="viewUserAnalytics(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars(addslashes($user['artist'])); ?>')">
+                                        <i class="bi bi-graph-up-arrow text-info"></i> View Analytics
+                                      </button>
                                     </form>
                                   </li>
                                 </ul>
@@ -83657,6 +83932,9 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
                     </a>
                     <button type="button" class="admin-btn-pill flex-grow-1 justify-content-center" style="height: 34px; color: #4ade80; border-color: color-mix(in srgb, #22c55e 30%, transparent);" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewRhythmHistory(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
                       <i class="bi bi-controller"></i> Rhythm Scores
+                    </button>
+                    <button type="button" class="admin-btn-pill flex-grow-1 justify-content-center" style="height: 34px; color: #38bdf8; border-color: color-mix(in srgb, #06b6d4 30%, transparent);" onclick="bootstrap.Modal.getInstance(document.getElementById('user-details-modal')).hide(); viewUserAnalytics(${userData.id}, '${userData.artist.replace(/'/g, "\\'")}');">
+                      <i class="bi bi-graph-up-arrow"></i> Analytics
                     </button>
                   </div>
                 </div>
@@ -84113,6 +84391,26 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
         </div>
       </div>
     </div>
+
+    <!-- User Analytics Modal -->
+    <div class="modal fade" id="admin-user-analytics-modal" tabindex="-1">
+      <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered modal-lg">
+        <div class="modal-content" style="background-color: #0d0d12; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;">
+          <div class="modal-header border-0 pb-2" style="border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;">
+            <div class="d-flex align-items-center gap-2">
+              <div style="width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, #0284c7, #0369a1); display: flex; align-items: center; justify-content: center; color: #fff;">
+                <i class="bi bi-graph-up-arrow"></i>
+              </div>
+              <h5 class="modal-title text-white fw-bold m-0" style="font-size: 1.05rem;">User Analytics: <span id="admin-ua-name" class="text-info font-monospace"></span></h5>
+            </div>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-light p-4" id="admin-ua-body">
+            <div class="text-center py-4"><div class="spinner-border text-info"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <script>
       function openPermissionsModal(id, name, permsJson) {
         document.getElementById('perm-user-id').value = id;
@@ -84232,6 +84530,150 @@ if (isset($_GET['access']) && $_GET['access'] === 'admin') {
           }
         } catch (e) {
           if (currentRhPage === 1) body.innerHTML = '<div class="text-center text-danger py-4">Failed to load history.</div>';
+        }
+      }
+
+      let userAnalyticsChartInstance = null;
+
+      async function viewUserAnalytics(userId, artistName) {
+        document.getElementById('admin-ua-name').textContent = artistName;
+        const body = document.getElementById('admin-ua-body');
+        body.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-info"></div><div class="text-secondary small mt-2 font-monospace">Calculating user analytics...</div></div>';
+        
+        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('admin-user-analytics-modal'));
+        modal.show();
+
+        try {
+          const res = await fetch(`?action=get_user_analytics&user_id=${userId}`);
+          const data = await res.json();
+
+          if (!res.ok || data.status !== 'success') {
+            body.innerHTML = `<div class="alert alert-danger">${data.message || 'Failed to fetch analytics.'}</div>`;
+            return;
+          }
+
+          const s = data.summary;
+          const u = data.user;
+          const formatNum = (n) => Number(n || 0).toLocaleString();
+
+          let topTracksHtml = '<div class="text-secondary small text-center py-3">No track playback data recorded yet.</div>';
+          if (data.top_tracks && data.top_tracks.length > 0) {
+            topTracksHtml = data.top_tracks.map((t, idx) => `
+              <div class="d-flex align-items-center justify-content-between p-2 rounded-3 bg-black border border-secondary border-opacity-25 mb-1" style="font-size: 0.82rem;">
+                <div class="d-flex align-items-center gap-2 min-width-0 flex-grow-1 me-2">
+                  <span class="badge bg-danger bg-opacity-25 text-danger font-monospace">#${idx + 1}</span>
+                  <div class="text-truncate">
+                    <strong class="text-white text-truncate d-block">${t.title}</strong>
+                    <span class="text-secondary font-monospace" style="font-size: 0.72rem;">${t.album || 'Single'} &bull; ${Math.floor(t.duration / 60)}:${String(t.duration % 60).padStart(2, '0')}</span>
+                  </div>
+                </div>
+                <span class="admin-badge admin-badge-info font-monospace flex-shrink-0">${formatNum(t.total_plays)} streams</span>
+              </div>
+            `).join('');
+          }
+
+          body.innerHTML = `
+            <!-- Top KPI Cards -->
+            <div class="row g-2 mb-4">
+              <div class="col-6 col-md-3">
+                <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 text-center h-100">
+                  <span class="text-secondary small fw-bold text-uppercase d-block" style="font-size: 0.65rem;">Total Streams</span>
+                  <div class="fs-4 fw-bold text-white mt-1 font-monospace">${formatNum(s.total_streams)}</div>
+                  <small class="text-secondary font-monospace" style="font-size: 0.7rem;">across ${formatNum(s.total_songs)} songs</small>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 text-center h-100">
+                  <span class="text-secondary small fw-bold text-uppercase d-block" style="font-size: 0.65rem;">Unique Listeners</span>
+                  <div class="fs-4 fw-bold text-info mt-1 font-monospace">${formatNum(s.unique_listeners)}</div>
+                  <small class="text-secondary font-monospace" style="font-size: 0.7rem;">listener profiles</small>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 text-center h-100">
+                  <span class="text-secondary small fw-bold text-uppercase d-block" style="font-size: 0.65rem;">Followers</span>
+                  <div class="fs-4 fw-bold text-success mt-1 font-monospace">${formatNum(s.followers_count)}</div>
+                  <small class="text-secondary font-monospace" style="font-size: 0.7rem;">in user network</small>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 text-center h-100">
+                  <span class="text-secondary small fw-bold text-uppercase d-block" style="font-size: 0.65rem;">Playlist Adds</span>
+                  <div class="fs-4 fw-bold text-warning mt-1 font-monospace">${formatNum(s.playlist_features)}</div>
+                  <small class="text-secondary font-monospace" style="font-size: 0.7rem;">user playlists</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- 14-Day Performance Trend Chart -->
+            <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25 mb-4">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="text-white fw-bold m-0 d-flex align-items-center gap-2" style="font-size: 0.88rem;">
+                  <i class="bi bi-graph-up text-danger"></i> 14-Day Playback Growth Curve
+                </h6>
+                <span class="admin-badge admin-badge-primary">Streams over Time</span>
+              </div>
+              <div class="position-relative" style="height: 190px;">
+                <canvas id="userAnalyticsChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Top Performing Songs Section -->
+            <div class="p-3 rounded-4 bg-black border border-secondary border-opacity-25">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="text-white fw-bold m-0 d-flex align-items-center gap-2" style="font-size: 0.88rem;">
+                  <i class="bi bi-fire text-warning"></i> Top Performing Songs
+                </h6>
+                <span class="text-secondary font-monospace small" style="font-size: 0.72rem;">Ranked by play count</span>
+              </div>
+              <div>${topTracksHtml}</div>
+            </div>
+          `;
+
+          // Initialize Chart.js
+          const chartCanvas = document.getElementById('userAnalyticsChart');
+          if (chartCanvas && typeof Chart !== 'undefined') {
+            if (userAnalyticsChartInstance instanceof Chart) {
+              userAnalyticsChartInstance.destroy();
+            }
+            userAnalyticsChartInstance = new Chart(chartCanvas.getContext('2d'), {
+              type: 'line',
+              data: {
+                labels: data.chart.labels,
+                datasets: [{
+                  label: 'Daily Plays',
+                  data: data.chart.data,
+                  borderColor: '#ff0044',
+                  backgroundColor: 'rgba(255, 0, 68, 0.15)',
+                  borderWidth: 2,
+                  fill: true,
+                  tension: 0.35,
+                  pointRadius: 3,
+                  pointHoverRadius: 6
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                  y: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                    ticks: { precision: 0, color: '#888' }
+                  },
+                  x: {
+                    grid: { display: false },
+                    ticks: { color: '#888' }
+                  }
+                },
+                plugins: {
+                  legend: { display: false }
+                }
+              }
+            });
+          }
+        } catch (err) {
+          body.innerHTML = `<div class="alert alert-danger">Error fetching user analytics: ${err.message}</div>`;
         }
       }
     </script>
@@ -84895,6 +85337,9 @@ function init_db($db) {
     if (!in_array('place', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN place TEXT DEFAULT '';");
     if (!in_array('profile_background', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background BLOB;");
     if (!in_array('profile_background_type', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN profile_background_type TEXT;");
+    if (!in_array('twitter', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN twitter TEXT DEFAULT '';");
+    if (!in_array('website', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN website TEXT DEFAULT '';");
+    if (!in_array('last_active', $users_columns)) $db->exec("ALTER TABLE users ADD COLUMN last_active DATETIME DEFAULT CURRENT_TIMESTAMP;");
   }
 
   $music_columns = $db->query("PRAGMA table_info(music);")->fetchAll(PDO::FETCH_COLUMN, 1);
@@ -85240,6 +85685,61 @@ function init_db($db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (thread_id) REFERENCES phpboard_threads(id) ON DELETE CASCADE,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS artworks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      tags TEXT DEFAULT '',
+      parodies TEXT DEFAULT '',
+      characters TEXT DEFAULT '',
+      type TEXT DEFAULT 'illust',
+      rating TEXT DEFAULT 'all',
+      is_ai INTEGER DEFAULT 0,
+      phash TEXT DEFAULT '',
+      view_count INTEGER DEFAULT 0,
+      like_count INTEGER DEFAULT 0,
+      created_at INTEGER DEFAULT (strftime('%s', 'now')),
+      updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS artwork_images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artwork_id INTEGER NOT NULL,
+      file_name TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      file_size INTEGER DEFAULT 0,
+      width INTEGER DEFAULT 0,
+      height INTEGER DEFAULT 0,
+      mime_type TEXT DEFAULT 'image/webp',
+      phash TEXT DEFAULT '',
+      FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS tags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artwork_id INTEGER NOT NULL,
+      tag_name TEXT NOT NULL,
+      FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS likes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artwork_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      created_at INTEGER DEFAULT (strftime('%s', 'now')),
+      UNIQUE(artwork_id, user_id),
+      FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      artwork_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      parent_id INTEGER DEFAULT NULL,
+      comment TEXT NOT NULL,
+      created_at INTEGER DEFAULT (strftime('%s', 'now')),
+      FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   ");
 
@@ -92041,6 +92541,131 @@ if (isset($_GET['action'])) {
         $stats[$key] = $db->query($query)->fetchColumn() ?: 0;
       }
       send_json(['stats' => $stats]);
+      break;
+
+    case 'get_user_analytics':
+      $target_uid = (int)($_GET['user_id'] ?? $_GET['id'] ?? 0);
+      if ($target_uid <= 0) {
+        http_response_code(400);
+        send_json(['status' => 'error', 'message' => 'Invalid user ID.']);
+      }
+
+      $can_view = ($user_id > 0 && ($user_id === $target_uid || $is_admin == 1 || $is_super_admin == 1));
+      if (!$can_view && !empty($_SESSION['admin_logged_in'])) {
+        $can_view = true;
+      }
+      if (!$can_view) {
+        http_response_code(403);
+        send_json(['status' => 'error', 'message' => 'Unauthorized to view this user analytics.']);
+      }
+
+      $stmt_u = $db->prepare("SELECT id, artist, email, verified, created_at FROM users WHERE id = ?");
+      $stmt_u->execute([$target_uid]);
+      $u_info = $stmt_u->fetch(PDO::FETCH_ASSOC);
+      if (!$u_info) {
+        http_response_code(404);
+        send_json(['status' => 'error', 'message' => 'User not found.']);
+      }
+
+      $stmt_songs = $db->prepare("SELECT COUNT(*) FROM music WHERE user_id = ?");
+      $stmt_songs->execute([$target_uid]);
+      $total_songs = (int)$stmt_songs->fetchColumn();
+
+      $stmt_plays = $db->prepare("
+        SELECT COALESCE(SUM(pc.play_count), 0) as total_streams,
+               COUNT(DISTINCT pc.user_id) as unique_listeners
+        FROM play_counts pc
+        JOIN music m ON pc.song_id = m.id
+        WHERE m.user_id = ?
+      ");
+      $stmt_plays->execute([$target_uid]);
+      $play_summary = $stmt_plays->fetch(PDO::FETCH_ASSOC) ?: ['total_streams' => 0, 'unique_listeners' => 0];
+
+      $profile_views = 0;
+      $link_clicks = 0;
+      try {
+        $stmt_pt = $db->prepare("SELECT views_count FROM pt_profiles WHERE user_id = ?");
+        $stmt_pt->execute([$target_uid]);
+        $profile_views = (int)($stmt_pt->fetchColumn() ?: 0);
+
+        $stmt_links = $db->prepare("SELECT COALESCE(SUM(click_count), 0) FROM pt_links WHERE user_id = ?");
+        $stmt_links->execute([$target_uid]);
+        $link_clicks = (int)($stmt_links->fetchColumn() ?: 0);
+      } catch (\Throwable $e) {}
+
+      $followers_count = (int)($db->query("SELECT COUNT(*) FROM follows WHERE following_id = {$target_uid}")->fetchColumn() ?: 0);
+      $playlist_features = (int)($db->query("
+        SELECT COUNT(DISTINCT ps.playlist_id) 
+        FROM playlist_songs ps 
+        JOIN music m ON ps.song_id = m.id 
+        WHERE m.user_id = {$target_uid}
+      ")->fetchColumn() ?: 0);
+
+      $rhythm_stats = ['total_plays' => 0, 'highest_score' => 0];
+      try {
+        $stmt_rh = $db->prepare("
+          SELECT COUNT(rs.id) as total_plays, COALESCE(MAX(rs.score), 0) as highest_score
+          FROM rhythm_scores rs
+          JOIN music m ON rs.song_id = m.id
+          WHERE m.user_id = ?
+        ");
+        $stmt_rh->execute([$target_uid]);
+        $rhythm_stats = $stmt_rh->fetch(PDO::FETCH_ASSOC) ?: $rhythm_stats;
+      } catch (\Throwable $e) {}
+
+      $daily_trend = [];
+      for ($i = 13; $i >= 0; $i--) {
+        $d = date('Y-m-d', strtotime("-{$i} days"));
+        $daily_trend[$d] = 0;
+      }
+
+      try {
+        $stmt_trend = $db->prepare("
+          SELECT date(substr(replace(h.played_at, 'T', ' '), 1, 19)) as play_date, COUNT(h.id) as hits
+          FROM history h
+          JOIN music m ON h.song_id = m.id
+          WHERE m.user_id = ? AND h.played_at >= datetime('now', '-14 days')
+          GROUP BY play_date
+        ");
+        $stmt_trend->execute([$target_uid]);
+        while ($row = $stmt_trend->fetch(PDO::FETCH_ASSOC)) {
+          if (isset($daily_trend[$row['play_date']])) {
+            $daily_trend[$row['play_date']] = (int)$row['hits'];
+          }
+        }
+      } catch (\Throwable $e) {}
+
+      $stmt_top = $db->prepare("
+        SELECT m.id, m.title, m.album, m.duration, m.last_modified,
+               COALESCE((SELECT SUM(play_count) FROM play_counts WHERE song_id = m.id), 0) as total_plays
+        FROM music m
+        WHERE m.user_id = ?
+        ORDER BY total_plays DESC, m.id DESC
+        LIMIT 5
+      ");
+      $stmt_top->execute([$target_uid]);
+      $top_tracks = $stmt_top->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+      send_json([
+        'status' => 'success',
+        'user' => $u_info,
+        'summary' => [
+          'total_songs' => $total_songs,
+          'total_streams' => (int)$play_summary['total_streams'],
+          'unique_listeners' => (int)$play_summary['unique_listeners'],
+          'followers_count' => $followers_count,
+          'playlist_features' => $playlist_features,
+          'profile_views' => $profile_views,
+          'link_clicks' => $link_clicks,
+          'rhythm_plays' => (int)$rhythm_stats['total_plays'],
+          'rhythm_high_score' => (int)$rhythm_stats['highest_score']
+        ],
+        'chart' => [
+          'labels' => array_map(fn($d) => date('M j', strtotime($d)), array_keys($daily_trend)),
+          'data' => array_values($daily_trend)
+        ],
+        'top_tracks' => $top_tracks
+      ]);
       break;
 
     case 'search':
